@@ -1695,3 +1695,78 @@ header {
     grid-template-rows: 76px minmax(0, 1fr) 238px 0;
   }
 }
+
+/* iPhone portrait command deck
+   The selection portrait used to remain 48px wide inside a 36px grid column,
+   which let it overlap the readout beside it. Two action rows also need more
+   room than the previous 246px deck allowed. Keep the whole two-row deck
+   visible on tall phones and retain real vertical scrolling on shorter ones. */
+@media (orientation: portrait) and (max-width: 720px) {
+  .game-shell {
+    grid-template-rows: 78px minmax(250px, 1fr) 276px 0;
+  }
+
+  .command {
+    min-height: 0;
+    grid-template-rows: 50px minmax(0, 1fr);
+  }
+
+  .selection {
+    min-height: 0;
+    align-items: center;
+  }
+
+  .selection .portrait.command-art {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .command-center,
+  .command-context {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .selection-command-header {
+    min-height: 0;
+    grid-template-columns: 42px minmax(0, 1fr);
+    padding: 5px 8px;
+  }
+
+  .actions {
+    min-height: 0;
+    grid-auto-rows: 74px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+    padding: 7px 7px 12px !important;
+  }
+
+  .actions button {
+    height: 74px;
+  }
+
+  .pause-menu {
+    position: fixed;
+    z-index: 50;
+    place-items: start center;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+    padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+  }
+
+  .pause-menu .menu-panel {
+    margin: auto;
+  }
+}
+
+@media (orientation: portrait) and (max-width: 380px) {
+  .game-shell {
+    grid-template-rows: 76px minmax(220px, 1fr) 270px 0;
+  }
+}
