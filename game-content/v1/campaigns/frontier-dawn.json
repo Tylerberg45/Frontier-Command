@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "campaignId": "frontier-dawn",
+  "title": "Frontier Dawn",
+  "status": "planned",
+  "summary": "A commander rebuilds an isolated frontier network while uncovering the force behind coordinated attacks on the outer colonies.",
+  "acts": [
+    {
+      "actId": "first-contact",
+      "title": "First Contact",
+      "missions": [
+        { "missionId": "hold-the-line", "title": "Hold the Line", "type": "defense", "status": "outline" },
+        { "missionId": "blind-signal", "title": "Blind Signal", "type": "recon", "status": "outline" },
+        { "missionId": "broken-uplink", "title": "The Broken Uplink", "type": "assault", "status": "outline" }
+      ]
+    },
+    {
+      "actId": "the-long-march",
+      "title": "The Long March",
+      "missions": [
+        { "missionId": "moving-command", "title": "Moving Command", "type": "escort", "status": "outline" },
+        { "missionId": "two-ridges", "title": "Two Ridges", "type": "territory-control", "status": "outline" }
+      ]
+    }
+  ]
+}
