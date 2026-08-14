@@ -5304,13 +5304,6 @@ export default function Home() {
       return saveCommandProfile({ ...current, fireControlRank: rank + 1, spentPoints: current.spentPoints + 1 });
     });
   };
-  const refundFireControl = () => {
-    setCommandProfile((current) => {
-      const rank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, current.fireControlRank || 0));
-      if (rank < 1) return current;
-      return saveCommandProfile({ ...current, fireControlRank: rank - 1, spentPoints: Math.max(0, current.spentPoints - 1) });
-    });
-  };
   const productionButton = (type: Unit["type"]) => {
     const active = ui.production?.type === type;
     const coolingDown = !ui.production && ui.productionCooldown > 0;
@@ -5383,9 +5376,9 @@ export default function Home() {
                   <b>⌁ FIRE CONTROL</b>
                   <small>RANK {fireControlRank}/{FIRE_CONTROL_MAX_RANK} · 2% RATE/RANK</small>
                   <div>
-                    <button type="button" onClick={purchaseFireControl} disabled={commandProgress.points < 1 || fireControlRank >= FIRE_CONTROL_MAX_RANK}>SPEND</button>
-                    <button type="button" onClick={refundFireControl} disabled={fireControlRank < 1}>REFUND</button>
+                    <button type="button" onClick={purchaseFireControl} disabled={commandProgress.points < 1 || fireControlRank >= FIRE_CONTROL_MAX_RANK}>SPEND 1 POINT</button>
                   </div>
+                  <small className="command-path-refund">REFUND PROTOCOL UNLOCKS LATER</small>
                   <em>EFFECT PENDING</em>
                 </section>
                 <span>⬡ REINFORCED FRAMES<small>COMING NEXT</small></span>

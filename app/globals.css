@@ -196,8 +196,6 @@ body {
 .command-path.fire-control.unlocked b { color: #fff1b7; }
 .command-path div {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
   margin-top: 6px;
 }
 .command-path button {
@@ -222,6 +220,11 @@ body {
   font-size: 6px;
   font-style: normal;
   letter-spacing: .1em;
+}
+.command-path .command-path-refund {
+  margin-top: 6px;
+  color: #627d79;
+  font-size: 6px;
 }
 .home-panel button {
   cursor: pointer;
