@@ -459,7 +459,7 @@ function veteranRegenRate(unit: Unit) {
   return level >= 3 ? 0.02 : level >= 2 ? 0.01 : 0;
 }
 function unitCombatRange(unit: Unit) {
-  const stanceMultiplier = unit.type !== "worker" && !unit.garrisonedAt && unit.stance === "hold" ? SENTRY_RANGE_MULTIPLIER : 1;
+  const stanceMultiplier = unit.type === "trooper" && !unit.garrisonedAt && unit.stance === "hold" ? SENTRY_RANGE_MULTIPLIER : 1;
   return stats[unit.type].range * stanceMultiplier * (unit.garrisonedAt ? RELAY_RANGE_MULTIPLIER : 1);
 }
 function upkeepPerSecond(count: number) {
@@ -589,7 +589,7 @@ const unitRole = (type: Unit["type"]) =>
   type === "worker" ? "MINER" : type === "trooper" ? "ANTI-AIR INFANTRY" : type === "tank" ? "ANTI-INFANTRY ARMOR" : "ANTI-ARMOR AIR";
 const unitDuty = (unit: Unit) => {
   if (unit.garrisonedAt) return `INTEL RELAY GARRISON · +${Math.round((RELAY_RANGE_MULTIPLIER - 1) * 100)}% RANGE`;
-  if (unit.type !== "worker") return `${unitRole(unit.type)}${unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
+  if (unit.type !== "worker") return `${unitRole(unit.type)}${unit.type === "trooper" && unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
   if (unit.autoRepair) return `MAINTENANCE${unit.stance === "patrol" ? " PATROL" : ""}${unit.repairing ? " · REPAIRING" : ""}`;
   if (unit.workerMode === "construct") {
     const queued = unit.buildQueue?.length || (unit.buildTarget ? 1 : 0);
@@ -637,7 +637,7 @@ function normalizeUnits(units: Unit[]): Unit[] {
       buildQueue: Array.isArray(raw.buildQueue)
         ? raw.buildQueue.filter((id) => Number.isInteger(id))
         : Number.isInteger(raw.buildTarget) ? [raw.buildTarget!] : [],
-      stance: raw.stance === "hold" || raw.stance === "patrol" ? raw.stance : "pursue",
+      stance: raw.stance === "patrol" || (type === "trooper" && raw.stance === "hold") ? raw.stance : "pursue",
       patrol:
         raw.patrol && raw.patrol.a && raw.patrol.b
           ? {
@@ -2081,7 +2081,9 @@ export default function Home() {
     }
     if (name === "repair" || name === "patrol" || name === "move" || name === "move-engage" || name === "move-hq") return;
     if (name === "hold" || name === "pursue") {
-      selectedUnits.filter((unit) => unit.type !== "worker").forEach((unit) => {
+      selectedUnits.filter((unit) =>
+        unit.type !== "worker" && (name === "pursue" || unit.type === "trooper"),
+      ).forEach((unit) => {
         unit.stance = name;
         unit.retreating = false;
         unit.moveEngage = false;
@@ -2126,7 +2128,7 @@ export default function Home() {
           : mode === "set-rally" ? "Rally point transmitted."
           : mode === "move-hq" ? "Command Crawler destination transmitted."
           : mode === "move-engage" ? "Move + Engage transmitted — destination remains locked."
-            : mode === "move" ? "Direct Move transmitted — units will ignore threats."
+            : mode === "move" ? "Direct Move transmitted — units fire in range without chasing."
               : "Order transmitted.";
     }
     sync();
@@ -2180,7 +2182,9 @@ export default function Home() {
       const wantedMode: Game["mode"] = name === "move" || name === "move-engage" ? name : name === "repair" ? "repair" : "set-patrol-a";
       g.mode = wantedMode;
       g.message = name === "move" || name === "move-engage"
-        ? `${name === "move-engage" ? "MOVE + ENGAGE" : "DIRECT MOVE"}: choose a destination.`
+        ? name === "move-engage"
+          ? "MOVE + ENGAGE: choose a destination."
+          : "DIRECT MOVE: choose a destination · units fire in range without chasing."
         : name === "repair"
           ? "REPAIR ORDER: choose a damaged friendly unit or structure."
           : "PATROL: choose the first patrol point.";
@@ -2550,7 +2554,7 @@ export default function Home() {
       attacking
         ? "Attack order confirmed."
         : forcedTravel
-          ? g.mode === "move-engage" ? "MOVE + ENGAGE — destination locked; units will resume after nearby threats." : "DIRECT MOVE — destination locked; units ignore threats en route."
+          ? g.mode === "move-engage" ? "MOVE + ENGAGE — destination locked; units will resume after nearby threats." : "DIRECT MOVE — destination locked; units fire in range without chasing."
           : "Moving out.";
     if (forcedTravel) g.mode = "select";
     sync();
@@ -2835,7 +2839,9 @@ export default function Home() {
       if (!selectedUnits.length) g.message = "Select units before issuing a move order.";
       else {
         g.mode = name;
-        g.message = `${name === "move-engage" ? "MOVE + ENGAGE" : "DIRECT MOVE"}: choose a destination.`;
+        g.message = name === "move-engage"
+          ? "MOVE + ENGAGE: choose a destination."
+          : "DIRECT MOVE: choose a destination · units fire in range without chasing.";
       }
       sync();
       return;
@@ -2874,9 +2880,14 @@ export default function Home() {
       return;
     }
     if (name === "hold" || name === "pursue") {
-      if (!selectedCombat.length) g.message = "Select combat units before changing engagement behavior.";
+      const eligibleUnits = name === "hold"
+        ? selectedCombat.filter((unit) => unit.type === "trooper")
+        : selectedCombat;
+      if (!eligibleUnits.length) g.message = name === "hold"
+        ? "Sentry Mode is available only to Troopers."
+        : "Select combat units before changing engagement behavior.";
       else {
-        selectedCombat.forEach((unit) => {
+        eligibleUnits.forEach((unit) => {
           unit.stance = name;
           unit.retreating = false;
           unit.moveEngage = false;
@@ -2889,7 +2900,7 @@ export default function Home() {
         });
         g.matchStats.meaningfulActions++;
         g.message = name === "hold"
-          ? "SENTRY MODE — robots deploy as stationary turrets with 35% greater range."
+          ? "SENTRY MODE — Troopers deploy as stationary turrets with 35% greater range."
           : "PURSUE — units may chase visible enemies within their sight range.";
       }
       sync();
@@ -3099,7 +3110,12 @@ export default function Home() {
       }
       if (key === "x") return action("deselect");
       if (key === "h") {
-        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type !== "worker"))) return action("hold");
+        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type === "trooper"))) return action("hold");
+        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type !== "worker"))) {
+          g.message = "Sentry Mode is available only to Troopers.";
+          sync();
+          return;
+        }
         const hq = g.buildings.find((b) => b.team === "player" && b.type === "hq");
         if (hq) {
           g.selected = [hq.id];
@@ -3582,11 +3598,15 @@ export default function Home() {
         u.target = { ...(resumeAt === "a" ? u.patrol.a : u.patrol.b) };
         u.patrol.next = resumeAt === "a" ? "b" : "a";
       }
-      // Direct travel ignores threats. Engage travel may fight nearby targets,
-      // but keeps the original destination and resumes after combat.
+      // Direct travel never chases: it fires only at targets already inside
+      // weapon range while continuing toward the locked destination. Engage
+      // travel may break course to fight nearby targets, then resumes.
       const engagingWhileTraveling = Boolean(u.moveEngage && u.target);
-      if (u.type !== "worker" && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling)) {
-        const sight = u.stance === "hold"
+      const firingWhileDirectTravel = Boolean(!u.moveEngage && u.target && u.stance !== "patrol");
+      if (u.type !== "worker" && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling || firingWhileDirectTravel)) {
+        const sight = firingWhileDirectTravel
+          ? unitCombatRange(u)
+          : u.stance === "hold"
           ? unitCombatRange(u)
           : u.type === "drone" ? 320 : u.type === "tank" ? 280 : 230;
         const nearby = objs()
@@ -3607,23 +3627,37 @@ export default function Home() {
         if (nearby && (!target || targetIsBuilding)) {
           target = nearby;
           u.enemy = nearby.id;
-          if (!engagingWhileTraveling) u.target = undefined;
-          u.nav = undefined;
+          if (!engagingWhileTraveling && !firingWhileDirectTravel) u.target = undefined;
+          if (!firingWhileDirectTravel) u.nav = undefined;
         }
       }
       if (target) {
         const d = Math.hypot(target.x - u.x, target.y - u.y),
           s = stats[u.type],
           range = unitCombatRange(u);
-        u.facing = Math.atan2(target.y - u.y, target.x - u.x);
+        if (firingWhileDirectTravel && u.target) {
+          const travelDistance = Math.hypot(u.target.x - u.x, u.target.y - u.y);
+          const arrivalDistance = aiObjectiveTravel ? 58 : 4;
+          if (travelDistance < arrivalDistance) {
+            u.target = undefined;
+            u.nav = undefined;
+            u.moveEngage = false;
+          } else {
+            moveUnitToward(g, u, u.target, dt);
+          }
+        }
         if (d > range) {
-          if (u.stance === "hold" || u.garrisonedAt) {
+          if (firingWhileDirectTravel) {
+            u.enemy = undefined;
+            target = undefined;
+          } else if (u.stance === "hold" || u.garrisonedAt) {
             u.enemy = undefined;
           } else {
             const targetBuilding = g.buildings.find((b) => b.id === target.id);
             moveUnitToward(g, u, target, dt, targetBuilding?.id);
           }
         } else {
+          u.facing = Math.atan2(target.y - u.y, target.x - u.x);
           attackTimers.current[u.id] =
             (Number.isFinite(attackTimers.current[u.id])
               ? attackTimers.current[u.id]
@@ -4697,7 +4731,7 @@ export default function Home() {
         sel = g.selected.includes(u.id),
         player = u.team === "player",
         accent = player ? "#70e2ce" : "#f05b76",
-        sentryMode = u.type !== "worker" && u.stance === "hold";
+        sentryMode = u.type === "trooper" && u.stance === "hold";
       if (sel) {
         x.save();
         x.strokeStyle = "rgba(246, 211, 102, .78)";
@@ -5446,7 +5480,7 @@ export default function Home() {
     : ui.selectedWorkers > 0
       ? { key: "worker-orders", title: "WORKER ORDERS", text: "Place several construction wireframes before pressing Cancel; assigned Workers visit and build them in order. A Move order still leaves the Worker on guard instead of resuming mining." }
       : ui.selectedCombat > 0
-        ? { key: "combat-orders", title: "TRAVEL ORDERS", text: "Long-press open ground: slide up for Move + Engage or down for Direct Move. Both orders keep their destination; Move + Engage resumes after nearby threats." }
+        ? { key: "combat-orders", title: "TRAVEL ORDERS", text: "Long-press open ground: slide up for Move + Engage or down for Direct Move. Direct Move fires only in weapon range without chasing; Move + Engage breaks course to fight, then resumes." }
         : { key: "select-units", title: "FIELD TUTORIAL", text: "Select a Worker to construct, your HQ to train or research, or a completed Barracks to train combat units." };
   const showActiveTip = tutorialsEnabled && !homeOpen && !paused && !dismissedTips.includes(activeTip.key);
   const commandProgress = commandProfileProgress(commandProfile);
@@ -5689,7 +5723,7 @@ export default function Home() {
               onClick={() => commitTravelChoice(moveChooser.world, "direct")}
               role="menuitem"
             >
-              <i>↓</i><b>DIRECT MOVE</b><small>IGNORE THREATS</small>
+              <i>↓</i><b>DIRECT MOVE</b><small>FIRE IN RANGE · NO CHASE</small>
             </button>
           </div>
         )}
@@ -5876,16 +5910,18 @@ export default function Home() {
               </>
             ) : ui.selectedUnits > 0 ? (
               <>
-                <button onClick={() => action("move")} title={tutorialsEnabled ? "Choose a destination. This order overrides combat until the unit arrives." : undefined}>
-                  <kbd>Z</kbd><i>➤</i><span>DIRECT MOVE<small>IGNORE THREATS · DESTINATION LOCKED</small></span>
+                <button onClick={() => action("move")} title={tutorialsEnabled ? "Keep the destination locked and fire at enemies already within weapon range without chasing them." : undefined}>
+                  <kbd>Z</kbd><i>➤</i><span>DIRECT MOVE<small>FIRE IN RANGE · NO CHASE</small></span>
                 </button>
                 {ui.selectedCombat > 0 && (<>
                   <button className={ui.selectedStance === "pursue" ? "active-order" : ""} aria-pressed={ui.selectedStance === "pursue"} onClick={() => action("pursue")} title={tutorialsEnabled ? "Chase visible enemies within sight range." : undefined}>
                     <kbd>C</kbd><i>⌖</i><span>PURSUE<small>CHASE VISIBLE TARGETS</small></span>
                   </button>
-                  <button className={ui.selectedStance === "hold" ? "active-order" : ""} aria-pressed={ui.selectedStance === "hold"} onClick={() => action("hold")} title={tutorialsEnabled ? "Deploy into a stationary turret form with 35% greater weapon range." : undefined}>
-                    <kbd>H</kbd><i>⌾</i><span>SENTRY MODE<small>DEPLOY · +35% RANGE</small></span>
-                  </button>
+                  {ui.selectedUnitType === "trooper" && (
+                    <button className={ui.selectedStance === "hold" ? "active-order" : ""} aria-pressed={ui.selectedStance === "hold"} onClick={() => action("hold")} title={tutorialsEnabled ? "Troopers deploy into a stationary turret form with 35% greater weapon range." : undefined}>
+                      <kbd>H</kbd><i>⌾</i><span>SENTRY MODE<small>TROOPERS · +35% RANGE</small></span>
+                    </button>
+                  )}
                   <button className={ui.selectedStance === "patrol" ? "active-order" : ""} aria-pressed={ui.selectedStance === "patrol"} onClick={() => action("patrol")} title={tutorialsEnabled ? "Choose two points. Units travel between them and engage threats en route." : undefined}>
                     <kbd>P</kbd><i>⇄</i><span>PATROL<small>SET TWO ROUTE POINTS</small></span>
                   </button>
