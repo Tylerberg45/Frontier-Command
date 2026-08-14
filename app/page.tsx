@@ -48,10 +48,12 @@ type Unit = {
   attackUntil?: number;
   /** Transient render flag while a worker is actively extracting crystal. */
   mining?: boolean;
+  /** Transient render flag while a Worker welds an unfinished structure. */
+  building?: boolean;
   /** Seconds of field supply remaining before the unit suffers penalties. */
   supply?: number;
   retreating?: boolean;
-  /** Workers with this enabled repair friendly structures instead of mining. */
+  /** Workers with this enabled repair friendly units and structures instead of mining. */
   autoRepair?: boolean;
   repairTarget?: number;
   /** Persistent worker duty. Move orders become hold duty instead of resuming mining. */
@@ -381,11 +383,16 @@ const PRODUCTION_COOLDOWN = balance.production.cooldownSeconds;
 const UPKEEP_SOFT_CAP = balance.economy.upkeepSoftCap;
 const REPAIR_RATE = balance.repair.healthPerSecond;
 const REPAIR_ALLOY_PER_HP = balance.repair.alloyPerHealth;
+const MAINTENANCE_PATROL_SCAN = 185;
+const SENTRY_RANGE_MULTIPLIER = 1.35;
 const TUTORIALS_KEY = "frontier-command-tutorials-v1";
 const DISMISSED_TIPS_KEY = "frontier-command-dismissed-tips-v1";
 function veteranRegenRate(unit: Unit) {
   const level = unit.level || 1;
   return level >= 3 ? 0.02 : level >= 2 ? 0.01 : 0;
+}
+function unitCombatRange(unit: Unit) {
+  return stats[unit.type].range * (unit.type !== "worker" && unit.stance === "hold" ? SENTRY_RANGE_MULTIPLIER : 1);
 }
 function upkeepPerSecond(count: number) {
   return count <= UPKEEP_SOFT_CAP ? 0 : Math.pow(count - UPKEEP_SOFT_CAP, 1.25) * .08;
@@ -473,8 +480,8 @@ const unitName = (type: Unit["type"]) =>
 const unitRole = (type: Unit["type"]) =>
   type === "worker" ? "MINER" : type === "trooper" ? "ANTI-AIR INFANTRY" : type === "tank" ? "ANTI-INFANTRY ARMOR" : "ANTI-ARMOR AIR";
 const unitDuty = (unit: Unit) => {
-  if (unit.type !== "worker") return unitRole(unit.type);
-  if (unit.autoRepair) return `MAINTENANCE · AUTO REPAIR ON${unit.repairing ? " · REPAIRING" : ""}`;
+  if (unit.type !== "worker") return `${unitRole(unit.type)}${unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
+  if (unit.autoRepair) return `MAINTENANCE${unit.stance === "patrol" ? " PATROL" : ""}${unit.repairing ? " · REPAIRING" : ""}`;
   if (unit.workerMode === "construct") {
     const queued = unit.buildQueue?.length || (unit.buildTarget ? 1 : 0);
     return `CONSTRUCTION DUTY${queued ? ` · ${queued} SITE${queued === 1 ? "" : "S"} QUEUED` : ""}`;
@@ -1497,7 +1504,9 @@ export default function Home() {
     }
     const chosenUnits = chosen.filter(isUnit);
     const chosenTypes = [...new Set(chosenUnits.map((unit) => unit.type))];
-    const chosenStances = [...new Set(chosenUnits.filter((unit) => unit.type !== "worker").map((unit) => unit.stance || "pursue"))];
+    const chosenStances = [...new Set(chosenUnits
+      .filter((unit) => unit.type !== "worker" || unit.autoRepair)
+      .map((unit) => unit.stance || "pursue"))];
     const one = chosen[0],
       rank =
         one && isUnit(one)
@@ -1603,13 +1612,13 @@ export default function Home() {
     const remoteUnits = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id));
     if (mode === "repair") {
       const workers = remoteUnits.filter((unit) => unit.type === "worker");
-      const structure = g.buildings
-        .filter((building) => building.team === "enemy" && buildingOperational(building) && building.hp < building.max)
+      const repairable = [...g.buildings, ...g.units]
+        .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
         .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-      if (structure && Math.hypot(structure.x - wx, structure.y - wy) < 70) {
-        workers.forEach((worker) => {
+      if (repairable && Math.hypot(repairable.x - wx, repairable.y - wy) < 70) {
+        workers.filter((worker) => worker.id !== repairable.id).forEach((worker) => {
           clearWorkerConstruction(worker, "repair");
-          worker.repairTarget = structure.id;
+          worker.repairTarget = repairable.id;
           worker.workerMode = "repair";
           worker.target = undefined;
           worker.enemy = undefined;
@@ -1619,14 +1628,15 @@ export default function Home() {
       return;
     }
     if (mode === "set-patrol-a" || mode === "set-patrol-b") {
-      const combat = remoteUnits.filter((unit) => unit.type !== "worker");
+      const patrollers = remoteUnits.filter((unit) => unit.type !== "worker" || unit.autoRepair);
       if (mode === "set-patrol-a") {
-        combat.forEach((unit) => { unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" }; });
+        patrollers.forEach((unit) => { unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" }; });
       } else {
-        combat.forEach((unit, index) => {
+        patrollers.forEach((unit, index) => {
           const a = unit.patrol?.a || { x: unit.x, y: unit.y };
           unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
           unit.stance = "patrol";
+          if (unit.type === "worker") unit.workerMode = "hold";
           unit.retreating = false;
           unit.moveEngage = false;
           unit.enemy = undefined;
@@ -1661,13 +1671,13 @@ export default function Home() {
     const units = remoteUnits;
     if (!units.length) return;
     const remoteWorkers = units.filter((unit) => unit.type === "worker");
-    const friendlyStructure = g.buildings
-      .filter((building) => building.team === "enemy" && buildingOperational(building) && building.hp < building.max)
+    const friendlyRepairable = [...g.buildings, ...g.units]
+      .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (remoteWorkers.length === units.length && friendlyStructure && Math.hypot(friendlyStructure.x - wx, friendlyStructure.y - wy) < 65) {
-      remoteWorkers.forEach((worker) => {
+    if (remoteWorkers.length === units.length && friendlyRepairable && Math.hypot(friendlyRepairable.x - wx, friendlyRepairable.y - wy) < 65) {
+      remoteWorkers.filter((worker) => worker.id !== friendlyRepairable.id).forEach((worker) => {
         clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = friendlyStructure.id;
+        worker.repairTarget = friendlyRepairable.id;
         worker.workerMode = "repair";
         worker.target = undefined;
         worker.enemy = undefined;
@@ -1697,7 +1707,7 @@ export default function Home() {
         clearWorkerConstruction(unit, "hold");
       }
       unit.patrol = undefined;
-      if (unit.stance === "patrol") unit.stance = "pursue";
+      if (unit.stance === "patrol" || (forcedTravel && unit.stance === "hold")) unit.stance = "pursue";
       unit.nav = undefined;
     }
   }
@@ -1782,6 +1792,10 @@ export default function Home() {
         worker.enemy = undefined;
         worker.target = undefined;
         worker.nav = undefined;
+        if (!enable) {
+          worker.patrol = undefined;
+          if (worker.stance === "patrol") worker.stance = "pursue";
+        }
       });
       return;
     }
@@ -1888,7 +1902,7 @@ export default function Home() {
       g.message = name === "move" || name === "move-engage"
         ? `${name === "move-engage" ? "MOVE + ENGAGE" : "DIRECT MOVE"}: choose a destination.`
         : name === "repair"
-          ? "REPAIR ORDER: choose a damaged friendly structure."
+          ? "REPAIR ORDER: choose a damaged friendly unit or structure."
           : "PATROL: choose the first patrol point.";
       sync();
       return;
@@ -2036,18 +2050,20 @@ export default function Home() {
     }
     const selectedWorkers = g.units.filter((unit) => unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
     const selectedCombat = g.units.filter((unit) => unit.team === "player" && unit.type !== "worker" && g.selected.includes(unit.id));
+    const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
     if (g.mode === "repair") {
-      const structure = g.buildings
-        .filter((building) => building.team === "player" && buildingOperational(building) && building.hp < building.max)
+      const repairable = [...g.buildings, ...g.units]
+        .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
         .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-      if (!structure || Math.hypot(structure.x - wx, structure.y - wy) >= 70) {
-        g.message = "REPAIR ORDER: choose a damaged friendly structure.";
+      if (!repairable || Math.hypot(repairable.x - wx, repairable.y - wy) >= 70) {
+        g.message = "REPAIR ORDER: choose a damaged friendly unit or structure.";
         sync();
         return;
       }
-      selectedWorkers.forEach((worker) => {
+      const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== repairable.id);
+      assignedWorkers.forEach((worker) => {
         clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = structure.id;
+        worker.repairTarget = repairable.id;
         worker.workerMode = "repair";
         worker.target = undefined;
         worker.enemy = undefined;
@@ -2056,12 +2072,14 @@ export default function Home() {
       g.mode = "select";
       g.matchStats.meaningfulActions++;
       g.matchStats.orders++;
-      g.message = `${selectedWorkers.length} worker${selectedWorkers.length === 1 ? "" : "s"} repairing ${structure.type.toUpperCase()} · repairs consume alloy.`;
+      g.message = assignedWorkers.length
+        ? `${assignedWorkers.length} Worker${assignedWorkers.length === 1 ? "" : "s"} repairing ${isUnit(repairable) ? unitName(repairable.type) : repairable.type.toUpperCase()} · repairs consume alloy.`
+        : "A Worker cannot repair itself — assign another Worker.";
       sync();
       return;
     }
     if (g.mode === "set-patrol-a") {
-      selectedCombat.forEach((unit) => {
+      selectedPatrollers.forEach((unit) => {
         unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" };
       });
       g.mode = "set-patrol-b";
@@ -2070,10 +2088,11 @@ export default function Home() {
       return;
     }
     if (g.mode === "set-patrol-b") {
-      selectedCombat.forEach((unit, index) => {
+      selectedPatrollers.forEach((unit, index) => {
         const a = unit.patrol?.a || { x: unit.x, y: unit.y };
         unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
         unit.stance = "patrol";
+        if (unit.type === "worker") unit.workerMode = "hold";
         unit.retreating = false;
         unit.moveEngage = false;
         unit.enemy = undefined;
@@ -2083,7 +2102,9 @@ export default function Home() {
       g.mode = "select";
       g.matchStats.meaningfulActions++;
       g.matchStats.orders++;
-      g.message = "PATROL ROUTE ACTIVE — units engage threats, then resume their route.";
+      g.message = selectedPatrollers.some((unit) => unit.type === "worker")
+        ? "MAINTENANCE PATROL ACTIVE — Workers repair nearby allies, then resume their route."
+        : "PATROL ROUTE ACTIVE — units engage threats, then resume their route.";
       sync();
       return;
     }
@@ -2139,23 +2160,26 @@ export default function Home() {
     }
     const ours = g.units.filter((u) => g.selected.includes(u.id));
     if (!ours.length) return;
-    const friendlyStructure = g.buildings
-      .filter((building) => building.team === "player" && buildingOperational(building) && building.hp < building.max)
+    const friendlyRepairable = [...g.buildings, ...g.units]
+      .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (
       selectedWorkers.length === ours.length &&
-      friendlyStructure &&
-      Math.hypot(friendlyStructure.x - wx, friendlyStructure.y - wy) < 65
+      friendlyRepairable &&
+      Math.hypot(friendlyRepairable.x - wx, friendlyRepairable.y - wy) < 65
     ) {
-      selectedWorkers.forEach((worker) => {
+      const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== friendlyRepairable.id);
+      assignedWorkers.forEach((worker) => {
         clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = friendlyStructure.id;
+        worker.repairTarget = friendlyRepairable.id;
         worker.workerMode = "repair";
         worker.target = undefined;
         worker.enemy = undefined;
         worker.nav = undefined;
       });
-      g.message = `Repair order confirmed for ${friendlyStructure.type.toUpperCase()} · repairs consume alloy.`;
+      g.message = assignedWorkers.length
+        ? `Repair order confirmed for ${isUnit(friendlyRepairable) ? unitName(friendlyRepairable.type) : friendlyRepairable.type.toUpperCase()} · repairs consume alloy.`
+        : "A Worker cannot repair itself — assign another Worker.";
       sync();
       return;
     }
@@ -2179,7 +2203,7 @@ export default function Home() {
           clearWorkerConstruction(u, "hold");
         }
         u.patrol = undefined;
-        if (u.stance === "patrol") u.stance = "pursue";
+        if (u.stance === "patrol" || u.stance === "hold") u.stance = "pursue";
       });
     else
       ours.forEach((u, i) => {
@@ -2194,7 +2218,7 @@ export default function Home() {
           clearWorkerConstruction(u, "hold");
         }
         u.patrol = undefined;
-        if (u.stance === "patrol") u.stance = "pursue";
+        if (u.stance === "patrol" || u.stance === "hold") u.stance = "pursue";
       });
     g.matchStats.meaningfulActions++;
     g.matchStats.orders++;
@@ -2495,7 +2519,7 @@ export default function Home() {
       if (!selectedWorkers.length) g.message = "Select one or more Workers first.";
       else {
         g.mode = "repair";
-        g.message = "REPAIR ORDER: choose a damaged friendly structure.";
+        g.message = "REPAIR ORDER: choose a damaged friendly unit or structure.";
       }
       sync();
       return;
@@ -2511,10 +2535,14 @@ export default function Home() {
           worker.enemy = undefined;
           worker.target = undefined;
           worker.nav = undefined;
+          if (!enable) {
+            worker.patrol = undefined;
+            if (worker.stance === "patrol") worker.stance = "pursue";
+          }
         });
         g.matchStats.meaningfulActions++;
         g.message = enable
-          ? "AUTO REPAIR ON — selected Workers stop mining and automatically repair damaged friendly structures."
+          ? "AUTO REPAIR ON — selected Workers stop mining and repair damaged friendly units and structures."
           : "AUTO REPAIR OFF — selected Workers return to normal mining duty.";
       }
       sync();
@@ -2536,17 +2564,20 @@ export default function Home() {
         });
         g.matchStats.meaningfulActions++;
         g.message = name === "hold"
-          ? "HOLD GROUND — units fire only from their current position and will not chase."
+          ? "SENTRY MODE — robots deploy as stationary turrets with 35% greater range."
           : "PURSUE — units may chase visible enemies within their sight range.";
       }
       sync();
       return;
     }
     if (name === "patrol") {
-      if (!selectedCombat.length) g.message = "Select combat units before creating a patrol route.";
+      const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
+      if (!selectedPatrollers.length) g.message = "Select combat units or Auto Repair Workers before creating a patrol route.";
       else {
         g.mode = "set-patrol-a";
-        g.message = "PATROL: choose the first patrol point.";
+        g.message = selectedPatrollers.some((unit) => unit.type === "worker")
+          ? "MAINTENANCE PATROL: choose the first patrol point."
+          : "PATROL: choose the first patrol point.";
       }
       sync();
       return;
@@ -2866,6 +2897,7 @@ export default function Home() {
     for (const unit of g.units) {
       unit.moving = false;
       unit.mining = false;
+      unit.building = false;
       unit.repairing = false;
       const inSupply = unitInSupplyRange(g, unit);
       unit.supply = inSupply
@@ -3121,7 +3153,38 @@ export default function Home() {
           target = undefined;
         }
       }
-      if (u.type !== "worker" && u.stance === "patrol" && u.patrol && !target && !u.target) {
+      if (u.type === "worker" && u.autoRepair && (!u.target || u.stance === "patrol")) {
+        let repairable = [...g.buildings, ...g.units].find((object) =>
+          object.id === u.repairTarget &&
+          object.id !== u.id &&
+          object.team === u.team &&
+          object.hp > 0 &&
+          object.hp < object.max &&
+          (isUnit(object) || buildingOperational(object)),
+        );
+        if (!repairable) {
+          u.repairTarget = undefined;
+          const scanRadius = u.stance === "patrol" ? MAINTENANCE_PATROL_SCAN : Infinity;
+          repairable = [...g.buildings, ...g.units]
+            .filter((object) =>
+              object.id !== u.id &&
+              object.team === u.team &&
+              object.hp > 0 &&
+              object.hp < object.max &&
+              (isUnit(object) || buildingOperational(object)) &&
+              Math.hypot(object.x - u.x, object.y - u.y) <= scanRadius,
+            )
+            .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
+          if (repairable) u.repairTarget = repairable.id;
+        }
+        if (repairable) {
+          u.enemy = undefined;
+          u.target = undefined;
+          u.nav = undefined;
+          target = undefined;
+        }
+      }
+      if (u.stance === "patrol" && u.patrol && !target && !u.target && !u.repairTarget) {
         const aDistance = Math.hypot(u.patrol.a.x - u.x, u.patrol.a.y - u.y);
         const bDistance = Math.hypot(u.patrol.b.x - u.x, u.patrol.b.y - u.y);
         const resumeAt = aDistance <= bDistance ? "a" : "b";
@@ -3133,7 +3196,7 @@ export default function Home() {
       const engagingWhileTraveling = Boolean(u.moveEngage && u.target);
       if (u.type !== "worker" && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling)) {
         const sight = u.stance === "hold"
-          ? stats[u.type].range
+          ? unitCombatRange(u)
           : u.type === "drone" ? 320 : u.type === "tank" ? 280 : 230;
         const nearby = objs()
           .filter(
@@ -3159,9 +3222,10 @@ export default function Home() {
       }
       if (target) {
         const d = Math.hypot(target.x - u.x, target.y - u.y),
-          s = stats[u.type];
+          s = stats[u.type],
+          range = unitCombatRange(u);
         u.facing = Math.atan2(target.y - u.y, target.x - u.x);
-        if (d > s.range) {
+        if (d > range) {
           if (u.stance === "hold") {
             u.enemy = undefined;
           } else {
@@ -3266,13 +3330,19 @@ export default function Home() {
             moveUnitToward(g, u, construction, dt, construction.id);
           } else {
             u.facing = Math.atan2(construction.y - u.y, construction.x - u.x);
-            u.mining = true;
+            u.building = true;
             construction.constructionStarted = true;
           }
           continue;
         }
-        let repairTarget = g.buildings.find(
-          (building) => building.id === u.repairTarget && building.team === u.team && buildingOperational(building) && building.hp < building.max,
+        const repairTarget = [...g.buildings, ...g.units].find(
+          (object) =>
+            object.id === u.repairTarget &&
+            object.id !== u.id &&
+            object.team === u.team &&
+            object.hp > 0 &&
+            object.hp < object.max &&
+            (isUnit(object) || buildingOperational(object)),
         );
         if (!repairTarget) {
           u.repairTarget = undefined;
@@ -3281,17 +3351,11 @@ export default function Home() {
             u.nav = undefined;
             continue;
           }
-          if (u.autoRepair) {
-            repairTarget = g.buildings
-              .filter((building) => building.team === u.team && buildingOperational(building) && building.hp < building.max)
-              .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
-            if (repairTarget) u.repairTarget = repairTarget.id;
-          }
         }
         if (repairTarget) {
           const repairDistance = Math.hypot(repairTarget.x - u.x, repairTarget.y - u.y);
-          if (repairDistance > buildingStats[repairTarget.type].r + 24) {
-            moveUnitToward(g, u, repairTarget, dt, repairTarget.id);
+          if (repairDistance > objectRadius(repairTarget) + 24) {
+            moveUnitToward(g, u, repairTarget, dt, isUnit(repairTarget) ? undefined : repairTarget.id);
           } else {
             const availableAlloy = u.team === "player" ? g.alloy : g.enemyAlloy;
             const repair = Math.min(
@@ -3305,7 +3369,6 @@ export default function Home() {
               else g.enemyAlloy = Math.max(0, g.enemyAlloy - repair * REPAIR_ALLOY_PER_HP);
               u.facing = Math.atan2(repairTarget.y - u.y, repairTarget.x - u.x);
               u.repairing = true;
-              u.mining = true;
             }
           }
           continue;
@@ -4210,7 +4273,8 @@ export default function Home() {
       const s = stats[u.type],
         sel = g.selected.includes(u.id),
         player = u.team === "player",
-        accent = player ? "#70e2ce" : "#f05b76";
+        accent = player ? "#70e2ce" : "#f05b76",
+        sentryMode = u.type !== "worker" && u.stance === "hold";
       if (sel) {
         x.save();
         x.strokeStyle = "rgba(246, 211, 102, .78)";
@@ -4220,13 +4284,13 @@ export default function Home() {
         x.shadowColor = "rgba(246, 211, 102, .45)";
         x.shadowBlur = 5;
         x.beginPath();
-        x.arc(u.x, u.y, s.range, 0, Math.PI * 2);
+        x.arc(u.x, u.y, unitCombatRange(u), 0, Math.PI * 2);
         x.fill();
         x.stroke();
         x.restore();
       }
       x.save();
-      x.translate(u.x, u.y + (u.type === "drone" ? Math.sin(g.time * 5 + u.id) * 2 - 7 : 0));
+      x.translate(u.x, u.y + (u.type === "drone" && !sentryMode ? Math.sin(g.time * 5 + u.id) * 2 - 7 : 0));
       x.fillStyle = "rgba(0,0,0,.26)";
       x.shadowBlur = 0;
       x.beginPath(); x.ellipse(0, s.r * .5, s.r * 1.08, s.r * .22, 0, 0, Math.PI * 2); x.fill();
@@ -4256,13 +4320,15 @@ export default function Home() {
       const firing = (u.attackUntil || 0) > g.time;
       const miningFrame = Boolean(u.mining) && Math.floor((g.time + u.id * .041) * 8) % 2 === 1;
       const movementFrame = Math.floor((g.time + u.id * .037) * (u.type === "tank" ? 6 : 8)) % Math.max(1, movementAtlases.length);
-      const directionalAtlas = firing
-        ? attackAtlas || restingAtlas
-        : miningFrame
-          ? art.current.workerMine || restingAtlas
-          : u.moving
-            ? movementAtlases[movementFrame] || restingAtlas
-            : restingAtlas;
+      const directionalAtlas = sentryMode
+        ? (firing ? art.current.turretFire : art.current.turretDirections) || restingAtlas
+        : firing
+          ? attackAtlas || restingAtlas
+          : miningFrame
+            ? art.current.workerMine || restingAtlas
+            : u.moving
+              ? movementAtlases[movementFrame] || restingAtlas
+              : restingAtlas;
       const unitAtlas = directionalAtlas || art.current.units;
       if (unitAtlas) {
         if (sel) {
@@ -4302,7 +4368,9 @@ export default function Home() {
           }[u.type];
         }
         const size = directionalAtlas
-          ? u.type === "tank"
+          ? sentryMode
+            ? u.type === "tank" ? { w: 88, h: 88 } : u.type === "drone" ? { w: 78, h: 78 } : { w: 70, h: 70 }
+            : u.type === "tank"
             ? { w: 90, h: 90 }
             : u.type === "drone"
               ? { w: 88, h: 72 }
@@ -4317,6 +4385,25 @@ export default function Home() {
               ? { w: 62, h: 68 }
               : { w: 54, h: 60 };
         x.shadowBlur = 0;
+        if (sentryMode) {
+          x.save();
+          x.strokeStyle = player ? "rgba(112, 226, 206, .88)" : "rgba(240, 91, 118, .86)";
+          x.fillStyle = "rgba(5, 18, 20, .78)";
+          x.lineWidth = 2;
+          x.shadowColor = accent;
+          x.shadowBlur = 8;
+          x.beginPath();
+          x.ellipse(0, 14, 25, 10, 0, 0, Math.PI * 2);
+          x.fill();
+          x.stroke();
+          for (const braceAngle of [-Math.PI / 6, Math.PI / 2, Math.PI * 7 / 6]) {
+            x.beginPath();
+            x.moveTo(Math.cos(braceAngle) * 15, 13 + Math.sin(braceAngle) * 5);
+            x.lineTo(Math.cos(braceAngle) * 31, 16 + Math.sin(braceAngle) * 12);
+            x.stroke();
+          }
+          x.restore();
+        }
         x.drawImage(
           unitAtlas,
           source.x,
@@ -4333,6 +4420,30 @@ export default function Home() {
         x.shadowBlur = 3;
         x.fillRect(-s.r * .42, s.r * .43, s.r * .84, 3);
         x.shadowBlur = 0;
+        if (u.type === "worker" && (u.building || u.repairing)) {
+          const phase = g.time * 15 + u.id;
+          const effectColor = u.building ? "#f6d366" : "#70e2ce";
+          const toolX = Math.cos(u.facing || 0) * 22;
+          const toolY = Math.sin(u.facing || 0) * 22;
+          x.save();
+          x.strokeStyle = effectColor;
+          x.fillStyle = effectColor;
+          x.lineWidth = 2.4;
+          x.shadowColor = effectColor;
+          x.shadowBlur = 8;
+          x.beginPath();
+          x.moveTo(Math.cos(u.facing || 0) * 7, Math.sin(u.facing || 0) * 7);
+          x.lineTo(toolX, toolY);
+          x.stroke();
+          for (let spark = 0; spark < 4; spark++) {
+            const angle = phase + spark * Math.PI / 2;
+            const radius = 4 + ((spark + Math.floor(g.time * 12)) % 3) * 2;
+            x.beginPath();
+            x.arc(toolX + Math.cos(angle) * radius, toolY + Math.sin(angle) * radius, 1.5, 0, Math.PI * 2);
+            x.fill();
+          }
+          x.restore();
+        }
       } else if (u.type === "tank") {
         x.fillRect(-s.r, -s.r * .62, s.r * 2, s.r * 1.24);
         x.strokeRect(-s.r, -s.r * .62, s.r * 2, s.r * 1.24);
@@ -5259,8 +5370,8 @@ export default function Home() {
                   <button className={ui.selectedStance === "pursue" ? "active-order" : ""} aria-pressed={ui.selectedStance === "pursue"} onClick={() => action("pursue")} title={tutorialsEnabled ? "Chase visible enemies within sight range." : undefined}>
                     <kbd>C</kbd><i>⌖</i><span>PURSUE<small>CHASE VISIBLE TARGETS</small></span>
                   </button>
-                  <button className={ui.selectedStance === "hold" ? "active-order" : ""} aria-pressed={ui.selectedStance === "hold"} onClick={() => action("hold")} title={tutorialsEnabled ? "Fire at enemies in range without leaving this position." : undefined}>
-                    <kbd>H</kbd><i>⬡</i><span>HOLD GROUND<small>FIRE · DO NOT CHASE</small></span>
+                  <button className={ui.selectedStance === "hold" ? "active-order" : ""} aria-pressed={ui.selectedStance === "hold"} onClick={() => action("hold")} title={tutorialsEnabled ? "Deploy into a stationary turret form with 35% greater weapon range." : undefined}>
+                    <kbd>H</kbd><i>⌾</i><span>SENTRY MODE<small>DEPLOY · +35% RANGE</small></span>
                   </button>
                   <button className={ui.selectedStance === "patrol" ? "active-order" : ""} aria-pressed={ui.selectedStance === "patrol"} onClick={() => action("patrol")} title={tutorialsEnabled ? "Choose two points. Units travel between them and engage threats en route." : undefined}>
                     <kbd>P</kbd><i>⇄</i><span>PATROL<small>SET TWO ROUTE POINTS</small></span>
@@ -5273,12 +5384,17 @@ export default function Home() {
                   <button onClick={() => setCommandTab("buildings")} title={tutorialsEnabled ? "Open the Worker construction menu." : undefined}>
                     <i>▦</i><span>CONSTRUCTION<small>OPEN BUILD MENU</small></span>
                   </button>
-                  <button onClick={() => action("repair")} title={tutorialsEnabled ? "Choose one damaged friendly structure to repair. Repairs consume alloy." : undefined}>
-                    <kbd>Y</kbd><i>🔧</i><span>REPAIR TARGET<small>{REPAIR_RATE} HP/s · USES ALLOY</small></span>
+                  <button onClick={() => action("repair")} title={tutorialsEnabled ? "Choose one damaged friendly unit or structure to repair. Repairs consume alloy." : undefined}>
+                    <kbd>Y</kbd><i>🔧</i><span>REPAIR TARGET<small>UNITS + STRUCTURES · {REPAIR_RATE} HP/s</small></span>
                   </button>
-                  <button className={ui.autoRepair ? "active-order repair-toggle" : "repair-toggle"} aria-pressed={ui.autoRepair} onClick={() => action("auto-repair")} title={tutorialsEnabled ? "When enabled, these Workers stop mining and automatically repair friendly structures. Default is off." : undefined}>
-                    <kbd>O</kbd><i>{ui.autoRepair ? "✓" : "○"}</i><span>AUTO REPAIR {ui.autoRepair ? "ON" : "OFF"}<small>{ui.repairingWorkers ? `${ui.repairingWorkers} REPAIRING` : "REPLACES MINING DUTY"}</small></span>
+                  <button className={ui.autoRepair ? "active-order repair-toggle" : "repair-toggle"} aria-pressed={ui.autoRepair} onClick={() => action("auto-repair")} title={tutorialsEnabled ? "When enabled, these Workers stop mining and automatically repair nearby friendly units and structures. Default is off." : undefined}>
+                    <kbd>O</kbd><i>{ui.autoRepair ? "✓" : "○"}</i><span>AUTO REPAIR {ui.autoRepair ? "ON" : "OFF"}<small>{ui.repairingWorkers ? `${ui.repairingWorkers} REPAIRING` : "STOPS MINING · REPAIRS ALLIES"}</small></span>
                   </button>
+                  {ui.autoRepair && ui.selectedCombat === 0 && (
+                    <button className={ui.selectedStance === "patrol" ? "active-order" : ""} aria-pressed={ui.selectedStance === "patrol"} onClick={() => action("patrol")} title={tutorialsEnabled ? "Set two patrol points. Workers repair nearby allies, then resume the route." : undefined}>
+                      <kbd>P</kbd><i>⇄</i><span>MAINTENANCE PATROL<small>REPAIR NEAR ROUTE · RESUME</small></span>
+                    </button>
+                  )}
                 </>)}
               </>
             ) : ui.selectedConstruction && ui.selectedBuilding ? (
@@ -5339,7 +5455,7 @@ export default function Home() {
         </div>
       </section>
       <footer>
-        TOUCH: TAP SELECT · DOUBLE-TAP SELECT TYPE · HOLD GROUND + SLIDE ↑ ENGAGE / ↓ DIRECT · TAP ENEMY ATTACK · DRAG PAN{" "}
+        TOUCH: TAP SELECT · DOUBLE-TAP SELECT TYPE · LONG-PRESS GROUND + SLIDE ↑ ENGAGE / ↓ DIRECT · TAP ENEMY ATTACK · DRAG PAN{" "}
         <span>DESKTOP: LEFT DRAG SELECT · RIGHT-CLICK COMMAND · SHIFT ADD · CTRL+1–9 GROUPS · ESC PAUSE</span>
       </footer>
     </main>
