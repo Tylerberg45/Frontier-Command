@@ -28,6 +28,8 @@ type Unit = {
   navCheckX?: number;
   navCheckY?: number;
   navSide?: 1 | -1;
+  /** Two-stage route that forces ground units through a real plateau ramp. */
+  plateauRoute?: { plateauId: number; rampIndex: number; phase: "exit" | "clear" };
   enemy?: number;
   carrying?: number;
   /** The resource currently in the worker's cargo hold. */
@@ -293,8 +295,9 @@ const TERRAIN_RIDGES = TACTICAL_PLATEAUS.flatMap((plateau, plateauIndex) =>
       x: plateau.x + Math.cos(angle) * plateau.rx,
       y: plateau.y + Math.sin(angle) * plateau.ry,
       r: 27,
+      plateauId: plateau.id,
     };
-  }).filter((ridge): ridge is { id: number; x: number; y: number; r: number } => Boolean(ridge)),
+  }).filter((ridge): ridge is { id: number; x: number; y: number; r: number; plateauId: number } => Boolean(ridge)),
 );
 const HIGH_GROUND_RADIUS = 92;
 const UPLINK_DAMAGE_BONUS = balance.objectives.damageBonusEach;
@@ -421,12 +424,42 @@ function terrainMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
 }
 
 function plateauAt(point: P) {
-  return TACTICAL_PLATEAUS.find((plateau) => {
-    const dx = point.x - plateau.x, dy = point.y - plateau.y;
-    const c = Math.cos(-plateau.rotation), s = Math.sin(-plateau.rotation);
-    const lx = dx * c - dy * s, ly = dx * s + dy * c;
-    return (lx / (plateau.rx * .78)) ** 2 + (ly / (plateau.ry * .76)) ** 2 <= 1;
-  });
+  return TACTICAL_PLATEAUS.find((plateau) => plateauContains(point, plateau, .78, .76));
+}
+function plateauContains(point: P, plateau: TacticalPlateau, scaleX = 1, scaleY = scaleX) {
+  const dx = point.x - plateau.x, dy = point.y - plateau.y;
+  const c = Math.cos(-plateau.rotation), s = Math.sin(-plateau.rotation);
+  const lx = dx * c - dy * s, ly = dx * s + dy * c;
+  return (lx / (plateau.rx * scaleX)) ** 2 + (ly / (plateau.ry * scaleY)) ** 2 <= 1;
+}
+function plateauRampPoint(plateau: TacticalPlateau, rampIndex: number, scale: number): P {
+  const ramp = plateau.ramps[rampIndex];
+  const localX = Math.cos(ramp) * plateau.rx * scale;
+  const localY = Math.sin(ramp) * plateau.ry * scale;
+  const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
+  return {
+    x: plateau.x + localX * c - localY * s,
+    y: plateau.y + localX * s + localY * c,
+  };
+}
+function distanceToSegment(point: P, start: P, end: P) {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  const t = lengthSquared > 0
+    ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+    : 0;
+  return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
+}
+function inPlateauRampLane(point: P, padding = 0) {
+  return TACTICAL_PLATEAUS.some((plateau) =>
+    plateau.ramps.some((_, rampIndex) =>
+      distanceToSegment(
+        point,
+        plateauRampPoint(plateau, rampIndex, .58),
+        plateauRampPoint(plateau, rampIndex, 1.34),
+      ) <= 56 + padding,
+    ),
+  );
 }
 function objectRadius(object: Unit | Building) {
   return object.type === "worker" || object.type === "trooper" || object.type === "tank" || object.type === "drone"
@@ -569,11 +602,70 @@ function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "h
   worker.workerMode = nextMode;
 }
 
+function plateauTravelRoute(u: Unit, destination: P) {
+  if (u.type === "drone") {
+    u.plateauRoute = undefined;
+    return undefined;
+  }
+  let route = u.plateauRoute;
+  let plateau = route
+    ? TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId)
+    : undefined;
+  if (route && (!plateau || plateauContains(destination, plateau, 1.02))) {
+    u.plateauRoute = undefined;
+    route = undefined;
+    plateau = undefined;
+  }
+  if (route && plateau && !plateauContains(u, plateau, 1.48)) {
+    u.plateauRoute = undefined;
+    route = undefined;
+    plateau = undefined;
+  }
+  if (!route) {
+    const insidePlateau = TACTICAL_PLATEAUS.find((candidate) => plateauContains(u, candidate, .98));
+    plateau = insidePlateau || TACTICAL_PLATEAUS.find((candidate) =>
+      plateauContains(u, candidate, 1.34) && inPlateauRampLane(u, 18),
+    );
+    if (!plateau || plateauContains(destination, plateau, 1.02)) return undefined;
+    const rampIndex = plateau.ramps
+      .map((_, index) => {
+        const inner = plateauRampPoint(plateau!, index, .72);
+        const outer = plateauRampPoint(plateau!, index, 1.28);
+        return {
+          index,
+          cost: Math.hypot(u.x - inner.x, u.y - inner.y) + Math.hypot(destination.x - outer.x, destination.y - outer.y),
+        };
+      })
+      .sort((a, b) => a.cost - b.cost)[0].index;
+    // A unit already sitting just outside a ramp (including one loaded from an
+    // older save) only needs the clear phase; do not pull it back onto the mesa.
+    route = { plateauId: plateau.id, rampIndex, phase: insidePlateau ? "exit" : "clear" };
+    u.plateauRoute = route;
+    u.nav = undefined;
+  }
+  plateau ||= TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId);
+  if (!plateau) return undefined;
+  const exit = plateauRampPoint(plateau, route.rampIndex, 1.28);
+  if (route.phase === "exit" && Math.hypot(u.x - exit.x, u.y - exit.y) < 13) {
+    route.phase = "clear";
+    u.nav = undefined;
+  }
+  if (route.phase === "clear" && !plateauContains(u, plateau, 1.38)) {
+    u.plateauRoute = undefined;
+    return undefined;
+  }
+  return {
+    goal: route.phase === "exit" ? exit : destination,
+    ignorePlateauId: plateau.id,
+  };
+}
+
 function blockingObstacle(
   g: Game,
   u: Unit,
   destination: P,
   ignoreBuildingId?: number,
+  ignorePlateauId?: number,
 ) {
   const dx = destination.x - u.x;
   const dy = destination.y - u.y;
@@ -585,9 +677,13 @@ function blockingObstacle(
       .map((building) => ({ id: building.id, x: building.x, y: building.y, r: buildingStats[building.type].r })),
     ...g.crystals
       .map((crystal, index) => ({ crystal, index }))
-      .filter(({ crystal }) => crystal.amount > 0 && Math.hypot(crystal.x - destination.x, crystal.y - destination.y) > 42)
+      .filter(({ crystal }) =>
+        crystal.amount > 0 &&
+        !inPlateauRampLane(crystal, 28) &&
+        Math.hypot(crystal.x - destination.x, crystal.y - destination.y) > 42,
+      )
       .map(({ crystal, index }) => ({ id: -(index + 1000), x: crystal.x, y: crystal.y, r: 24 })),
-    ...TERRAIN_RIDGES,
+    ...TERRAIN_RIDGES.filter((ridge) => ridge.plateauId !== ignorePlateauId),
   ];
   return obstacles
     .map((obstacle) => {
@@ -611,6 +707,9 @@ function moveUnitToward(
   dt: number,
   ignoreBuildingId?: number,
 ) {
+  const plateauRoute = plateauTravelRoute(u, destination);
+  const travelDestination = plateauRoute?.goal || destination;
+  const ignorePlateauId = plateauRoute?.ignorePlateauId;
   if (
     u.nav &&
     Number.isFinite(u.navCheckAt) &&
@@ -627,10 +726,10 @@ function moveUnitToward(
   }
   if (u.nav && Math.hypot(u.nav.x - u.x, u.nav.y - u.y) < 9) u.nav = undefined;
   if (!u.nav) {
-    const blocker = u.type === "drone" ? undefined : blockingObstacle(g, u, destination, ignoreBuildingId);
+    const blocker = u.type === "drone" ? undefined : blockingObstacle(g, u, travelDestination, ignoreBuildingId, ignorePlateauId);
     if (blocker) {
-      const dx = destination.x - u.x;
-      const dy = destination.y - u.y;
+      const dx = travelDestination.x - u.x;
+      const dy = travelDestination.y - u.y;
       const distance = Math.max(1, Math.hypot(dx, dy));
       const forwardX = dx / distance;
       const forwardY = dy / distance;
@@ -645,7 +744,7 @@ function moveUnitToward(
       }));
       const chosen = candidates.find(({ point }) => {
         const probe = { ...u, x: point.x, y: point.y, nav: undefined };
-        return !blockingObstacle(g, probe, destination, ignoreBuildingId);
+        return !blockingObstacle(g, probe, travelDestination, ignoreBuildingId, ignorePlateauId);
       }) || candidates[0];
       u.navSide = chosen.side;
       u.nav = chosen.point;
@@ -654,7 +753,7 @@ function moveUnitToward(
       u.navCheckY = u.y;
     }
   }
-  const goal = u.nav || destination;
+  const goal = u.nav || travelDestination;
   const dx = goal.x - u.x;
   const dy = goal.y - u.y;
   const distance = Math.hypot(dx, dy);
@@ -1091,6 +1190,7 @@ function hydrateGame(parsed: Game, message: string): Game {
       navCheckAt: undefined,
       navCheckX: undefined,
       navCheckY: undefined,
+      plateauRoute: undefined,
       carryingType: u.carryingType === "alloy" ? "alloy" : "credits",
     })),
     buildings: parsed.buildings.map(repairBuilding),
@@ -3295,6 +3395,9 @@ export default function Home() {
         }
       }
       for (const crystal of g.crystals.filter((node) => node.amount > 0)) {
+        // Deposits that generated beside a ramp stay collectible, but they do
+        // not narrow the only legal entrance or pin units against the cliff.
+        if (inPlateauRampLane(crystal, 28)) continue;
         const d = Math.hypot(u.x - crystal.x, u.y - crystal.y);
         const min = stats[u.type].r + 18;
         if (d < min) {
