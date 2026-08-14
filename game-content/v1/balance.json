@@ -1,25 +1,118 @@
 {
   "schemaVersion": 1,
-  "world": { "width": 3000, "height": 1900 },
+  "world": {
+    "width": 3000,
+    "height": 1900
+  },
   "units": {
-    "worker": { "radius": 13, "speed": 52, "damage": 3, "range": 55, "attackSeconds": 0.85, "health": 70, "cost": 150, "buildSeconds": 8 },
-    "trooper": { "radius": 12, "speed": 66, "damage": 7, "range": 105, "attackSeconds": 0.55, "health": 95, "cost": 125, "buildSeconds": 6 },
-    "tank": { "radius": 19, "speed": 38, "damage": 20, "range": 145, "attackSeconds": 1.15, "health": 240, "cost": 400, "buildSeconds": 15 },
-    "drone": { "radius": 17, "speed": 82, "damage": 13, "range": 130, "attackSeconds": 0.78, "health": 135, "cost": 300, "buildSeconds": 12 }
+    "worker": {
+      "radius": 13,
+      "speed": 52,
+      "damage": 3,
+      "range": 55,
+      "attackSeconds": 0.85,
+      "health": 70,
+      "cost": 150,
+      "buildSeconds": 8
+    },
+    "trooper": {
+      "radius": 12,
+      "speed": 66,
+      "damage": 7,
+      "range": 105,
+      "attackSeconds": 0.55,
+      "health": 95,
+      "cost": 125,
+      "buildSeconds": 6
+    },
+    "tank": {
+      "radius": 19,
+      "speed": 38,
+      "damage": 20,
+      "range": 145,
+      "attackSeconds": 1.15,
+      "health": 240,
+      "cost": 400,
+      "buildSeconds": 15
+    },
+    "drone": {
+      "radius": 17,
+      "speed": 82,
+      "damage": 13,
+      "range": 130,
+      "attackSeconds": 0.78,
+      "health": 135,
+      "cost": 300,
+      "buildSeconds": 12
+    }
   },
   "structures": {
-    "hq": { "radius": 54, "health": 900, "buildSeconds": 0, "alloyCost": 0 },
-    "refinery": { "radius": 42, "health": 440, "buildSeconds": 6, "alloyCost": 260 },
-    "barracks": { "radius": 44, "health": 520, "buildSeconds": 6, "alloyCost": 360 },
-    "turret": { "radius": 28, "health": 360, "buildSeconds": 15, "alloyCost": 240 }
+    "hq": {
+      "radius": 54,
+      "health": 900,
+      "buildSeconds": 0,
+      "alloyCost": 0
+    },
+    "refinery": {
+      "radius": 42,
+      "health": 440,
+      "buildSeconds": 6,
+      "alloyCost": 260
+    },
+    "barracks": {
+      "radius": 44,
+      "health": 520,
+      "buildSeconds": 6,
+      "alloyCost": 360
+    },
+    "turret": {
+      "radius": 28,
+      "health": 360,
+      "buildSeconds": 15,
+      "alloyCost": 240
+    }
   },
-  "turret": { "damage": 12, "range": 210, "attackSeconds": 0.68 },
-  "objectives": { "captureSeconds": 10, "captureRadius": 105, "intelPerSecond": 0.5, "damageBonusEach": 0.05, "maxStack": 2 },
-  "supply": { "capacitySeconds": 12, "radius": 470, "outOfSupplyDamageMultiplier": 0.75 },
-  "production": { "maxQueue": 6, "cooldownSeconds": 3 },
-  "research": { "fortifyIntelCost": 180, "fortifySeconds": 40, "doctrineIntelCost": 140, "doctrineSeconds": 30 },
-  "veterancy": { "regenDelaySeconds": 6 },
-  "repair": { "healthPerSecond": 24, "alloyPerHealth": 0.12 },
-  "economy": { "upkeepSoftCap": 10 },
-  "terrain": { "plateauDamageMultiplier": 1.1 }
+  "turret": {
+    "damage": 12,
+    "range": 210,
+    "attackSeconds": 0.68
+  },
+  "objectives": {
+    "captureSeconds": 10,
+    "captureRadius": 105,
+    "intelPerSecond": 0.5,
+    "damageBonusEach": 0.05,
+    "maxStack": 2,
+    "garrisonCapacity": 4,
+    "garrisonRangeMultiplier": 1.25,
+    "garrisonDamageTakenMultiplier": 0.6
+  },
+  "supply": {
+    "capacitySeconds": 12,
+    "radius": 470,
+    "outOfSupplyDamageMultiplier": 0.75
+  },
+  "production": {
+    "maxQueue": 6,
+    "cooldownSeconds": 3
+  },
+  "research": {
+    "fortifyIntelCost": 180,
+    "fortifySeconds": 40,
+    "doctrineIntelCost": 140,
+    "doctrineSeconds": 30
+  },
+  "veterancy": {
+    "regenDelaySeconds": 6
+  },
+  "repair": {
+    "healthPerSecond": 24,
+    "alloyPerHealth": 0.12
+  },
+  "economy": {
+    "upkeepSoftCap": 10
+  },
+  "terrain": {
+    "plateauDamageMultiplier": 1.1
+  }
 }
