@@ -425,6 +425,7 @@ const MAX_QUEUE = balance.production.maxQueue;
 const BUILD_COST = { refinery: balance.structures.refinery.alloyCost, barracks: balance.structures.barracks.alloyCost, turret: balance.structures.turret.alloyCost } as const;
 const FORTIFY_INTEL_COST = balance.research.fortifyIntelCost;
 const OBJECTIVE_CAPTURE_TIME = balance.objectives.captureSeconds;
+const OBJECTIVE_CAPTURE_RADIUS = balance.objectives.captureRadius;
 const OBJECTIVE_INTEL_RATE = balance.objectives.intelPerSecond;
 const SUPPLY_CAPACITY = balance.supply.capacitySeconds;
 const SUPPLY_RADIUS = balance.supply.radius;
@@ -683,7 +684,10 @@ function plateauTravelRoute(u: Unit, destination: P) {
     route = undefined;
   }
   if (route && plateau) {
-    const destinationInside = plateauContains(destination, plateau, 1.08);
+    // Use the actual walkable top, not the wider visual/cliff footprint. A
+    // destination beside the cliff must route through a ramp instead of
+    // convincing the unit it can walk straight over the back edge.
+    const destinationInside = plateauAt(destination)?.id === plateau.id;
     const entering = route.phase === "approach" || route.phase === "enter";
     if ((entering && !destinationInside) || (!entering && destinationInside)) {
       u.plateauRoute = undefined;
@@ -702,7 +706,7 @@ function plateauTravelRoute(u: Unit, destination: P) {
     const rampPlateau = TACTICAL_PLATEAUS.find((candidate) =>
       plateauContains(u, candidate, 1.34) && inPlateauRampLane(u, 18),
     );
-    const destinationPlateau = TACTICAL_PLATEAUS.find((candidate) => plateauContains(destination, candidate, 1.08));
+    const destinationPlateau = plateauAt(destination);
     plateau = insidePlateau || rampPlateau;
     if (plateau && destinationPlateau?.id === plateau.id) return undefined;
     if (!plateau && !destinationPlateau) return undefined;
@@ -2998,10 +3002,10 @@ export default function Home() {
       .filter((n) => n.life > 0);
     for (const objective of g.objectives || []) {
       const playerPresence = g.units.filter(
-        (unit) => unit.team === "player" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= 105,
+        (unit) => unit.team === "player" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= OBJECTIVE_CAPTURE_RADIUS,
       ).length;
       const enemyPresence = g.units.filter(
-        (unit) => unit.team === "enemy" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= 105,
+        (unit) => unit.team === "enemy" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= OBJECTIVE_CAPTURE_RADIUS,
       ).length;
       if (playerPresence > 0 && enemyPresence === 0) {
         objective.capture = Math.min(OBJECTIVE_CAPTURE_TIME, objective.capture + dt * Math.min(2, playerPresence));
@@ -3204,6 +3208,25 @@ export default function Home() {
         u.enemy = undefined;
         u.nav = undefined;
       }
+      const aiObjectiveTravel = u.team === "enemy" && u.type !== "worker" && u.target
+        ? (g.objectives || []).find((objective) => Math.hypot(objective.x - u.target!.x, objective.y - u.target!.y) <= 50)
+        : undefined;
+      const objectiveDefended = Boolean(aiObjectiveTravel && (
+        aiObjectiveTravel.owner === "player" ||
+        g.units.some((unit) =>
+          unit.team === "player" &&
+          unit.hp > 0 &&
+          Math.hypot(unit.x - aiObjectiveTravel.x, unit.y - aiObjectiveTravel.y) <= OBJECTIVE_CAPTURE_RADIUS + 80 &&
+          isVisibleFor(g, "enemy", unit, objectRadius(unit))
+        )
+      ));
+      // Rushing an unguarded neutral uplink is a valid direct-move strategy.
+      // Once the destination is hostile-owned or visibly defended, the same
+      // squad switches to move-and-engage without abandoning its objective.
+      if (aiObjectiveTravel) {
+        u.moveEngage = objectiveDefended;
+        if (objectiveDefended) u.stance = "pursue";
+      }
       if (target && u.moveEngage && u.target) {
         const travelSight = u.type === "drone" ? 320 : u.type === "tank" ? 280 : 230;
         if (Math.hypot(target.x - u.x, target.y - u.y) > travelSight * 1.35) {
@@ -3355,7 +3378,10 @@ export default function Home() {
         }
       } else if (u.target) {
         const d = Math.hypot(u.target.x - u.x, u.target.y - u.y);
-        if (d < 4) {
+        // The two objective units already have opposite formation offsets.
+        // Stop them within capture range rather than stacking on one pixel.
+        const arrivalDistance = aiObjectiveTravel ? 58 : 4;
+        if (d < arrivalDistance) {
           if (u.stance === "patrol" && u.patrol) {
             const destination = u.patrol.next === "a" ? u.patrol.a : u.patrol.b;
             u.patrol.next = u.patrol.next === "a" ? "b" : "a";
@@ -3712,6 +3738,8 @@ export default function Home() {
     if (g.time >= 30 && objectiveTarget && objectiveSquad.length >= 2) {
       objectiveSquad.forEach((unit, index) => {
         unit.target = { x: objectiveTarget.x + (index ? 28 : -28), y: objectiveTarget.y };
+        unit.moveEngage = objectiveTarget.owner === "player";
+        if (unit.moveEngage) unit.stance = "pursue";
         unit.nav = undefined;
       });
       nextAction();
