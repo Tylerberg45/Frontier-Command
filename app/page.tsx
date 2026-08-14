@@ -28,8 +28,13 @@ type Unit = {
   navCheckX?: number;
   navCheckY?: number;
   navSide?: 1 | -1;
-  /** Ramp route that forces ground units through a real plateau entrance or exit. */
-  plateauRoute?: { plateauId: number; rampIndex: number; phase: "approach" | "enter" | "exit" | "clear" };
+  /** Ramp or outside-bypass route used to keep ground units off closed cliff faces. */
+  plateauRoute?: {
+    plateauId: number;
+    rampIndex: number;
+    phase: "approach" | "enter" | "exit" | "clear" | "bypass";
+    bypass?: P;
+  };
   enemy?: number;
   carrying?: number;
   /** The resource currently in the worker's cargo hold. */
@@ -530,6 +535,46 @@ function inPlateauRampLane(point: P, padding = 0) {
     ),
   );
 }
+function segmentCrossesPlateau(start: P, end: P, plateau: TacticalPlateau, scale = 1) {
+  const toNormalized = (point: P) => {
+    const dx = point.x - plateau.x, dy = point.y - plateau.y;
+    const c = Math.cos(-plateau.rotation), s = Math.sin(-plateau.rotation);
+    return {
+      x: (dx * c - dy * s) / (plateau.rx * scale),
+      y: (dx * s + dy * c) / (plateau.ry * scale),
+    };
+  };
+  return distanceToSegment({ x: 0, y: 0 }, toNormalized(start), toNormalized(end)) <= 1;
+}
+function plateauBypassPoint(start: P, destination: P, plateau: TacticalPlateau) {
+  const candidates = Array.from({ length: 12 }, (_, index) => {
+    const angle = (index / 12) * Math.PI * 2;
+    const localX = Math.cos(angle) * plateau.rx * 1.55;
+    const localY = Math.sin(angle) * plateau.ry * 1.55;
+    const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
+    return {
+      x: plateau.x + localX * c - localY * s,
+      y: plateau.y + localX * s + localY * c,
+    };
+  });
+  // A unit already pressed against the collision ring first needs a clean
+  // outward escape point. On the next frame the regular two-leg bypass takes
+  // over and carries it around the plateau instead of back into the cliff.
+  if (plateauContains(start, plateau, 1.18)) {
+    return candidates.sort((a, b) =>
+      Math.hypot(start.x - a.x, start.y - a.y) - Math.hypot(start.x - b.x, start.y - b.y),
+    )[0];
+  }
+  return candidates
+    .filter((point) =>
+      !segmentCrossesPlateau(start, point, plateau, 1.16) &&
+      !segmentCrossesPlateau(point, destination, plateau, 1.16),
+    )
+    .sort((a, b) =>
+      Math.hypot(start.x - a.x, start.y - a.y) + Math.hypot(destination.x - a.x, destination.y - a.y) -
+      Math.hypot(start.x - b.x, start.y - b.y) - Math.hypot(destination.x - b.x, destination.y - b.y),
+    )[0];
+}
 function objectRadius(object: Unit | Building) {
   return object.type === "worker" || object.type === "trooper" || object.type === "tank" || object.type === "drone"
     ? stats[object.type].r
@@ -698,6 +743,18 @@ function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "h
   worker.workerMode = nextMode;
 }
 
+function isIdleWorker(g: Game, unit: Unit) {
+  if (unit.team !== "player" || unit.type !== "worker" || unit.hp <= 0 || unit.garrisonedAt) return false;
+  const hasPendingConstruction = (unit.buildQueue || (unit.buildTarget ? [unit.buildTarget] : []))
+    .some((id) => g.buildings.some((building) =>
+      building.id === id && building.team === unit.team && building.hp > 0 && (building.progress ?? 1) < 1,
+    ));
+  return !hasPendingConstruction &&
+    !unit.target && !unit.enemy && !unit.nav && !unit.repairTarget &&
+    !unit.mining && !unit.building && !unit.repairing &&
+    (unit.workerMode === "hold" || unit.workerMode === "repair" || Boolean(unit.autoRepair));
+}
+
 function plateauTravelRoute(u: Unit, destination: P) {
   if (u.type === "drone") {
     u.plateauRoute = undefined;
@@ -712,6 +769,20 @@ function plateauTravelRoute(u: Unit, destination: P) {
     route = undefined;
   }
   if (route && plateau) {
+    if (route.phase === "bypass") {
+      const bypass = route.bypass;
+      if (!bypass || !segmentCrossesPlateau(u, destination, plateau, 1.16)) {
+        u.plateauRoute = undefined;
+        u.nav = undefined;
+        return undefined;
+      }
+      if (Math.hypot(u.x - bypass.x, u.y - bypass.y) < 14) {
+        u.plateauRoute = undefined;
+        u.nav = undefined;
+        return plateauTravelRoute(u, destination);
+      }
+      return { goal: bypass, ignorePlateauId: undefined };
+    }
     // Use the actual walkable top, not the wider visual/cliff footprint. A
     // destination beside the cliff must route through a ramp instead of
     // convincing the unit it can walk straight over the back edge.
@@ -737,7 +808,25 @@ function plateauTravelRoute(u: Unit, destination: P) {
     const destinationPlateau = plateauAt(destination);
     plateau = insidePlateau || rampPlateau;
     if (plateau && destinationPlateau?.id === plateau.id) return undefined;
-    if (!plateau && !destinationPlateau) return undefined;
+    if (!plateau && !destinationPlateau) {
+      const blockingPlateau = TACTICAL_PLATEAUS
+        .filter((candidate) => segmentCrossesPlateau(u, destination, candidate, 1.16))
+        .sort((a, b) =>
+          distanceToSegment(a, u, destination) - distanceToSegment(b, u, destination),
+        )[0];
+      if (!blockingPlateau) return undefined;
+      const bypass = plateauBypassPoint(u, destination, blockingPlateau);
+      if (!bypass) return undefined;
+      route = {
+        plateauId: blockingPlateau.id,
+        rampIndex: 0,
+        phase: "bypass",
+        bypass,
+      };
+      u.plateauRoute = route;
+      u.nav = undefined;
+      return { goal: bypass, ignorePlateauId: undefined };
+    }
     const routePlateau = plateau || destinationPlateau!;
     const rampIndex = routePlateau.ramps
       .map((_, index) => {
@@ -1465,6 +1554,7 @@ export default function Home() {
     matchStarted = useRef(false),
     peer = useRef<PeerSession | null>(null),
     multiplayerRole = useRef<MultiplayerRole>("solo"),
+    privateMatchFog = useRef(true),
     guestSnapshotReady = useRef(false),
     networkSnapshotAt = useRef(0),
     lastHudTick = useRef(-1);
@@ -1507,6 +1597,7 @@ export default function Home() {
     selectedStance: null as Unit["stance"] | "mixed" | null,
     autoRepair: false,
     repairingWorkers: 0,
+    idleWorkers: 0,
   });
   const [saveStatus, setSaveStatus] = useState("AUTOSAVE ON");
   const [moveChooser, setMoveChooser] = useState<{
@@ -1542,6 +1633,10 @@ export default function Home() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    if (network.role === "solo") privateMatchFog.current = newMatchFog;
+  }, [network.role, newMatchFog]);
 
   useEffect(() => {
     let active = true;
@@ -1725,6 +1820,7 @@ export default function Home() {
       selectedStance: chosenStances.length === 1 ? chosenStances[0] : chosenStances.length ? "mixed" : null,
       autoRepair: chosenUnits.some((unit) => unit.type === "worker") && chosenUnits.filter((unit) => unit.type === "worker").every((unit) => unit.autoRepair),
       repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && unit.repairTarget).length,
+      idleWorkers: g.units.filter((unit) => isIdleWorker(g, unit)).length,
     });
   };
 
@@ -2117,12 +2213,12 @@ export default function Home() {
     }
   }
 
-  function peerHandlers(role: "host" | "guest") {
+  function peerHandlers(role: "host" | "guest", roomFog = privateMatchFog.current) {
     return {
       onOpen: () => {
         setNetwork((current) => ({ ...current, role, status: "connected", detail: "Private link established." }));
         if (role === "host") {
-          game.current = initialMultiplayer({ fogEnabled: newMatchFog });
+          game.current = initialMultiplayer({ fogEnabled: roomFog });
           multiplayerRole.current = "host";
           matchStarted.current = false;
           setHomeOpen(false);
@@ -2144,7 +2240,8 @@ export default function Home() {
     guestSnapshotReady.current = false;
     setNetwork({ role: "host", status: "creating", code: "", detail: "Preparing a private room…" });
     try {
-      const session = await hostRoom(newMatchFog, peerHandlers("host"));
+      const roomFog = privateMatchFog.current;
+      const session = await hostRoom(roomFog, peerHandlers("host", roomFog));
       peer.current = session;
       setNetwork((current) => ({ ...current, role: "host", code: session.code, status: current.status === "creating" ? "waiting" : current.status }));
     } catch (error) {
@@ -2166,6 +2263,7 @@ export default function Home() {
     try {
       const joined = await joinRoom(code, peerHandlers("guest"));
       peer.current = joined.session;
+      privateMatchFog.current = joined.fogEnabled;
       setNewMatchFog(joined.fogEnabled);
       setNetwork((current) => ({ ...current, role: "guest", code }));
     } catch (error) {
@@ -2900,6 +2998,25 @@ export default function Home() {
     g.camera.y = selected.reduce((sum, o) => sum + o.y, 0) / selected.length;
     g.message = "Camera centered on selection.";
     sync();
+  };
+
+  const selectNextIdleWorker = () => {
+    const g = game.current;
+    const idleWorkers = g.units.filter((unit) => isIdleWorker(g, unit));
+    if (!idleWorkers.length) return;
+    const currentIndex = idleWorkers.findIndex((unit) => g.selected.includes(unit.id));
+    const worker = idleWorkers[(currentIndex + 1) % idleWorkers.length];
+    g.selected = [worker.id];
+    g.mode = "select";
+    moveCameraTo(worker.x, worker.y);
+    g.message = `Idle Worker selected · ${idleWorkers.length} awaiting orders.`;
+    sync();
+  };
+
+  const chooseNewMatchFog = (fogEnabled: boolean) => {
+    if (network.role !== "solo") return;
+    privateMatchFog.current = fogEnabled;
+    setNewMatchFog(fogEnabled);
   };
 
   const cancelCommandMode = () => {
@@ -4784,6 +4901,20 @@ export default function Home() {
         x.textAlign = "center";
         x.fillText((u.level || 1) === 3 ? "◆◆" : "◆", u.x, u.y - s.r - 14);
       }
+      if (isIdleWorker(g, u)) {
+        const pulse = 1 + Math.sin(g.time * 5 + u.id) * .12;
+        x.save();
+        x.translate(u.x, u.y - s.r - 25);
+        x.rotate(Math.PI / 4);
+        x.fillStyle = "rgba(4, 27, 28, .9)";
+        x.strokeStyle = "#70e2ce";
+        x.lineWidth = 2;
+        x.shadowColor = "#55d6b5";
+        x.shadowBlur = 9;
+        x.fillRect(-6 * pulse, -6 * pulse, 12 * pulse, 12 * pulse);
+        x.strokeRect(-6 * pulse, -6 * pulse, 12 * pulse, 12 * pulse);
+        x.restore();
+      }
       if (unitInSupplyRange(g, u)) {
         const shieldX = u.x + s.r + 4;
         const shieldY = u.y - s.r - 4;
@@ -5147,10 +5278,14 @@ export default function Home() {
       const selectedUnits = g.units.filter(
         (u) => u.team === "player" && g.selected.includes(u.id),
       );
+      const friendlyUnitTap = g.units
+        .filter((unit) => unit.team === "player" && !unit.garrisonedAt)
+        .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))
+        .find((unit) => Math.hypot(unit.x - wp.x, unit.y - wp.y) < Math.max(42, stats[unit.type].r + 28));
       const relayTap = (g.objectives || [])
         .filter((objective) => objectiveIntel(g, objective).visible)
         .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))[0];
-      if (g.mode === "select" && relayTap && Math.hypot(relayTap.x - wp.x, relayTap.y - wp.y) < 72) {
+      if (g.mode === "select" && !friendlyUnitTap && relayTap && Math.hypot(relayTap.x - wp.x, relayTap.y - wp.y) < 72) {
         if (selectedUnits.length) {
           command(wp.x, wp.y);
         } else {
@@ -5177,7 +5312,7 @@ export default function Home() {
           buildingStats[nearestBuilding.type].r + 18
           ? nearestBuilding
           : undefined;
-      const hit = buildingTap || [...g.units, ...g.buildings]
+      const hit = buildingTap || friendlyUnitTap || [...g.units, ...g.buildings]
         .filter((o) => o.team === "player" && (!isUnit(o) || !o.garrisonedAt))
         .sort(
           (a, b) =>
@@ -5219,16 +5354,7 @@ export default function Home() {
         sync();
         return;
       }
-      if (
-        g.mode === "select" &&
-        selectedUnits.length &&
-        hit &&
-        hitDistance < 55 &&
-        !g.selected.includes(hit.id)
-      ) {
-        command(wp.x, wp.y);
-        lastTap.current = null;
-      } else if (hit && hitDistance < 55 && g.mode === "select") {
+      if (hit && hitDistance < 55 && g.mode === "select") {
         const now = performance.now(),
           unit = g.units.find((u) => u.id === hit.id),
           building = g.buildings.find((b) => b.id === hit.id),
@@ -5432,7 +5558,8 @@ export default function Home() {
                 role="radio"
                 aria-checked={!newMatchFog}
                 className={!newMatchFog ? "selected" : ""}
-                onClick={() => setNewMatchFog(false)}
+                disabled={network.role !== "solo"}
+                onClick={() => chooseNewMatchFog(false)}
               >
                 <i>◎</i><b>OPEN INTEL</b><small>No fog of war. Full battlefield visible.</small>
               </button>
@@ -5440,7 +5567,8 @@ export default function Home() {
                 role="radio"
                 aria-checked={newMatchFog}
                 className={newMatchFog ? "selected" : ""}
-                onClick={() => setNewMatchFog(true)}
+                disabled={network.role !== "solo"}
+                onClick={() => chooseNewMatchFog(true)}
               >
                 <i>◐</i><b>TACTICAL FOG</b><small>Scout to reveal terrain and enemy forces.</small>
               </button>
@@ -5453,7 +5581,7 @@ export default function Home() {
               <div className="room-waiting">
                 <small>{network.status === "waiting" ? "ROOM READY — SEND THIS CODE" : network.role === "guest" ? "JOINING PRIVATE ROOM" : "ESTABLISHING TACTICAL LINK"}</small>
                 <strong>{network.code || "······"}</strong>
-                <p>{network.status === "waiting" ? "The second player opens Frontier Command, enters this code, and joins." : network.role === "guest" ? "Connecting directly to the host commander…" : "Preparing the private connection…"}</p>
+                <p>{network.status === "waiting" ? `${newMatchFog ? "Tactical Fog" : "Open Intel"} is locked for this room. The second player opens Frontier Command, enters this code, and joins.` : network.role === "guest" ? "Connecting directly to the host commander…" : "Preparing the private connection…"}</p>
                 <button onClick={() => { leaveMultiplayer(); setNetwork({ role: "solo", status: "idle", code: "", detail: "" }); }}>CANCEL ROOM</button>
               </div>
             ) : (
@@ -5464,7 +5592,7 @@ export default function Home() {
                   disabled={["creating", "joining", "connecting"].includes(network.status)}
                 >
                   <b>CREATE PRIVATE MATCH</b>
-                  <small>GET A SIX-CHARACTER ROOM CODE</small>
+                  <small>{newMatchFog ? "TACTICAL FOG" : "OPEN INTEL"} · GET A ROOM CODE</small>
                 </button>
                 <div className="join-room">
                   <input
@@ -5595,6 +5723,17 @@ export default function Home() {
             −
           </button>
         </div>
+        {ui.idleWorkers > 0 && (
+          <button
+            className="idle-worker-button"
+            onClick={selectNextIdleWorker}
+            aria-label={`${ui.idleWorkers} idle Worker${ui.idleWorkers === 1 ? "" : "s"}. Select and center on the next one.`}
+            title="Select next idle Worker"
+          >
+            <span className="command-art unit-worker" aria-hidden="true" />
+            <b>{ui.idleWorkers}</b>
+          </button>
+        )}
         {paused && (
           <div className="pause-menu">
             <div className="menu-panel">
