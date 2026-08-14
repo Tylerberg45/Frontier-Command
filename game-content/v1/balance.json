@@ -14,7 +14,7 @@
     "turret": { "radius": 28, "health": 360, "buildSeconds": 15, "alloyCost": 240 }
   },
   "turret": { "damage": 12, "range": 210, "attackSeconds": 0.68 },
-  "objectives": { "captureSeconds": 10, "intelPerSecond": 0.5, "damageBonusEach": 0.05, "maxStack": 2 },
+  "objectives": { "captureSeconds": 10, "captureRadius": 105, "intelPerSecond": 0.5, "damageBonusEach": 0.05, "maxStack": 2 },
   "supply": { "capacitySeconds": 12, "radius": 470, "outOfSupplyDamageMultiplier": 0.75 },
   "production": { "maxQueue": 6, "cooldownSeconds": 3 },
   "research": { "fortifyIntelCost": 180, "fortifySeconds": 40, "doctrineIntelCost": 140, "doctrineSeconds": 30 },
