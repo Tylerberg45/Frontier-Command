@@ -115,6 +115,13 @@ type Objective = {
   y: number;
   owner: "player" | "enemy" | "neutral";
   capture: number;
+  /** Fortified shell that must fall before garrisoned Troopers can be hit. */
+  hp: number;
+  max: number;
+  /** Match time when automatic reconstruction may begin. */
+  rebuildAt?: number;
+  /** Zero-to-one reconstruction progress. The relay stays unusable until complete. */
+  rebuildProgress?: number;
 };
 type Shot = {
   x: number;
@@ -440,7 +447,9 @@ const OBJECTIVE_CAPTURE_TIME = balance.objectives.captureSeconds;
 const OBJECTIVE_CAPTURE_RADIUS = balance.objectives.captureRadius;
 const RELAY_GARRISON_CAPACITY = balance.objectives.garrisonCapacity;
 const RELAY_RANGE_MULTIPLIER = balance.objectives.garrisonRangeMultiplier;
-const RELAY_DAMAGE_TAKEN_MULTIPLIER = balance.objectives.garrisonDamageTakenMultiplier;
+const RELAY_MAX_HP = balance.objectives.relayMaxHp;
+const RELAY_REBUILD_COOLDOWN = balance.objectives.rebuildCooldownSeconds;
+const RELAY_REBUILD_DURATION = balance.objectives.rebuildDurationSeconds;
 const OBJECTIVE_INTEL_RATE = balance.objectives.intelPerSecond;
 const SUPPLY_CAPACITY = balance.supply.capacitySeconds;
 const SUPPLY_RADIUS = balance.supply.radius;
@@ -1052,9 +1061,49 @@ function mapObjectives(): Objective[] {
   const verticalSpread = 430 + Math.random() * 220;
   const horizontalOffset = -110 + Math.random() * 220;
   return [
-    { id: 1, x: W / 2 + horizontalOffset, y: H / 2 - verticalSpread, owner: "neutral", capture: 0 },
-    { id: 2, x: W / 2 - horizontalOffset, y: H / 2 + verticalSpread, owner: "neutral", capture: 0 },
+    { id: 1, x: W / 2 + horizontalOffset, y: H / 2 - verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
+    { id: 2, x: W / 2 - horizontalOffset, y: H / 2 + verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
   ];
+}
+
+function intelRelayOperational(objective: Objective) {
+  return objective.hp > 0 && objective.rebuildAt === undefined;
+}
+
+function recordRelayAttackAlert(g: Game, objective: Objective, defendingTeam: Unit["team"]) {
+  const alerts = g.attackAlerts || (g.attackAlerts = []);
+  const targetId = -(10000 + objective.id);
+  const existing = alerts.find((alert) => alert.targetId === targetId && alert.team === defendingTeam);
+  if (existing) {
+    existing.x = objective.x;
+    existing.y = objective.y;
+    existing.expiresAt = g.time + 4.5;
+  } else {
+    alerts.push({
+      targetId,
+      team: defendingTeam,
+      x: objective.x,
+      y: objective.y,
+      startedAt: g.time,
+      expiresAt: g.time + 4.5,
+    });
+  }
+  if (alerts.length > 8) alerts.splice(0, alerts.length - 8);
+}
+
+function destroyIntelRelay(g: Game, objective: Objective, defendingTeam: Unit["team"]) {
+  objective.hp = 0;
+  objective.owner = "neutral";
+  objective.capture = 0;
+  objective.rebuildAt = g.time + RELAY_REBUILD_COOLDOWN;
+  objective.rebuildProgress = 0;
+  relayOccupants(g, objective).forEach((occupant) => ejectFromIntelRelay(g, occupant));
+  g.units.forEach((unit) => {
+    if (unit.garrisonTarget === objective.id) unit.garrisonTarget = undefined;
+  });
+  if (defendingTeam === "player" || isVisible(g, objective, HIGH_GROUND_RADIUS)) {
+    g.message = `${defendingTeam === "player" ? "INTEL RELAY BREACHED" : "ENEMY RELAY BREACHED"} — garrison exposed; rebuild lock active.`;
+  }
 }
 
 function relayOccupants(g: Game, objective: Objective, team?: Unit["team"]) {
@@ -1067,7 +1116,7 @@ function relayOccupants(g: Game, objective: Objective, team?: Unit["team"]) {
 }
 
 function enterIntelRelay(g: Game, unit: Unit, objective: Objective) {
-  if (unit.type !== "trooper" || unit.hp <= 0) return false;
+  if (unit.type !== "trooper" || unit.hp <= 0 || !intelRelayOperational(objective)) return false;
   const occupants = relayOccupants(g, objective);
   if (occupants.some((occupant) => occupant.team !== unit.team) || occupants.length >= RELAY_GARRISON_CAPACITY) return false;
   const slot = occupants.length;
@@ -1473,6 +1522,12 @@ function hydrateGame(parsed: Game, message: string): Game {
           y: Number.isFinite(objective.y) ? objective.y : index === 0 ? 300 : H - 300,
           owner: ["player", "enemy", "neutral"].includes(objective.owner) ? objective.owner : "neutral",
           capture: Math.max(-OBJECTIVE_CAPTURE_TIME, Math.min(OBJECTIVE_CAPTURE_TIME, Number(objective.capture) || 0)),
+          hp: Math.max(0, Math.min(RELAY_MAX_HP, Number.isFinite(objective.hp) ? Number(objective.hp) : RELAY_MAX_HP)),
+          max: RELAY_MAX_HP,
+          rebuildAt: Number.isFinite(objective.rebuildAt) ? Number(objective.rebuildAt) : undefined,
+          rebuildProgress: Number.isFinite(objective.rebuildProgress)
+            ? Math.max(0, Math.min(1, Number(objective.rebuildProgress)))
+            : undefined,
         }))
       : mapObjectives(),
     message,
@@ -1913,6 +1968,7 @@ export default function Home() {
     const relay = (g.objectives || [])
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
+      if (!intelRelayOperational(relay)) return;
       const hostileOccupants = relayOccupants(g, relay, "player");
       if (hostileOccupants.length) {
         units.filter((unit) => unit.type !== "worker").forEach((unit, index) => {
@@ -2450,6 +2506,14 @@ export default function Home() {
       .filter((objective) => objectiveIntel(g, objective).visible)
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
+      if (!intelRelayOperational(relay)) {
+        const coolingDown = relay.rebuildAt !== undefined && g.time < relay.rebuildAt;
+        g.message = coolingDown
+          ? `INTEL RELAY OFFLINE · reconstruction begins in ${Math.max(1, Math.ceil(relay.rebuildAt! - g.time))}s.`
+          : `INTEL RELAY REBUILDING · ${Math.round((relay.rebuildProgress || 0) * 100)}% complete.`;
+        sync();
+        return;
+      }
       const hostileOccupants = relayOccupants(g, relay).filter((unit) => unit.team === "enemy");
       if (hostileOccupants.length) {
         const attackers = ours.filter((unit) => unit.type !== "worker");
@@ -3298,6 +3362,26 @@ export default function Home() {
       .map((n) => ({ ...n, life: n.life - dt, y: n.y - 18 * dt }))
       .filter((n) => n.life > 0);
     for (const objective of g.objectives || []) {
+      if (!intelRelayOperational(objective)) {
+        objective.owner = "neutral";
+        objective.capture = 0;
+        const rebuildAt = objective.rebuildAt ?? g.time + RELAY_REBUILD_COOLDOWN;
+        objective.rebuildAt = rebuildAt;
+        if (g.time >= rebuildAt) {
+          objective.rebuildProgress = Math.min(1, (objective.rebuildProgress || 0) + dt / RELAY_REBUILD_DURATION);
+          objective.hp = Math.round(objective.max * objective.rebuildProgress);
+          if (objective.rebuildProgress >= 1) {
+            objective.hp = objective.max;
+            objective.rebuildAt = undefined;
+            objective.rebuildProgress = undefined;
+            if (isVisible(g, objective, HIGH_GROUND_RADIUS)) {
+              g.message = "INTEL RELAY REBUILT — garrison access restored.";
+              sync();
+            }
+          }
+        }
+        continue;
+      }
       const oldOwner = objective.owner;
       const occupants = relayOccupants(g, objective);
       const garrisonTeam = occupants[0]?.team;
@@ -3502,7 +3586,7 @@ export default function Home() {
       if (u.hp <= 0) continue;
       if (u.garrisonTarget && !u.garrisonedAt) {
         const relay = (g.objectives || []).find((objective) => objective.id === u.garrisonTarget);
-        if (!relay || u.type !== "trooper") {
+        if (!relay || u.type !== "trooper" || !intelRelayOperational(relay)) {
           u.garrisonTarget = undefined;
         } else if (
           Math.hypot(relay.x - u.x, relay.y - u.y) <= 64 &&
@@ -3513,7 +3597,7 @@ export default function Home() {
       }
       if (u.garrisonedAt) {
         const relay = (g.objectives || []).find((objective) => objective.id === u.garrisonedAt);
-        if (!relay) ejectFromIntelRelay(g, u);
+        if (!relay || !intelRelayOperational(relay)) ejectFromIntelRelay(g, u);
         else {
           u.target = undefined;
           u.garrisonTarget = undefined;
@@ -3632,7 +3716,8 @@ export default function Home() {
         }
       }
       if (target) {
-        const d = Math.hypot(target.x - u.x, target.y - u.y),
+        const combatTarget = target;
+        const d = Math.hypot(combatTarget.x - u.x, combatTarget.y - u.y),
           s = stats[u.type],
           range = unitCombatRange(u);
         if (firingWhileDirectTravel && u.target) {
@@ -3653,35 +3738,44 @@ export default function Home() {
           } else if (u.stance === "hold" || u.garrisonedAt) {
             u.enemy = undefined;
           } else {
-            const targetBuilding = g.buildings.find((b) => b.id === target.id);
-            moveUnitToward(g, u, target, dt, targetBuilding?.id);
+            const targetBuilding = g.buildings.find((b) => b.id === combatTarget.id);
+            moveUnitToward(g, u, combatTarget, dt, targetBuilding?.id);
           }
         } else {
-          u.facing = Math.atan2(target.y - u.y, target.x - u.x);
+          u.facing = Math.atan2(combatTarget.y - u.y, combatTarget.x - u.x);
           attackTimers.current[u.id] =
             (Number.isFinite(attackTimers.current[u.id])
               ? attackTimers.current[u.id]
               : 0) - dt;
           if (attackTimers.current[u.id] <= 0) {
-            const wasAlive = target.hp > 0,
+            const wasAlive = combatTarget.hp > 0,
               level = u.level || 1,
-              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, target) * terrainMultiplier(g, u, target));
-            const protectedDamage = damage * (isUnit(target) && target.garrisonedAt ? RELAY_DAMAGE_TAKEN_MULTIPLIER : 1);
-            const actualDamage = Math.min(target.hp, protectedDamage);
-            const isBuilding = g.buildings.some((b) => b.id === target.id);
-            target.hp = Math.max(0, target.hp - actualDamage);
-            recordAttackAlert(g, target);
+              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * terrainMultiplier(g, u, combatTarget));
+            const relayShield = isUnit(combatTarget) && combatTarget.garrisonedAt
+              ? (g.objectives || []).find((objective) => objective.id === combatTarget.garrisonedAt && intelRelayOperational(objective))
+              : undefined;
+            const actualDamage = Math.min(relayShield?.hp ?? combatTarget.hp, damage);
+            const isBuilding = g.buildings.some((b) => b.id === combatTarget.id);
+            const hitX = relayShield?.x ?? combatTarget.x;
+            const hitY = relayShield?.y ?? combatTarget.y;
+            if (relayShield) {
+              relayShield.hp = Math.max(0, relayShield.hp - actualDamage);
+              recordRelayAttackAlert(g, relayShield, combatTarget.team);
+            } else {
+              combatTarget.hp = Math.max(0, combatTarget.hp - actualDamage);
+              recordAttackAlert(g, combatTarget);
+            }
             u.lastCombatAt = g.time;
-            if (!isBuilding && isUnit(target)) target.lastCombatAt = g.time;
-            if (isBuilding && target.team === "player") {
+            if (!relayShield && !isBuilding && isUnit(combatTarget)) combatTarget.lastCombatAt = g.time;
+            if (isBuilding && combatTarget.team === "player") {
               g.matchStats.baseDamage += actualDamage;
             }
-            g.damageNumbers.push({ x: target.x, y: target.y - 18, amount: Math.round(protectedDamage), life: 0.9, team: u.team });
+            g.damageNumbers.push({ x: hitX, y: hitY - 18, amount: Math.round(actualDamage), life: 0.9, team: u.team });
             g.shots.push({
               x: u.x,
               y: u.y,
-              tx: target.x,
-              ty: target.y,
+              tx: hitX,
+              ty: hitY,
               team: u.team,
               kind: u.type === "tank" ? "shell" : "bullet",
               life: u.type === "tank" ? 0.22 : 0.11,
@@ -3690,8 +3784,9 @@ export default function Home() {
             if (u.type === "trooper" || u.type === "tank" || u.type === "drone") {
               u.attackUntil = g.time + (u.type === "tank" ? 0.30 : 0.18);
             }
-            if (wasAlive && target.hp <= 0) {
-              if (!isBuilding && isUnit(target)) {
+            if (relayShield && relayShield.hp <= 0) destroyIntelRelay(g, relayShield, combatTarget.team);
+            if (wasAlive && combatTarget.hp <= 0) {
+              if (!isBuilding && isUnit(combatTarget)) {
                 const ownValue = g.units
                   .filter((unit) => unit.team === u.team && unit.type !== "worker" && unit.hp > 0)
                   .reduce((sum, unit) => sum + unitCost[unit.type], 0);
@@ -3699,7 +3794,7 @@ export default function Home() {
                   .filter((unit) => unit.team !== u.team && unit.type !== "worker" && unit.hp > 0)
                   .reduce((sum, unit) => sum + unitCost[unit.type], 0);
                 if (ownValue < opposingValue * .8) {
-                  const bounty = Math.max(20, Math.round(unitCost[target.type] * .22));
+                  const bounty = Math.max(20, Math.round(unitCost[combatTarget.type] * .22));
                   if (u.team === "player") g.credits += bounty;
                   else g.enemyCredits += bounty;
                   g.message = `${u.team === "player" ? "COMEBACK BOUNTY" : "Enemy comeback bounty"}: +${bounty} credits for eliminating a superior force.`;
@@ -3707,7 +3802,7 @@ export default function Home() {
               }
               u.xp =
                 (u.xp || 0) +
-                (isBuilding ? 55 : target.type === "tank" ? 45 : 25);
+                (isBuilding ? 55 : combatTarget.type === "tank" ? 45 : 25);
               const old = u.level || 1;
               u.level = (u.xp || 0) >= 180 ? 3 : (u.xp || 0) >= 75 ? 2 : 1;
               if (u.level > old) {
@@ -3870,13 +3965,24 @@ export default function Home() {
           ? attackTimers.current[turret.id]
           : 0) - dt;
       if (attackTimers.current[turret.id] <= 0) {
-        const damage = turretStats.damage * (target.garrisonedAt ? RELAY_DAMAGE_TAKEN_MULTIPLIER : 1);
-        target.hp = Math.max(0, target.hp - damage);
-        recordAttackAlert(g, target);
-        target.lastCombatAt = g.time;
-        g.damageNumbers.push({ x: target.x, y: target.y - 18, amount: Math.round(damage), life: 0.9, team: turret.team });
-        g.shots.push({ x: turret.x, y: turret.y, tx: target.x, ty: target.y, team: turret.team, kind: "bullet", life: 0.12, maxLife: 0.12 });
+        const relayShield = target.garrisonedAt
+          ? (g.objectives || []).find((objective) => objective.id === target.garrisonedAt && intelRelayOperational(objective))
+          : undefined;
+        const damage = Math.min(relayShield?.hp ?? target.hp, turretStats.damage);
+        const hitX = relayShield?.x ?? target.x;
+        const hitY = relayShield?.y ?? target.y;
+        if (relayShield) {
+          relayShield.hp = Math.max(0, relayShield.hp - damage);
+          recordRelayAttackAlert(g, relayShield, target.team);
+        } else {
+          target.hp = Math.max(0, target.hp - damage);
+          recordAttackAlert(g, target);
+          target.lastCombatAt = g.time;
+        }
+        g.damageNumbers.push({ x: hitX, y: hitY - 18, amount: Math.round(damage), life: 0.9, team: turret.team });
+        g.shots.push({ x: turret.x, y: turret.y, tx: hitX, ty: hitY, team: turret.team, kind: "bullet", life: 0.12, maxLife: 0.12 });
         turret.turretFireUntil = g.time + 0.16;
+        if (relayShield && relayShield.hp <= 0) destroyIntelRelay(g, relayShield, target.team);
         attackTimers.current[turret.id] = turretStats.rate;
       }
     }
@@ -4087,7 +4193,7 @@ export default function Home() {
       }
     }
     const objectiveTarget = (g.objectives || [])
-      .filter((objective) => objective.owner !== "enemy")
+      .filter((objective) => objective.owner !== "enemy" && intelRelayOperational(objective))
       .sort((a, b) => Math.hypot(a.x - hq.x, a.y - hq.y) - Math.hypot(b.x - hq.x, b.y - hq.y))[0];
     const objectiveSquad = army.filter((unit) => !unit.garrisonedAt && !unit.enemy && !unit.target).slice(0, 2);
     if (g.time >= 30 && objectiveTarget && objectiveSquad.length >= 2) {
@@ -4350,7 +4456,9 @@ export default function Home() {
     for (const objective of g.objectives || []) {
       const intel = objectiveIntel(g, objective);
       if (!intel.discovered) continue;
-      const color = !intel.visible ? "#78918c" : objective.owner === "player" ? "#57d7c0" : objective.owner === "enemy" ? "#ef526f" : "#f5d77a";
+      const operational = intelRelayOperational(objective);
+      const coolingDown = !operational && objective.rebuildAt !== undefined && g.time < objective.rebuildAt;
+      const color = !intel.visible ? "#78918c" : !operational ? coolingDown ? "#ef715c" : "#f5b85f" : objective.owner === "player" ? "#57d7c0" : objective.owner === "enemy" ? "#ef526f" : "#f5d77a";
       const progress = Math.min(1, Math.abs(objective.capture) / OBJECTIVE_CAPTURE_TIME);
       const occupants = relayOccupants(g, objective);
       const selectedGarrison = occupants.some((unit) => g.selected.includes(unit.id));
@@ -4358,6 +4466,7 @@ export default function Home() {
       x.translate(objective.x, objective.y);
       x.fillStyle = "rgba(0,0,0,.3)";
       x.beginPath(); x.ellipse(0, 31, 46, 13, 0, 0, Math.PI * 2); x.fill();
+      x.globalAlpha = operational ? 1 : coolingDown ? .28 : .42 + (objective.rebuildProgress || 0) * .5;
       if (art.current.intelRelay) x.drawImage(art.current.intelRelay, -57, -62, 114, 114);
       else {
         x.fillStyle = "#172529";
@@ -4365,18 +4474,36 @@ export default function Home() {
         x.lineWidth = 3;
         x.beginPath(); x.ellipse(0, 6, 44, 32, 0, 0, Math.PI * 2); x.fill(); x.stroke();
       }
+      x.globalAlpha = 1;
       x.strokeStyle = selectedGarrison ? "#ffe17d" : color;
       x.lineWidth = selectedGarrison ? 3 : 2;
       x.setLineDash(selectedGarrison ? [7, 5] : []);
       x.beginPath(); x.ellipse(0, 16, 49, 35, 0, 0, Math.PI * 2); x.stroke();
       x.setLineDash([]);
-      if (intel.visible) {
+      if (intel.visible && operational) {
         x.strokeStyle = color;
         x.lineWidth = 4;
         x.beginPath(); x.arc(0, 10, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); x.stroke();
       }
+      if (intel.visible && operational && objective.hp < objective.max) {
+        x.fillStyle = "rgba(3, 10, 12, .9)";
+        x.fillRect(-42, -67, 84, 7);
+        x.fillStyle = objective.hp / objective.max > .35 ? "#f5b85f" : "#ef526f";
+        x.fillRect(-41, -66, 82 * (objective.hp / objective.max), 5);
+      }
+      if (intel.visible && !operational) {
+        x.strokeStyle = color;
+        x.lineWidth = 4;
+        x.beginPath();
+        x.arc(0, 10, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (objective.rebuildProgress || 0));
+        x.stroke();
+        if (coolingDown) {
+          x.lineWidth = 5;
+          x.beginPath(); x.moveTo(-13, -3); x.lineTo(13, 23); x.moveTo(13, -3); x.lineTo(-13, 23); x.stroke();
+        }
+      }
       for (let slot = 0; slot < RELAY_GARRISON_CAPACITY; slot++) {
-        x.fillStyle = intel.visible && slot < occupants.length ? color : "rgba(4, 14, 17, .86)";
+        x.fillStyle = intel.visible && operational && slot < occupants.length ? color : "rgba(4, 14, 17, .86)";
         x.strokeStyle = color;
         x.lineWidth = 1.5;
         x.fillRect(-22 + slot * 12, 54, 8, 8);
@@ -5071,7 +5198,7 @@ export default function Home() {
     for (const objective of g.objectives || []) {
       const intel = objectiveIntel(g, objective);
       if (!intel.discovered) continue;
-      x.fillStyle = !intel.visible ? "#78918c" : objective.owner === "player" ? "#55d6b5" : objective.owner === "enemy" ? "#ed526d" : "#f6d366";
+      x.fillStyle = !intel.visible ? "#78918c" : !intelRelayOperational(objective) ? "#f08a5d" : objective.owner === "player" ? "#55d6b5" : objective.owner === "enemy" ? "#ed526d" : "#f6d366";
       x.beginPath();
       x.arc(mx + (objective.x / W) * mw, my + (objective.y / H) * mh, 3, 0, Math.PI * 2);
       x.fill();
@@ -5325,7 +5452,11 @@ export default function Home() {
         } else {
           const occupants = relayOccupants(g, relayTap, "player");
           g.selected = occupants.map((unit) => unit.id);
-          g.message = occupants.length
+          g.message = !intelRelayOperational(relayTap)
+            ? relayTap.rebuildAt !== undefined && g.time < relayTap.rebuildAt
+              ? `INTEL RELAY OFFLINE · reconstruction begins in ${Math.max(1, Math.ceil(relayTap.rebuildAt - g.time))}s.`
+              : `INTEL RELAY REBUILDING · ${Math.round((relayTap.rebuildProgress || 0) * 100)}% complete.`
+            : occupants.length
             ? `${occupants.length}/${RELAY_GARRISON_CAPACITY} relay Troopers selected · tap ground to deploy them.`
             : `INTEL RELAY · ${relayOccupants(g, relayTap).length}/${RELAY_GARRISON_CAPACITY} occupied.`;
         }

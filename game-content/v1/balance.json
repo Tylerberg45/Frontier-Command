@@ -85,7 +85,9 @@
     "maxStack": 2,
     "garrisonCapacity": 4,
     "garrisonRangeMultiplier": 1.25,
-    "garrisonDamageTakenMultiplier": 0.6
+    "relayMaxHp": 700,
+    "rebuildCooldownSeconds": 12,
+    "rebuildDurationSeconds": 18
   },
   "supply": {
     "capacitySeconds": 12,
