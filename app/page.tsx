@@ -1563,8 +1563,6 @@ export default function Home() {
       trooperWalk?: HTMLImageElement;
       trooperWalkC?: HTMLImageElement;
       tankDirections?: HTMLImageElement;
-      tankMove?: HTMLImageElement;
-      tankMoveC?: HTMLImageElement;
       droneDirections?: HTMLImageElement;
       droneMove?: HTMLImageElement;
       trooperFire?: HTMLImageElement;
@@ -1696,7 +1694,7 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const load = (
-      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "tankMove" | "tankMoveC" | "droneDirections" | "droneMove" | "trooperFire" | "tankFire" | "workerMine" | "turretDirections" | "turretFire" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
+      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "trooperFire" | "tankFire" | "workerMine" | "turretDirections" | "turretFire" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
       src: string,
     ) => {
       const image = new Image();
@@ -1742,8 +1740,6 @@ export default function Home() {
     load("trooperWalk", "/game-art/frontier-trooper-walk-b-v3.png");
     load("trooperWalkC", "/game-art/frontier-trooper-walk-c-v4.png");
     load("tankDirections", "/game-art/frontier-tank-directions-v2.png");
-    load("tankMove", "/game-art/frontier-tank-move-b-v3.png");
-    load("tankMoveC", "/game-art/frontier-tank-move-c-v4.png");
     load("droneDirections", "/game-art/frontier-strike-drone-directions-v1.png");
     load("droneMove", "/game-art/frontier-strike-drone-move-b-v2.png");
     load("trooperFire", "/game-art/frontier-trooper-fire-v1.png");
@@ -4892,7 +4888,9 @@ export default function Home() {
       const movementAtlases = {
         worker: [restingAtlas, art.current.workerWalk, art.current.workerWalkC],
         trooper: [restingAtlas, art.current.trooperWalk, art.current.trooperWalkC],
-        tank: [restingAtlas, art.current.tankMove, art.current.tankMoveC],
+        // Tank hulls stay visually rigid. Track movement is animated as a
+        // scrolling tread overlay instead of swapping whole-body poses.
+        tank: [restingAtlas],
         drone: [restingAtlas, art.current.droneMove],
       }[u.type].filter((atlas): atlas is HTMLImageElement => Boolean(atlas));
       const attackAtlas = {
@@ -4903,7 +4901,7 @@ export default function Home() {
       }[u.type];
       const firing = (u.attackUntil || 0) > g.time;
       const miningFrame = Boolean(u.mining) && Math.floor((g.time + u.id * .041) * 8) % 2 === 1;
-      const movementFrame = Math.floor((g.time + u.id * .037) * (u.type === "tank" ? 6 : 8)) % Math.max(1, movementAtlases.length);
+      const movementFrame = Math.floor((g.time + u.id * .037) * 8) % Math.max(1, movementAtlases.length);
       const directionalAtlas = sentryMode
         ? (firing ? art.current.turretFire : art.current.turretDirections) || restingAtlas
         : firing
@@ -4999,6 +4997,27 @@ export default function Home() {
           size.w,
           size.h,
         );
+        if (u.type === "tank" && u.moving && !firing) {
+          const heading = Number.isFinite(u.facing) ? u.facing! : u.team === "player" ? 0 : Math.PI;
+          const treadPhase = (g.time * 34 + u.id * 2.7) % 10;
+          x.save();
+          x.rotate(heading);
+          x.lineCap = "round";
+          x.strokeStyle = "rgba(4, 9, 10, .78)";
+          x.lineWidth = 5;
+          for (const trackY of [-17, 17]) {
+            x.beginPath(); x.moveTo(-31, trackY); x.lineTo(31, trackY); x.stroke();
+          }
+          x.strokeStyle = "rgba(165, 181, 172, .72)";
+          x.lineWidth = 2.2;
+          x.setLineDash([4, 6]);
+          x.lineDashOffset = -treadPhase;
+          for (const trackY of [-17, 17]) {
+            x.beginPath(); x.moveTo(-31, trackY); x.lineTo(31, trackY); x.stroke();
+          }
+          x.setLineDash([]);
+          x.restore();
+        }
         x.fillStyle = accent;
         x.shadowColor = accent;
         x.shadowBlur = 3;
