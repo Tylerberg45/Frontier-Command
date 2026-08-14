@@ -51,3 +51,7 @@ New tunable stats and story definitions belong in `game-content/`, not inside re
 ## Hosting
 
 The current web build is deployed through ChatGPT Sites. `.openai/hosting.json` preserves that deployment connection.
+
+## Product Roadmap
+
+- [Progression and Unity migration roadmap](docs/PROGRESSION_ROADMAP.md)
