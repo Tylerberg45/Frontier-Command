@@ -28,8 +28,8 @@ type Unit = {
   navCheckX?: number;
   navCheckY?: number;
   navSide?: 1 | -1;
-  /** Two-stage route that forces ground units through a real plateau ramp. */
-  plateauRoute?: { plateauId: number; rampIndex: number; phase: "exit" | "clear" };
+  /** Ramp route that forces ground units through a real plateau entrance or exit. */
+  plateauRoute?: { plateauId: number; rampIndex: number; phase: "approach" | "enter" | "exit" | "clear" };
   enemy?: number;
   carrying?: number;
   /** The resource currently in the worker's cargo hold. */
@@ -379,7 +379,6 @@ const DOCTRINE_INTEL_COST = balance.research.doctrineIntelCost;
 const DOCTRINE_DURATION = balance.research.doctrineSeconds;
 const PRODUCTION_COOLDOWN = balance.production.cooldownSeconds;
 const UPKEEP_SOFT_CAP = balance.economy.upkeepSoftCap;
-const VETERAN_REGEN_DELAY = balance.veterancy.regenDelaySeconds;
 const REPAIR_RATE = balance.repair.healthPerSecond;
 const REPAIR_ALLOY_PER_HP = balance.repair.alloyPerHealth;
 const TUTORIALS_KEY = "frontier-command-tutorials-v1";
@@ -551,6 +550,16 @@ function buildingOperational(b: Building) {
   return b.hp > 0 && !b.packed && !b.relocation && (b.progress === undefined || b.progress >= 1);
 }
 
+function unitInSupplyRange(g: Game, unit: Unit) {
+  return g.buildings.some(
+    (building) =>
+      building.team === unit.team &&
+      building.type !== "turret" &&
+      buildingOperational(building) &&
+      Math.hypot(building.x - unit.x, building.y - unit.y) <= SUPPLY_RADIUS,
+  );
+}
+
 function hqBlockedAt(g: Game, hq: Building, x: number, y: number, deploying = false) {
   const radius = buildingStats.hq.r * (deploying ? 1 : .8);
   return x < radius + 24 || x > W - radius - 24 || y < radius + 24 || y > H - radius - 24 ||
@@ -611,42 +620,70 @@ function plateauTravelRoute(u: Unit, destination: P) {
   let plateau = route
     ? TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId)
     : undefined;
-  if (route && (!plateau || plateauContains(destination, plateau, 1.02))) {
+  if (route && !plateau) {
     u.plateauRoute = undefined;
     route = undefined;
-    plateau = undefined;
   }
-  if (route && plateau && !plateauContains(u, plateau, 1.48)) {
-    u.plateauRoute = undefined;
-    route = undefined;
-    plateau = undefined;
+  if (route && plateau) {
+    const destinationInside = plateauContains(destination, plateau, 1.08);
+    const entering = route.phase === "approach" || route.phase === "enter";
+    if ((entering && !destinationInside) || (!entering && destinationInside)) {
+      u.plateauRoute = undefined;
+      route = undefined;
+      plateau = undefined;
+    } else if (entering && plateauContains(u, plateau, .76)) {
+      u.plateauRoute = undefined;
+      return undefined;
+    } else if (!entering && route.phase === "clear" && !plateauContains(u, plateau, 1.38)) {
+      u.plateauRoute = undefined;
+      return undefined;
+    }
   }
   if (!route) {
     const insidePlateau = TACTICAL_PLATEAUS.find((candidate) => plateauContains(u, candidate, .98));
-    plateau = insidePlateau || TACTICAL_PLATEAUS.find((candidate) =>
+    const rampPlateau = TACTICAL_PLATEAUS.find((candidate) =>
       plateauContains(u, candidate, 1.34) && inPlateauRampLane(u, 18),
     );
-    if (!plateau || plateauContains(destination, plateau, 1.02)) return undefined;
-    const rampIndex = plateau.ramps
+    const destinationPlateau = TACTICAL_PLATEAUS.find((candidate) => plateauContains(destination, candidate, 1.08));
+    plateau = insidePlateau || rampPlateau;
+    if (plateau && destinationPlateau?.id === plateau.id) return undefined;
+    if (!plateau && !destinationPlateau) return undefined;
+    const routePlateau = plateau || destinationPlateau!;
+    const rampIndex = routePlateau.ramps
       .map((_, index) => {
-        const inner = plateauRampPoint(plateau!, index, .72);
-        const outer = plateauRampPoint(plateau!, index, 1.28);
+        const inner = plateauRampPoint(routePlateau, index, .72);
+        const outer = plateauRampPoint(routePlateau, index, 1.28);
         return {
           index,
-          cost: Math.hypot(u.x - inner.x, u.y - inner.y) + Math.hypot(destination.x - outer.x, destination.y - outer.y),
+          cost: plateau
+            ? Math.hypot(u.x - inner.x, u.y - inner.y) + Math.hypot(destination.x - outer.x, destination.y - outer.y)
+            : Math.hypot(u.x - outer.x, u.y - outer.y) + Math.hypot(destination.x - inner.x, destination.y - inner.y),
         };
       })
       .sort((a, b) => a.cost - b.cost)[0].index;
-    // A unit already sitting just outside a ramp (including one loaded from an
-    // older save) only needs the clear phase; do not pull it back onto the mesa.
-    route = { plateauId: plateau.id, rampIndex, phase: insidePlateau ? "exit" : "clear" };
+    route = {
+      plateauId: routePlateau.id,
+      rampIndex,
+      phase: plateau ? (insidePlateau ? "exit" : "clear") : "approach",
+    };
     u.plateauRoute = route;
     u.nav = undefined;
+    plateau = routePlateau;
   }
   plateau ||= TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId);
   if (!plateau) return undefined;
-  const exit = plateauRampPoint(plateau, route.rampIndex, 1.28);
-  if (route.phase === "exit" && Math.hypot(u.x - exit.x, u.y - exit.y) < 13) {
+  const outer = plateauRampPoint(plateau, route.rampIndex, 1.28);
+  const inner = plateauRampPoint(plateau, route.rampIndex, .72);
+  if (route.phase === "approach" && Math.hypot(u.x - outer.x, u.y - outer.y) < 16) {
+    route.phase = "enter";
+    u.nav = undefined;
+  }
+  if (route.phase === "enter" && (Math.hypot(u.x - inner.x, u.y - inner.y) < 13 || plateauContains(u, plateau, .76))) {
+    u.plateauRoute = undefined;
+    u.nav = undefined;
+    return undefined;
+  }
+  if (route.phase === "exit" && Math.hypot(u.x - outer.x, u.y - outer.y) < 13) {
     route.phase = "clear";
     u.nav = undefined;
   }
@@ -655,8 +692,8 @@ function plateauTravelRoute(u: Unit, destination: P) {
     return undefined;
   }
   return {
-    goal: route.phase === "exit" ? exit : destination,
-    ignorePlateauId: plateau.id,
+    goal: route.phase === "approach" ? outer : route.phase === "enter" ? inner : route.phase === "exit" ? outer : destination,
+    ignorePlateauId: route.phase === "enter" || route.phase === "exit" || route.phase === "clear" ? plateau.id : undefined,
   };
 }
 
@@ -2830,9 +2867,7 @@ export default function Home() {
       unit.moving = false;
       unit.mining = false;
       unit.repairing = false;
-      const inSupply = g.buildings.some(
-        (building) => building.team === unit.team && building.type !== "turret" && buildingOperational(building) && Math.hypot(building.x - unit.x, building.y - unit.y) <= SUPPLY_RADIUS,
-      );
+      const inSupply = unitInSupplyRange(g, unit);
       unit.supply = inSupply
         ? Math.min(SUPPLY_CAPACITY, (unit.supply ?? SUPPLY_CAPACITY) + dt * 3)
         : Math.max(0, (unit.supply ?? SUPPLY_CAPACITY) - dt);
@@ -2847,15 +2882,7 @@ export default function Home() {
       }
       if (unit.retreating) unit.enemy = undefined;
       const regenRate = veteranRegenRate(unit);
-      const outOfCombatFor = g.time - (unit.lastCombatAt ?? -Infinity);
-      if (
-        regenRate > 0 &&
-        outOfCombatFor >= VETERAN_REGEN_DELAY &&
-        !unit.enemy &&
-        !unit.target &&
-        !unit.retreating &&
-        (unit.supply ?? SUPPLY_CAPACITY) > 0
-      ) {
+      if (regenRate > 0) {
         unit.hp = Math.min(unit.max, unit.hp + unit.max * regenRate * dt);
       }
     }
@@ -3196,7 +3223,7 @@ export default function Home() {
               if (u.level > old) {
                 u.max = Math.round(u.max * 1.12);
                 u.hp = Math.min(u.max, u.hp + Math.round(u.max * 0.25));
-                g.message = `${u.team === "enemy" ? "Enemy " : ""}${u.type.toUpperCase()} promoted to rank ${u.level} — +18% damage, +12% max HP, ${(veteranRegenRate(u) * 100).toFixed(0)}% HP/s veteran regen after ${VETERAN_REGEN_DELAY}s out of combat.`;
+                g.message = `${u.team === "enemy" ? "Enemy " : ""}${u.type.toUpperCase()} promoted to rank ${u.level} — +18% damage, +12% max HP, ${(veteranRegenRate(u) * 100).toFixed(0)}% HP/s continuous veteran regeneration.`;
                 sync();
               }
             }
@@ -3686,6 +3713,26 @@ export default function Home() {
         x.restore();
       }
     }
+    // Friendly supply sources project a quiet ground boundary instead of a
+    // text label. Overlapping rings show how deployed structures extend the
+    // supported base network.
+    x.save();
+    x.strokeStyle = "rgba(85, 214, 181, .36)";
+    x.fillStyle = "rgba(85, 214, 181, .025)";
+    x.lineWidth = 2;
+    x.setLineDash([18, 13]);
+    x.lineDashOffset = -(g.time * 7) % 31;
+    x.shadowColor = "rgba(85, 214, 181, .4)";
+    x.shadowBlur = 5;
+    for (const source of g.buildings.filter(
+      (building) => building.team === "player" && building.type !== "turret" && buildingOperational(building),
+    )) {
+      x.beginPath();
+      x.arc(source.x, source.y, SUPPLY_RADIUS, 0, Math.PI * 2);
+      x.fill();
+      x.stroke();
+    }
+    x.restore();
     const selectedResourceWorker = g.units.find((unit) =>
       unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
     const closestResourceIndex = selectedResourceWorker
@@ -4164,6 +4211,20 @@ export default function Home() {
         sel = g.selected.includes(u.id),
         player = u.team === "player",
         accent = player ? "#70e2ce" : "#f05b76";
+      if (sel) {
+        x.save();
+        x.strokeStyle = "rgba(246, 211, 102, .78)";
+        x.fillStyle = "rgba(246, 211, 102, .025)";
+        x.lineWidth = 2;
+        x.setLineDash([7, 6]);
+        x.shadowColor = "rgba(246, 211, 102, .45)";
+        x.shadowBlur = 5;
+        x.beginPath();
+        x.arc(u.x, u.y, s.range, 0, Math.PI * 2);
+        x.fill();
+        x.stroke();
+        x.restore();
+      }
       x.save();
       x.translate(u.x, u.y + (u.type === "drone" ? Math.sin(g.time * 5 + u.id) * 2 - 7 : 0));
       x.fillStyle = "rgba(0,0,0,.26)";
@@ -4306,11 +4367,27 @@ export default function Home() {
         x.textAlign = "center";
         x.fillText((u.level || 1) === 3 ? "◆◆" : "◆", u.x, u.y - s.r - 14);
       }
-      if ((u.supply ?? SUPPLY_CAPACITY) <= 0) {
-        x.fillStyle = "#ffb35c";
-        x.font = "900 9px system-ui";
-        x.textAlign = "center";
-        x.fillText("OUT OF SUPPLY", u.x, u.y + s.r + 16);
+      if (unitInSupplyRange(g, u)) {
+        const shieldX = u.x + s.r + 4;
+        const shieldY = u.y - s.r - 4;
+        x.save();
+        x.translate(shieldX, shieldY);
+        x.fillStyle = player ? "rgba(85, 214, 181, .74)" : "rgba(237, 82, 109, .72)";
+        x.strokeStyle = player ? "#b8fff0" : "#ffc1cc";
+        x.lineWidth = 1.3;
+        x.shadowColor = player ? "#55d6b5" : "#ed526d";
+        x.shadowBlur = 6;
+        x.beginPath();
+        x.moveTo(0, -7);
+        x.lineTo(6, -4);
+        x.lineTo(5, 3);
+        x.quadraticCurveTo(3, 7, 0, 9);
+        x.quadraticCurveTo(-3, 7, -5, 3);
+        x.lineTo(-6, -4);
+        x.closePath();
+        x.fill();
+        x.stroke();
+        x.restore();
       }
     }
     for (const s of g.shots || []) {
