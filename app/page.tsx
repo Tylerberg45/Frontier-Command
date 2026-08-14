@@ -3664,25 +3664,27 @@ export default function Home() {
         x.beginPath(); x.moveTo(plateau.rx - 54, 0); x.lineTo(plateau.rx + 12, 0); x.stroke();
       }
       x.restore();
-      x.save();
-      x.textAlign = "center";
-      x.font = "800 9px system-ui";
-      x.fillStyle = "rgba(246, 211, 102, .82)";
-      x.fillText("ELEVATED · +10% DMG", plateau.x, plateau.y - 8);
-      x.font = "700 7px system-ui";
-      x.fillStyle = "rgba(227, 241, 234, .62)";
-      x.fillText("2 RAMP ACCESS", plateau.x, plateau.y + 5);
-      for (const ramp of plateau.ramps) {
-        const localX = Math.cos(ramp) * plateau.rx * .86;
-        const localY = Math.sin(ramp) * plateau.ry * .86;
-        const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
-        const rx = plateau.x + localX * c - localY * s;
-        const ry = plateau.y + localX * s + localY * c;
-        x.strokeStyle = "rgba(246, 211, 102, .78)";
-        x.lineWidth = 3;
-        x.beginPath(); x.arc(rx, ry, 13, 0, Math.PI * 2); x.stroke();
+      if (tutorialsEnabled) {
+        x.save();
+        x.textAlign = "center";
+        x.font = "800 9px system-ui";
+        x.fillStyle = "rgba(246, 211, 102, .82)";
+        x.fillText("ELEVATED · +10% DMG", plateau.x, plateau.y - 8);
+        x.font = "700 7px system-ui";
+        x.fillStyle = "rgba(227, 241, 234, .62)";
+        x.fillText("2 RAMP ACCESS", plateau.x, plateau.y + 5);
+        for (const ramp of plateau.ramps) {
+          const localX = Math.cos(ramp) * plateau.rx * .86;
+          const localY = Math.sin(ramp) * plateau.ry * .86;
+          const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
+          const rx = plateau.x + localX * c - localY * s;
+          const ry = plateau.y + localX * s + localY * c;
+          x.strokeStyle = "rgba(246, 211, 102, .78)";
+          x.lineWidth = 3;
+          x.beginPath(); x.arc(rx, ry, 13, 0, Math.PI * 2); x.stroke();
+        }
+        x.restore();
       }
-      x.restore();
     }
     const selectedResourceWorker = g.units.find((unit) =>
       unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
