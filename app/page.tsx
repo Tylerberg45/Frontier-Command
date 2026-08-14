@@ -678,6 +678,20 @@ function queueWorkerConstruction(worker: Unit, buildingId: number) {
   worker.nav = undefined;
 }
 
+/** Put a selected Worker on an existing wireframe immediately, preserving later jobs. */
+function assignWorkerToPendingConstruction(worker: Unit, buildingId: number) {
+  const queue = Array.isArray(worker.buildQueue)
+    ? worker.buildQueue
+    : worker.buildTarget ? [worker.buildTarget] : [];
+  worker.buildQueue = [buildingId, ...queue.filter((id) => id !== buildingId)];
+  worker.buildTarget = buildingId;
+  worker.workerMode = "construct";
+  worker.repairTarget = undefined;
+  worker.enemy = undefined;
+  worker.target = undefined;
+  worker.nav = undefined;
+}
+
 function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "hold") {
   worker.buildQueue = [];
   worker.buildTarget = undefined;
@@ -1831,6 +1845,13 @@ export default function Home() {
       return;
     }
     const remoteWorkers = units.filter((unit) => unit.type === "worker");
+    const pendingConstruction = g.buildings
+      .filter((building) => building.team === "enemy" && (building.progress ?? 1) < 1)
+      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
+    if (remoteWorkers.length && pendingConstruction && Math.hypot(pendingConstruction.x - wx, pendingConstruction.y - wy) <= buildingStats[pendingConstruction.type].r + 18) {
+      remoteWorkers.forEach((worker) => assignWorkerToPendingConstruction(worker, pendingConstruction.id));
+      return;
+    }
     const friendlyRepairable = [...g.buildings, ...g.units]
       .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
@@ -1899,7 +1920,8 @@ export default function Home() {
     if (name === "sell") {
       if (!building || building.type === "hq") return;
       const refund = Math.floor(BUILD_COST[building.type] / 2);
-      g.enemyAlloy += refund;
+      if (building.type === "barracks") g.enemyCredits += refund;
+      else g.enemyAlloy += refund;
       if (building.progress === 1 && building.type !== "turret")
         g.enemyPower = Math.max(0, (g.enemyPower ?? 12) - (building.type === "refinery" ? 4 : 2));
       g.buildings = g.buildings.filter((candidate) => candidate.id !== building!.id);
@@ -2633,11 +2655,12 @@ export default function Home() {
       const soldId = b.id;
       g.buildings = g.buildings.filter((x) => x.id !== soldId);
       g.selected = [];
-      g.alloy += refund;
+      if (b.type === "barracks") g.credits += refund;
+      else g.alloy += refund;
       g.matchStats.meaningfulActions++;
       if (b.progress === 1 && b.type !== "turret")
         g.power = Math.max(0, g.power - (b.type === "refinery" ? 4 : 2));
-      g.message = `${b.type} sold for ${refund} alloy.`;
+      g.message = `${b.type} sold for ${refund} ${b.type === "barracks" ? "credits" : "alloy"}.`;
       sync();
       return;
     }
@@ -5168,6 +5191,15 @@ export default function Home() {
         building.id === hit.id && (building.progress ?? 1) < 1,
       );
       if (hitWireframe && hitDistance < 55) {
+        const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
+        if (g.mode === "select" && selectedWorkers.length) {
+          selectedWorkers.forEach((worker) => assignWorkerToPendingConstruction(worker, hitWireframe.id));
+          g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to the ${hitWireframe.type} wireframe.`;
+          lastTap.current = null;
+          pointer.current = null;
+          sync();
+          return;
+        }
         g.selected = [hitWireframe.id];
         g.mode = "select";
         g.message = `${hitWireframe.type.toUpperCase()} wireframe selected · cancel it below or leave it in the Worker queue.`;
@@ -5783,7 +5815,7 @@ export default function Home() {
               ui.productionBuilding === "barracks" ? <>
                 {productionButton("trooper")}{productionButton("tank")}{productionButton("drone")}
                 <button onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>COMBAT UNIT DEPLOYMENT</small></span></button>
-                <button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL BARRACKS<small>50% REFUND</small></span></button>
+                <button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL BARRACKS<small>50% · {Math.floor(BUILD_COST.barracks / 2)} CREDITS</small></span></button>
               </> : <div className="production-empty"><strong>BARRACKS UNDER CONSTRUCTION</strong><small>Combat units appear here when construction is complete.</small></div>
             ) : ui.selectedBuilding ? (
               <button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL {ui.selectedBuilding === "turret" ? "SENTRY" : ui.selectedBuilding.toUpperCase()}<small>50% REFUND</small></span></button>
