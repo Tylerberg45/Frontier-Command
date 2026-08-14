@@ -164,7 +164,9 @@ body {
   gap: 6px;
   margin-top: 9px;
 }
-.command-research-preview > span {
+.command-research-preview > span,
+.command-path {
+  display: block;
   padding: 7px 5px;
   border: 1px solid rgba(85, 214, 181, .18);
   background: rgba(3, 14, 17, .6);
@@ -179,6 +181,47 @@ body {
   color: #6c8985;
   font-size: 6px;
   letter-spacing: .12em;
+}
+.command-path b {
+  display: block;
+  color: #b7d8d3;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .07em;
+}
+.command-path.fire-control.unlocked {
+  border-color: rgba(246, 211, 102, .72);
+  background: linear-gradient(145deg, rgba(70, 59, 27, .72), rgba(8, 29, 31, .88));
+}
+.command-path.fire-control.unlocked b { color: #fff1b7; }
+.command-path div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  margin-top: 6px;
+}
+.command-path button {
+  min-height: 20px;
+  padding: 2px;
+  border: 1px solid #356865;
+  background: #0d2c2e;
+  color: #aee0d8;
+  font: 800 6px/1 inherit;
+  letter-spacing: .08em;
+}
+.command-path button:disabled {
+  border-color: #274341;
+  background: #09191b;
+  color: #56706d;
+  cursor: not-allowed;
+}
+.command-path em {
+  display: block;
+  margin-top: 5px;
+  color: #7d9995;
+  font-size: 6px;
+  font-style: normal;
+  letter-spacing: .1em;
 }
 .home-panel button {
   cursor: pointer;

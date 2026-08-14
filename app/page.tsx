@@ -217,7 +217,8 @@ type MatchStats = {
 };
 type MatchReview = MatchStats & { result: "won" | "lost"; duration: number; score: number; summary: string; commandXp?: number };
 type DifficultyProfile = { wins: number; losses: number; recent: ("won" | "lost")[]; skill: number; reviews: MatchReview[] };
-type CommandProfile = { xp: number; spentPoints: number; lastAward: number };
+type CommandProfile = { xp: number; spentPoints: number; lastAward: number; fireControlRank?: number };
+const FIRE_CONTROL_MAX_RANK = 5;
 const emptyStats = (): MatchStats => ({ playerActions: 0, meaningfulActions: 0, orders: 0, unitsBuilt: 0, combatUnitsBuilt: 0, unitsLost: 0, enemyUnitsDestroyed: 0, baseDamage: 0, peakArmy: 0, totalCreditsSpent: 0, startedAt: 0 });
 function readDifficulty(): DifficultyProfile {
   if (typeof window === "undefined") return { wins: 0, losses: 0, recent: [], skill: 0, reviews: [] };
@@ -243,22 +244,24 @@ function commandLevelForXp(xp: number) {
   return level;
 }
 function readCommandProfile(): CommandProfile {
-  if (typeof window === "undefined") return { xp: 0, spentPoints: 0, lastAward: 0 };
+  if (typeof window === "undefined") return { xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
   try {
     const stored = JSON.parse(localStorage.getItem(COMMAND_PROFILE_KEY) || "null") as Partial<CommandProfile> | null;
     if (stored) {
+      const fireControlRank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, Math.floor(Number(stored.fireControlRank) || 0)));
       return {
         xp: Math.max(0, Math.floor(Number(stored.xp) || 0)),
-        spentPoints: Math.max(0, Math.floor(Number(stored.spentPoints) || 0)),
+        spentPoints: Math.max(fireControlRank, Math.floor(Number(stored.spentPoints) || 0)),
         lastAward: Math.max(0, Math.floor(Number(stored.lastAward) || 0)),
+        fireControlRank,
       };
     }
     // Existing commanders keep credit for matches completed before the
     // progression system was introduced.
     const history = readDifficulty();
-    return { xp: history.wins * 100 + history.losses * 40, spentPoints: 0, lastAward: 0 };
+    return { xp: history.wins * 100 + history.losses * 40, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
   } catch {
-    return { xp: 0, spentPoints: 0, lastAward: 0 };
+    return { xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
   }
 }
 function commandProfileProgress(profile: CommandProfile) {
@@ -1500,7 +1503,7 @@ export default function Home() {
   } | null>(null);
   const [paused, setPaused] = useState(false);
   const [homeOpen, setHomeOpen] = useState(true);
-  const [commandProfile, setCommandProfile] = useState<CommandProfile>({ xp: 0, spentPoints: 0, lastAward: 0 });
+  const [commandProfile, setCommandProfile] = useState<CommandProfile>({ xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 });
   const [hasAutosave, setHasAutosave] = useState(false);
   const [newMatchFog, setNewMatchFog] = useState(true);
   const [joinCode, setJoinCode] = useState("");
@@ -5289,6 +5292,25 @@ export default function Home() {
         : { key: "select-units", title: "FIELD TUTORIAL", text: "Select a Worker to construct, your HQ to train or research, or a completed Barracks to train combat units." };
   const showActiveTip = tutorialsEnabled && !homeOpen && !paused && !dismissedTips.includes(activeTip.key);
   const commandProgress = commandProfileProgress(commandProfile);
+  const fireControlRank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, commandProfile.fireControlRank || 0));
+  const saveCommandProfile = (next: CommandProfile) => {
+    localStorage.setItem(COMMAND_PROFILE_KEY, JSON.stringify(next));
+    return next;
+  };
+  const purchaseFireControl = () => {
+    setCommandProfile((current) => {
+      const rank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, current.fireControlRank || 0));
+      if (rank >= FIRE_CONTROL_MAX_RANK || commandProfileProgress(current).points < 1) return current;
+      return saveCommandProfile({ ...current, fireControlRank: rank + 1, spentPoints: current.spentPoints + 1 });
+    });
+  };
+  const refundFireControl = () => {
+    setCommandProfile((current) => {
+      const rank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, current.fireControlRank || 0));
+      if (rank < 1) return current;
+      return saveCommandProfile({ ...current, fireControlRank: rank - 1, spentPoints: Math.max(0, current.spentPoints - 1) });
+    });
+  };
   const productionButton = (type: Unit["type"]) => {
     const active = ui.production?.type === type;
     const coolingDown = !ui.production && ui.productionCooldown > 0;
@@ -5356,8 +5378,16 @@ export default function Home() {
                 <span>{commandProgress.current} / {commandProgress.needed} COMMAND XP</span>
                 {commandProfile.lastAward > 0 && <small>LAST MATCH +{commandProfile.lastAward}</small>}
               </div>
-              <div className="command-research-preview" aria-label="Upcoming command research paths">
-                <span>⌁ FIRE CONTROL<small>COMING NEXT</small></span>
+              <div className="command-research-preview" aria-label="Command research paths">
+                <section className={`command-path fire-control ${fireControlRank ? "unlocked" : ""}`} aria-label={`Fire Control rank ${fireControlRank} of ${FIRE_CONTROL_MAX_RANK}`}>
+                  <b>⌁ FIRE CONTROL</b>
+                  <small>RANK {fireControlRank}/{FIRE_CONTROL_MAX_RANK} · 2% RATE/RANK</small>
+                  <div>
+                    <button type="button" onClick={purchaseFireControl} disabled={commandProgress.points < 1 || fireControlRank >= FIRE_CONTROL_MAX_RANK}>SPEND</button>
+                    <button type="button" onClick={refundFireControl} disabled={fireControlRank < 1}>REFUND</button>
+                  </div>
+                  <em>EFFECT PENDING</em>
+                </section>
                 <span>⬡ REINFORCED FRAMES<small>COMING NEXT</small></span>
                 <span>◎ TACTICAL INTELLIGENCE<small>COMING NEXT</small></span>
               </div>
