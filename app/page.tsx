@@ -178,6 +178,7 @@ type Game = {
 const SAVE_KEY = "frontier-command-save-v1";
 const MANUAL_SAVE_KEY = "frontier-command-manual-save-v1";
 const PROFILE_KEY = "frontier-command-difficulty-v1";
+const COMMAND_PROFILE_KEY = "frontier-command-command-profile-v1";
 const COMMANDER_KEY = "frontier-command-active-commander-v1";
 const SINGLE_SAVE_MIGRATION_KEY = "frontier-command-single-save-migrated-v1";
 
@@ -210,8 +211,9 @@ type MatchStats = {
   totalCreditsSpent: number;
   startedAt: number;
 };
-type MatchReview = MatchStats & { result: "won" | "lost"; duration: number; score: number; summary: string };
+type MatchReview = MatchStats & { result: "won" | "lost"; duration: number; score: number; summary: string; commandXp?: number };
 type DifficultyProfile = { wins: number; losses: number; recent: ("won" | "lost")[]; skill: number; reviews: MatchReview[] };
+type CommandProfile = { xp: number; spentPoints: number; lastAward: number };
 const emptyStats = (): MatchStats => ({ playerActions: 0, meaningfulActions: 0, orders: 0, unitsBuilt: 0, combatUnitsBuilt: 0, unitsLost: 0, enemyUnitsDestroyed: 0, baseDamage: 0, peakArmy: 0, totalCreditsSpent: 0, startedAt: 0 });
 function readDifficulty(): DifficultyProfile {
   if (typeof window === "undefined") return { wins: 0, losses: 0, recent: [], skill: 0, reviews: [] };
@@ -227,6 +229,46 @@ function readDifficulty(): DifficultyProfile {
     };
   } catch { return { wins: 0, losses: 0, recent: [], skill: 0, reviews: [] }; }
 }
+function commandXpForLevel(level: number) {
+  const bounded = Math.max(1, Math.floor(level));
+  return 50 * (bounded - 1) * bounded;
+}
+function commandLevelForXp(xp: number) {
+  let level = 1;
+  while (xp >= commandXpForLevel(level + 1)) level++;
+  return level;
+}
+function readCommandProfile(): CommandProfile {
+  if (typeof window === "undefined") return { xp: 0, spentPoints: 0, lastAward: 0 };
+  try {
+    const stored = JSON.parse(localStorage.getItem(COMMAND_PROFILE_KEY) || "null") as Partial<CommandProfile> | null;
+    if (stored) {
+      return {
+        xp: Math.max(0, Math.floor(Number(stored.xp) || 0)),
+        spentPoints: Math.max(0, Math.floor(Number(stored.spentPoints) || 0)),
+        lastAward: Math.max(0, Math.floor(Number(stored.lastAward) || 0)),
+      };
+    }
+    // Existing commanders keep credit for matches completed before the
+    // progression system was introduced.
+    const history = readDifficulty();
+    return { xp: history.wins * 100 + history.losses * 40, spentPoints: 0, lastAward: 0 };
+  } catch {
+    return { xp: 0, spentPoints: 0, lastAward: 0 };
+  }
+}
+function commandProfileProgress(profile: CommandProfile) {
+  const level = commandLevelForXp(profile.xp);
+  const floor = commandXpForLevel(level);
+  const ceiling = commandXpForLevel(level + 1);
+  return {
+    level,
+    points: Math.max(0, level - 1 - profile.spentPoints),
+    current: profile.xp - floor,
+    needed: ceiling - floor,
+    progress: Math.max(0, Math.min(1, (profile.xp - floor) / Math.max(1, ceiling - floor))),
+  };
+}
 function adaptiveDifficulty(): number {
   const p = readDifficulty();
   if (p.wins === 0 && p.losses === 0 && p.recent.length === 0) return 0.82;
@@ -241,6 +283,7 @@ function isEasiest(value: number) {
   return value <= 0.87;
 }
 function saveResult(result: "won" | "lost", g: Game) {
+  const commandProfile = readCommandProfile();
   const p = readDifficulty();
   p[result === "won" ? "wins" : "losses"]++;
   p.recent = [...p.recent, result].slice(-5);
@@ -262,8 +305,16 @@ function saveResult(result: "won" | "lost", g: Game) {
     ? score >= 75 ? "Dominant win" : score >= 58 ? "Strong win" : "Close win"
     : score >= 48 ? "Promising loss" : "Learning match";
   p.skill = Math.round(Math.max(0, Math.min(100, p.skill * 0.7 + score * 0.3)));
-  p.reviews = [...p.reviews, { ...s, result, duration: g.time, score, summary }].slice(-5);
+  const controlledUplinks = (g.objectives || []).filter((objective) => objective.owner === "player").length;
+  const participation = Math.max(.2, Math.min(1, g.time / 240));
+  const commandXp = Math.max(8, Math.round((score * .6 + (result === "won" ? 45 : 18) + controlledUplinks * 8) * participation));
+  p.reviews = [...p.reviews, { ...s, result, duration: g.time, score, summary, commandXp }].slice(-5);
   localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+  localStorage.setItem(COMMAND_PROFILE_KEY, JSON.stringify({
+    ...commandProfile,
+    xp: commandProfile.xp + commandXp,
+    lastAward: commandXp,
+  } satisfies CommandProfile));
 }
 
 // The battlefield is intentionally larger than the viewport. The minimap is the
@@ -1382,6 +1433,7 @@ export default function Home() {
   } | null>(null);
   const [paused, setPaused] = useState(false);
   const [homeOpen, setHomeOpen] = useState(true);
+  const [commandProfile, setCommandProfile] = useState<CommandProfile>({ xp: 0, spentPoints: 0, lastAward: 0 });
   const [hasAutosave, setHasAutosave] = useState(false);
   const [newMatchFog, setNewMatchFog] = useState(true);
   const [joinCode, setJoinCode] = useState("");
@@ -1399,6 +1451,13 @@ export default function Home() {
   const [dismissedTips, setDismissedTips] = useState<string[]>([]);
   const pausedRef = useRef(true);
   const lastCountdown = useRef(90);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setCommandProfile(readCommandProfile());
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -3511,12 +3570,20 @@ export default function Home() {
     }
     if (!g.buildings.some((b) => b.team === "player" && b.type === "hq")) {
       g.over = "lost";
-      if (multiplayerRole.current === "solo" && !g.resultRecorded) { saveResult("lost", g); g.resultRecorded = true; }
+      if (multiplayerRole.current === "solo" && !g.resultRecorded) {
+        saveResult("lost", g);
+        setCommandProfile(readCommandProfile());
+        g.resultRecorded = true;
+      }
       sync();
     }
     if (!g.buildings.some((b) => b.team === "enemy" && b.type === "hq")) {
       g.over = "won";
-      if (multiplayerRole.current === "solo" && !g.resultRecorded) { saveResult("won", g); g.resultRecorded = true; }
+      if (multiplayerRole.current === "solo" && !g.resultRecorded) {
+        saveResult("won", g);
+        setCommandProfile(readCommandProfile());
+        g.resultRecorded = true;
+      }
       sync();
     }
     if (multiplayerRole.current === "host" && peer.current?.open && g.time - networkSnapshotAt.current >= 0.1) {
@@ -4988,6 +5055,7 @@ export default function Home() {
         ? { key: "combat-orders", title: "TRAVEL ORDERS", text: "Long-press open ground: slide up for Move + Engage or down for Direct Move. Both orders keep their destination; Move + Engage resumes after nearby threats." }
         : { key: "select-units", title: "FIELD TUTORIAL", text: "Select a Worker to construct, your HQ to train or research, or a completed Barracks to train combat units." };
   const showActiveTip = tutorialsEnabled && !homeOpen && !paused && !dismissedTips.includes(activeTip.key);
+  const commandProgress = commandProfileProgress(commandProfile);
   const productionButton = (type: Unit["type"]) => {
     const active = ui.production?.type === type;
     const coolingDown = !ui.production && ui.productionCooldown > 0;
@@ -5043,6 +5111,24 @@ export default function Home() {
             <small>TACTICAL NETWORK // ALPHA</small>
             <h1>FRONTIER<br />COMMAND</h1>
             <p>Balance credits, alloy, and intel. Control the map. Destroy the enemy command core.</p>
+            <section className="command-profile" aria-label={`Command level ${commandProgress.level}`}>
+              <div className="command-profile-heading">
+                <span><small>COMMAND DEVELOPMENT</small><b>LEVEL {commandProgress.level}</b></span>
+                <span><strong>{commandProgress.points}</strong><small>COMMAND POINT{commandProgress.points === 1 ? "" : "S"}</small></span>
+              </div>
+              <div className="command-xp-track" aria-label={`${commandProgress.current} of ${commandProgress.needed} Command XP toward the next level`}>
+                <i style={{ width: `${commandProgress.progress * 100}%` }} />
+              </div>
+              <div className="command-xp-readout">
+                <span>{commandProgress.current} / {commandProgress.needed} COMMAND XP</span>
+                {commandProfile.lastAward > 0 && <small>LAST MATCH +{commandProfile.lastAward}</small>}
+              </div>
+              <div className="command-research-preview" aria-label="Upcoming command research paths">
+                <span>⌁ FIRE CONTROL<small>COMING NEXT</small></span>
+                <span>⬡ REINFORCED FRAMES<small>COMING NEXT</small></span>
+                <span>◎ TACTICAL INTELLIGENCE<small>COMING NEXT</small></span>
+              </div>
+            </section>
             {hasAutosave && (
               <button className="continue-match" onClick={continueMatch}>
                 <b>CONTINUE MATCH</b>
@@ -5277,7 +5363,7 @@ export default function Home() {
             <h1>{ui.over === "won" ? "VICTORY" : "BASE LOST"}</h1>
             {network.role === "solo" && (() => {
               const review = readDifficulty().reviews.at(-1);
-              return review ? <p className="match-review"><b>{review.summary}</b><br />Match performance: {Math.round(review.score)}/100<br /><small>Next opponent: {difficultyInfo(adaptiveDifficulty()).label}</small></p> : null;
+              return review ? <p className="match-review"><b>{review.summary}</b><br />Match performance: {Math.round(review.score)}/100{review.commandXp ? <><br /><strong>+{review.commandXp} COMMAND XP</strong></> : null}<br /><small>Next opponent: {difficultyInfo(adaptiveDifficulty()).label}</small></p> : null;
             })()}
             {network.role === "solo" && <button onClick={() => action("reset")}>PLAY AGAIN</button>}
             <button onClick={openHome}>HOME</button>
