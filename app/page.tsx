@@ -274,8 +274,11 @@ const FOG_ROWS = Math.ceil(H / FOG_CELL);
 const FOG_COUNT = FOG_COLS * FOG_ROWS;
 type TacticalPlateau = { id: number; x: number; y: number; rx: number; ry: number; rotation: number; ramps: readonly [number, number] };
 const TACTICAL_PLATEAUS: readonly TacticalPlateau[] = [
-  { id: -101, x: W / 2, y: H / 2 - 300, rx: 218, ry: 138, rotation: 0, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
-  { id: -102, x: W / 2, y: H / 2 + 300, rx: 218, ry: 138, rotation: Math.PI / 2, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
+  // The art is an almost-square mesa with diagonal ramps. Keep the smooth
+  // collision perimeter just inside the visible cliff face so ground units do
+  // not snag on transparent sprite padding or appear to hit an invisible wall.
+  { id: -101, x: W / 2, y: H / 2 - 300, rx: 188, ry: 188, rotation: 0, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
+  { id: -102, x: W / 2, y: H / 2 + 300, rx: 188, ry: 188, rotation: 0, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
 ] as const;
 const angleDelta = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
 // Cliff segments form a closed elevated perimeter except at two real ramp gaps.
@@ -4541,7 +4544,19 @@ export default function Home() {
         ? `${g.selected.length} units selected.`
         : "No units in selection box.";
     } else if (!p.drag) {
-      const hit = [...g.units, ...g.buildings]
+      const nearestBuilding = g.buildings
+        .filter((building) => building.team === "player")
+        .sort(
+          (a, b) =>
+            Math.hypot(a.x - wp.x, a.y - wp.y) -
+            Math.hypot(b.x - wp.x, b.y - wp.y),
+        )[0];
+      const buildingTap = nearestBuilding &&
+        Math.hypot(nearestBuilding.x - wp.x, nearestBuilding.y - wp.y) <
+          buildingStats[nearestBuilding.type].r + 18
+          ? nearestBuilding
+          : undefined;
+      const hit = buildingTap || [...g.units, ...g.buildings]
         .filter((o) => o.team === "player")
         .sort(
           (a, b) =>
@@ -4562,6 +4577,17 @@ export default function Home() {
         g.mode = "select";
         g.message = `${hitWireframe.type.toUpperCase()} wireframe selected · cancel it below or leave it in the Worker queue.`;
         lastTap.current = { id: hitWireframe.id, time: performance.now() };
+        pointer.current = null;
+        sync();
+        return;
+      }
+      // Friendly structures take tap priority over movement. A single tap on a
+      // building clears the current unit group and opens that building's
+      // commands instead of silently ordering the units toward it.
+      if (g.mode === "select" && buildingTap && selectedUnits.length) {
+        g.selected = [buildingTap.id];
+        g.message = `${buildingTap.type === "turret" ? "SENTRY TURRET" : buildingTap.type.toUpperCase()} selected.`;
+        lastTap.current = { id: buildingTap.id, time: performance.now() };
         pointer.current = null;
         sync();
         return;
@@ -4672,6 +4698,9 @@ export default function Home() {
   const productionButton = (type: Unit["type"]) => {
     const active = ui.production?.type === type;
     const coolingDown = !ui.production && ui.productionCooldown > 0;
+    const cost = unitCost[type];
+    const shortfall = Math.max(0, cost - ui.credits);
+    const unaffordable = shortfall > 0;
     const locked =
       type === "worker"
         ? ui.productionBuilding !== "hq" || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || coolingDown
@@ -4692,17 +4721,18 @@ export default function Home() {
     return (
       <button
         key={type}
-        disabled={locked}
-        className={`${active ? "producing " : ""}${locked ? "locked" : ""}`}
+        disabled={locked || unaffordable}
+        className={`${active ? "producing " : ""}${locked ? "locked " : ""}${unaffordable ? "unaffordable" : ""}`}
         onClick={() => action(type)}
+        title={unaffordable ? `${shortfall} more credits required` : undefined}
       >
         <kbd>{type === "worker" ? "V" : type === "trooper" ? "I" : type === "tank" ? "K" : "N"}</kbd>
         <span className={`command-art unit-${type}`} aria-hidden="true">
-          {locked && <b className="command-art-badge">🔒</b>}
+          {(locked || unaffordable) && <b className="command-art-badge">{unaffordable ? "−" : "🔒"}</b>}
         </span>
         <span>
           {unitName(type)}
-          <small>{locked ? lockText : active ? `${Math.max(0, Math.ceil(ui.production!.duration - ui.production!.elapsed))}s` : idle}</small>
+          <small>{unaffordable ? `NEED ${shortfall} MORE CREDITS` : locked ? lockText : active ? `${Math.max(0, Math.ceil(ui.production!.duration - ui.production!.elapsed))}s` : idle}</small>
           {active && (
             <em style={{ "--progress": `${(ui.production!.elapsed / ui.production!.duration) * 100}%` } as React.CSSProperties} />
           )}
@@ -5028,14 +5058,14 @@ export default function Home() {
           <div className="actions" role="tabpanel">
             {ui.selectedWorkers > 0 && commandTab === "buildings" ? (
               <>
-                <button className={ui.buildMode === "build-refinery" ? "placing" : ""} aria-pressed={ui.buildMode === "build-refinery"} onClick={() => action("build-refinery")}>
-                  <kbd>R</kbd><span className="command-art building-refinery" aria-hidden="true" /><span>REFINERY<small>{BUILD_COST.refinery} ALLOY · TAP MULTIPLE SITES</small></span>
+                <button disabled={ui.alloy < BUILD_COST.refinery} className={`${ui.buildMode === "build-refinery" ? "placing " : ""}${ui.alloy < BUILD_COST.refinery ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-refinery"} onClick={() => action("build-refinery")} title={ui.alloy < BUILD_COST.refinery ? `${BUILD_COST.refinery - ui.alloy} more alloy required` : undefined}>
+                  <kbd>R</kbd><span className="command-art building-refinery" aria-hidden="true" /><span>REFINERY<small>{ui.alloy < BUILD_COST.refinery ? `NEED ${BUILD_COST.refinery - ui.alloy} MORE ALLOY` : `${BUILD_COST.refinery} ALLOY · TAP MULTIPLE SITES`}</small></span>
                 </button>
-                <button className={ui.buildMode === "build-barracks" ? "placing" : ""} aria-pressed={ui.buildMode === "build-barracks"} onClick={() => action("build-barracks")}>
-                  <kbd>B</kbd><span className="command-art building-barracks" aria-hidden="true" /><span>BARRACKS<small>{BUILD_COST.barracks} ALLOY · TAP MULTIPLE SITES</small></span>
+                <button disabled={ui.alloy < BUILD_COST.barracks} className={`${ui.buildMode === "build-barracks" ? "placing " : ""}${ui.alloy < BUILD_COST.barracks ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-barracks"} onClick={() => action("build-barracks")} title={ui.alloy < BUILD_COST.barracks ? `${BUILD_COST.barracks - ui.alloy} more alloy required` : undefined}>
+                  <kbd>B</kbd><span className="command-art building-barracks" aria-hidden="true" /><span>BARRACKS<small>{ui.alloy < BUILD_COST.barracks ? `NEED ${BUILD_COST.barracks - ui.alloy} MORE ALLOY` : `${BUILD_COST.barracks} ALLOY · TAP MULTIPLE SITES`}</small></span>
                 </button>
-                <button className={ui.buildMode === "build-turret" ? "placing" : ""} aria-pressed={ui.buildMode === "build-turret"} onClick={() => action("build-turret")}>
-                  <kbd>T</kbd><span className="command-art building-turret" aria-hidden="true" /><span>SENTRY TURRET<small>{BUILD_COST.turret} ALLOY · QUEUE · 15s DEPLOY</small></span>
+                <button disabled={ui.alloy < BUILD_COST.turret} className={`${ui.buildMode === "build-turret" ? "placing " : ""}${ui.alloy < BUILD_COST.turret ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-turret"} onClick={() => action("build-turret")} title={ui.alloy < BUILD_COST.turret ? `${BUILD_COST.turret - ui.alloy} more alloy required` : undefined}>
+                  <kbd>T</kbd><span className="command-art building-turret" aria-hidden="true" /><span>SENTRY TURRET<small>{ui.alloy < BUILD_COST.turret ? `NEED ${BUILD_COST.turret - ui.alloy} MORE ALLOY` : `${BUILD_COST.turret} ALLOY · QUEUE · 15s DEPLOY`}</small></span>
                 </button>
               </>
             ) : ui.selectedUnits > 0 ? (
@@ -5075,18 +5105,18 @@ export default function Home() {
               </button>
             ) : ui.selectedBuilding === "hq" && !ui.hqPacked && !ui.hqRelocation && commandTab === "tech" ? (
               <>
-                <button disabled={ui.fortified || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction)} className={ui.fortified ? "locked" : ui.fortifyProduction ? "placing" : ""} onClick={() => action("fortify")}>
+                <button disabled={ui.fortified || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || ui.intel < FORTIFY_INTEL_COST} className={ui.fortified ? "locked" : ui.fortifyProduction ? "placing" : ui.intel < FORTIFY_INTEL_COST ? "unaffordable" : ""} onClick={() => action("fortify")} title={ui.intel < FORTIFY_INTEL_COST ? `${FORTIFY_INTEL_COST - ui.intel} more intel required` : undefined}>
                   <kbd>F</kbd><span className="command-art building-hq" aria-hidden="true">{ui.fortified && <b className="command-art-badge">✓</b>}</span>
-                  <span>{ui.fortified ? "BASE FORTIFIED" : ui.fortifyProduction ? "FORTIFYING BASE" : "FORTIFY BASE"}<small>{ui.fortified ? "+25% STRUCTURE HP ACTIVE" : ui.fortifyProduction ? `${Math.max(0, Math.ceil(ui.fortifyProduction.duration - ui.fortifyProduction.elapsed))}s REMAINING` : `${FORTIFY_INTEL_COST} INTEL · 40s · +25% STRUCTURE HP`}</small></span>
+                  <span>{ui.fortified ? "BASE FORTIFIED" : ui.fortifyProduction ? "FORTIFYING BASE" : "FORTIFY BASE"}<small>{ui.fortified ? "+25% STRUCTURE HP ACTIVE" : ui.fortifyProduction ? `${Math.max(0, Math.ceil(ui.fortifyProduction.duration - ui.fortifyProduction.elapsed))}s REMAINING` : ui.intel < FORTIFY_INTEL_COST ? `NEED ${FORTIFY_INTEL_COST - ui.intel} MORE INTEL` : `${FORTIFY_INTEL_COST} INTEL · 40s · +25% STRUCTURE HP`}</small></span>
                 </button>
                 {(["air", "armor"] as Doctrine[]).map((doctrine) => {
                   const chosen = ui.doctrine === doctrine;
                   const researching = ui.doctrineProduction?.type === doctrine;
                   const locked = Boolean(ui.doctrine && !chosen) || Boolean(ui.doctrineProduction && !researching);
                   return (
-                    <button key={doctrine} disabled={Boolean(ui.doctrine) || Boolean(ui.doctrineProduction) || Boolean(ui.fortifyProduction)} className={chosen || locked ? "locked" : researching ? "placing" : ""} onClick={() => action(`doctrine-${doctrine}`)}>
+                    <button key={doctrine} disabled={Boolean(ui.doctrine) || Boolean(ui.doctrineProduction) || Boolean(ui.fortifyProduction) || ui.intel < DOCTRINE_INTEL_COST} className={chosen || locked ? "locked" : researching ? "placing" : ui.intel < DOCTRINE_INTEL_COST ? "unaffordable" : ""} onClick={() => action(`doctrine-${doctrine}`)} title={ui.intel < DOCTRINE_INTEL_COST ? `${DOCTRINE_INTEL_COST - ui.intel} more intel required` : undefined}>
                       <kbd>{doctrine === "air" ? "U" : "M"}</kbd><i>{doctrine === "air" ? "✦" : "⬢"}</i>
-                      <span>{doctrine === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"}<small>{chosen ? doctrine === "air" ? "LOCKED · +18% DRONE DMG · +15% SPEED" : "LOCKED · +18% TANK HP & DMG" : locked ? "LOCKED BY OTHER DOCTRINE" : researching ? `${Math.max(0, Math.ceil(ui.doctrineProduction!.duration - ui.doctrineProduction!.elapsed))}s REMAINING` : `${DOCTRINE_INTEL_COST} INTEL · ${DOCTRINE_DURATION}s · PERMANENT CHOICE`}</small></span>
+                      <span>{doctrine === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"}<small>{chosen ? doctrine === "air" ? "LOCKED · +18% DRONE DMG · +15% SPEED" : "LOCKED · +18% TANK HP & DMG" : locked ? "LOCKED BY OTHER DOCTRINE" : researching ? `${Math.max(0, Math.ceil(ui.doctrineProduction!.duration - ui.doctrineProduction!.elapsed))}s REMAINING` : ui.intel < DOCTRINE_INTEL_COST ? `NEED ${DOCTRINE_INTEL_COST - ui.intel} MORE INTEL` : `${DOCTRINE_INTEL_COST} INTEL · ${DOCTRINE_DURATION}s · PERMANENT CHOICE`}</small></span>
                     </button>
                   );
                 })}
