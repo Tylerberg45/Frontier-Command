@@ -4361,6 +4361,29 @@ export default function Home() {
       : -1;
     for (const [resourceIndex, q] of g.crystals.entries()) {
       const kind = q.kind || "credits";
+      if (q.amount > 0) {
+        // Give each economy its own unmistakable ground marker. The crystal
+        // artwork remains shared, but the mint diamond / amber hex makes the
+        // resource readable at normal mobile zoom without adding playfield copy.
+        x.save();
+        const resourceColor = kind === "alloy" ? "#f2b95f" : "#59ead0";
+        x.strokeStyle = resourceColor;
+        x.fillStyle = kind === "alloy" ? "rgba(242, 185, 95, .09)" : "rgba(89, 234, 208, .08)";
+        x.lineWidth = 2;
+        x.setLineDash(kind === "alloy" ? [5, 4] : []);
+        x.beginPath();
+        x.arc(q.x, q.y + 2, 31, 0, Math.PI * 2);
+        x.fill();
+        x.stroke();
+        x.setLineDash([]);
+        x.font = "900 11px system-ui";
+        x.textAlign = "center";
+        x.textBaseline = "middle";
+        x.shadowColor = "rgba(0, 0, 0, .9)";
+        x.shadowBlur = 4;
+        x.fillText(kind === "alloy" ? "⬢" : "◆", q.x + 25, q.y - 24);
+        x.restore();
+      }
       if (q.amount > 0 && art.current.crystal) {
         x.save();
         if (kind === "alloy") x.filter = "sepia(1) saturate(2.4) hue-rotate(345deg) brightness(1.08)";

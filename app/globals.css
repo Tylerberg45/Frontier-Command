@@ -1791,7 +1791,7 @@ header {
   }
   .command-center {
     grid-template-columns: 1fr;
-    grid-template-rows: 44px minmax(0, 1fr);
+    grid-template-rows: 54px minmax(0, 1fr);
   }
   .command-tabs {
     grid-template-columns: repeat(3, 1fr);
@@ -1901,7 +1901,15 @@ header {
   .selection-command-header {
     min-height: 0;
     grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: center;
     padding: 5px 8px;
+    overflow: hidden;
+  }
+
+  .selection-command-header b,
+  .selection-command-header small {
+    line-height: 1.1;
   }
 
   .actions {
