@@ -1569,6 +1569,7 @@ export default function Home() {
       turretFire?: HTMLImageElement;
       buildings?: HTMLImageElement;
       crystal?: HTMLImageElement;
+      alloyCrystal?: HTMLCanvasElement;
       tacticalPlateau?: HTMLImageElement;
       commandCrawler?: HTMLImageElement;
       intelRelay?: HTMLImageElement;
@@ -1699,6 +1700,21 @@ export default function Home() {
       image.onload = () => {
         if (!active) return;
         art.current[key] = image;
+        if (key === "crystal") {
+          // iPhone canvas filters do not reliably recolor the shared cyan
+          // crystal. Build an isolated amber sprite once so alloy deposits are
+          // visibly different on every frame and browser.
+          const alloy = document.createElement("canvas");
+          alloy.width = image.naturalWidth || image.width;
+          alloy.height = image.naturalHeight || image.height;
+          const alloyContext = alloy.getContext("2d")!;
+          alloyContext.drawImage(image, 0, 0);
+          alloyContext.globalCompositeOperation = "source-atop";
+          alloyContext.fillStyle = "rgba(244, 157, 46, .82)";
+          alloyContext.fillRect(0, 0, alloy.width, alloy.height);
+          alloyContext.globalCompositeOperation = "source-over";
+          art.current.alloyCrystal = alloy;
+        }
         if (key === "terrain") {
           const layer = document.createElement("canvas");
           layer.width = W;
@@ -4380,10 +4396,10 @@ export default function Home() {
         x.fillText(kind === "alloy" ? "⬢" : "◆", q.x + 25, q.y - 24);
         x.restore();
       }
-      if (q.amount > 0 && art.current.crystal) {
+      const crystalSprite = kind === "alloy" ? art.current.alloyCrystal : art.current.crystal;
+      if (q.amount > 0 && crystalSprite) {
         x.save();
-        if (kind === "alloy") x.filter = "sepia(1) saturate(2.4) hue-rotate(345deg) brightness(1.08)";
-        x.drawImage(art.current.crystal, q.x - 34, q.y - 38, 68, 68);
+        x.drawImage(crystalSprite, q.x - 34, q.y - 38, 68, 68);
         x.restore();
       } else if (q.amount > 0) {
         x.shadowColor = "#74f6dc";
