@@ -347,13 +347,10 @@ const FOG_COLS = Math.ceil(W / FOG_CELL);
 const FOG_ROWS = Math.ceil(H / FOG_CELL);
 const FOG_COUNT = FOG_COLS * FOG_ROWS;
 type TacticalPlateau = { id: number; x: number; y: number; rx: number; ry: number; rotation: number; ramps: readonly [number, number] };
-const TACTICAL_PLATEAUS: readonly TacticalPlateau[] = [
-  // The art is an almost-square mesa with diagonal ramps. Keep the smooth
-  // collision perimeter just inside the visible cliff face so ground units do
-  // not snag on transparent sprite padding or appear to hit an invisible wall.
-  { id: -101, x: W / 2, y: H / 2 - 300, rx: 188, ry: 188, rotation: 0, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
-  { id: -102, x: W / 2, y: H / 2 + 300, rx: 188, ry: 188, rotation: 0, ramps: [-Math.PI / 4, Math.PI * 3 / 4] },
-] as const;
+// Elevated plateaus are retired from the web prototype. Keeping the routing
+// helpers dormant makes the later Unity terrain pass easier to revisit without
+// leaving any cliff collision, ramp routing, art, or damage bonus in matches.
+const TACTICAL_PLATEAUS: readonly TacticalPlateau[] = [];
 const angleDelta = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
 // Cliff segments form a closed elevated perimeter except at two real ramp gaps.
 // Ground units must enter through a choke; Drones may fly over the entire ridge.
@@ -382,7 +379,7 @@ function teamVision(g: Game, team: Unit["team"]): VisionSource[] {
       .map((u) => ({ x: u.x, y: u.y, r: u.type === "worker" ? 145 : u.type === "drone" ? 330 : 190 })),
     ...g.buildings
       .filter((b) => b.team === team && b.hp > 0)
-      .map((b) => ({ x: b.x, y: b.y, r: b.type === "hq" ? (b.packed ? 190 : 300) : 230 })),
+      .map((b) => ({ x: b.x, y: b.y, r: b.type === "hq" ? (b.packed ? 190 : SUPPLY_RADIUS) : 230 })),
   ];
 }
 function playerVision(g: Game): VisionSource[] {
@@ -1749,7 +1746,6 @@ export default function Home() {
     load("turretFire", "/game-art/frontier-turret-fire-v1.png");
     load("buildings", "/game-art/frontier-buildings-atlas-v1.png");
     load("crystal", "/game-art/frontier-crystal-v1.png");
-    load("tacticalPlateau", "/game-art/frontier-tactical-plateau-v1.png");
     load("commandCrawler", "/game-art/frontier-command-crawler-v1.png");
     load("intelRelay", "/game-art/frontier-intel-relay-bunker-v1.png");
     return () => {
@@ -6031,7 +6027,7 @@ export default function Home() {
             onClick={() => action("deselect")}
             disabled={!ui.canClear}
           >
-            {ui.cancelMode ? "CANCEL" : "CLEAR"}
+            CLEAR
           </button>
         </div>
         <div className="combat-legend">
@@ -6039,7 +6035,6 @@ export default function Home() {
           <span><b>HP</b> health · <b>DMG</b> damage per shot</span>
           <span>Trooper → Drone → Tank → Trooper · favored matchup +55% DMG</span>
           <span>Secured Intel Relays grant +5% DMG each · stacks to +10%</span>
-          <span>Ground units firing down from a plateau gain +10% DMG · enter by either ramp</span>
         </div>
         <div className="command-center">
           <div className="command-context" aria-label="Current command menu">
