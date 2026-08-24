@@ -1,6843 +1,2430 @@
-"use client";
-
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  hostRoom,
-  joinRoom,
-  type MultiplayerRole,
-  type PeerSession,
-  type PeerStatus,
-} from "./multiplayer";
-
-type P = { x: number; y: number };
-type Doctrine = "air" | "armor";
-type Unit = {
-  id: number;
-  team: "player" | "enemy";
-  type: "worker" | "trooper" | "tank" | "drone" | "cipher";
-  x: number;
-  y: number;
-  hp: number;
-  max: number;
-  target?: P;
-  /** Temporary obstacle-avoidance waypoint. */
-  nav?: P;
-  /** Transient path recovery data used to escape blocked obstacle routes. */
-  navCheckAt?: number;
-  navCheckX?: number;
-  navCheckY?: number;
-  navSide?: 1 | -1;
-  /** Ramp or outside-bypass route used to keep ground units off closed cliff faces. */
-  plateauRoute?: {
-    plateauId: number;
-    rampIndex: number;
-    phase: "approach" | "enter" | "exit" | "clear" | "bypass";
-    bypass?: P;
-  };
-  enemy?: number;
-  carrying?: number;
-  /** The resource currently in the worker's cargo hold. */
-  carryingType?: ResourceKind;
-  /** Crystal-array index explicitly assigned by the player. */
-  resourceTarget?: number;
-  xp?: number;
-  level?: number;
-  /** Active-match timestamp of the unit's most recent dealt or received damage. */
-  lastCombatAt?: number;
-  /** Last travel/aim angle in canvas radians. Preserved while the unit is idle. */
-  facing?: number;
-  /** Transient render flag. True only on frames where the unit actually advances. */
-  moving?: boolean;
-  /** When true, the unit fights nearby threats but keeps its travel destination. */
-  moveEngage?: boolean;
-  /** Temporary speed cap shared by a multi-unit formation during travel. */
-  formationSpeed?: number;
-  /** Brief firing pose window, expressed in active match time. */
-  attackUntil?: number;
-  /** Intel relay occupied by this Trooper. Garrisoned units stay in combat but cannot move. */
-  garrisonedAt?: number;
-  /** Intel relay this Trooper is currently trying to enter. */
-  garrisonTarget?: number;
-  /** Transient render flag while a worker is actively extracting crystal. */
-  mining?: boolean;
-  /** Transient render flag while a Worker welds an unfinished structure. */
-  building?: boolean;
-  /** Seconds of field supply remaining before the unit suffers penalties. */
-  supply?: number;
-  retreating?: boolean;
-  /** Workers with this enabled repair friendly units and structures instead of mining. */
-  autoRepair?: boolean;
-  repairTarget?: number;
-  /** Intel relay being repaired. Separate because relay IDs overlap unit/building IDs. */
-  repairRelayTarget?: number;
-  /** Persistent worker duty. Move orders become hold duty instead of resuming mining. */
-  workerMode?: "mine" | "hold" | "construct" | "repair";
-  buildTarget?: number;
-  /** Ordered construction sites assigned to this Worker. */
-  buildQueue?: number[];
-  /** Combat behavior selected from the contextual command bar. */
-  stance?: "pursue" | "hold" | "patrol";
-  patrol?: { a: P; b: P; next: "a" | "b" };
-  repairing?: boolean;
-  /** Cipher economy state. Only a fully deployed, undisturbed Cipher earns credits. */
-  cipherMode?: "mobile" | "deploying" | "deployed" | "packing";
-  /** Seconds completed in the current Cipher deployment or packing transition. */
-  cipherProgress?: number;
-};
-type Production = {
-  type: Unit["type"];
-  elapsed: number;
-  duration: number;
-  queue?: Unit["type"][];
-};
-type Building = {
-  id: number;
-  team: "player" | "enemy";
-  type: "hq" | "refinery" | "barracks" | "turret";
-  x: number;
-  y: number;
-  hp: number;
-  max: number;
-  progress?: number;
-  /** Construction time in seconds. Older saves without it keep their original timing. */
-  constructionDuration?: number;
-  /** The structure remains a wireframe until an assigned Worker reaches it. */
-  constructionStarted?: boolean;
-  production?: Production;
-  rally?: P;
-  /** Last tracked sentry aim angle and brief firing-pose window. */
-  turretFacing?: number;
-  turretFireUntil?: number;
-  /** Short recovery window after a production burst. */
-  cooldown?: number;
-  /** A packed HQ becomes a very slow tracked command crawler. */
-  packed?: boolean;
-  mobileTarget?: P;
-  mobileFacing?: number;
-  relocation?: { mode: "pack" | "deploy"; elapsed: number; duration: number };
-};
-type ResourceKind = "credits" | "alloy";
-type Crystal = { x: number; y: number; amount: number; kind?: ResourceKind };
-type Objective = {
-  id: number;
-  x: number;
-  y: number;
-  owner: "player" | "enemy" | "neutral";
-  capture: number;
-  /** Fortified shell that must fall before garrisoned Troopers can be hit. */
-  hp: number;
-  max: number;
-  /** Match time when automatic reconstruction may begin. */
-  rebuildAt?: number;
-  /** Zero-to-one reconstruction progress. The relay stays unusable until complete. */
-  rebuildProgress?: number;
-};
-type Shot = {
-  x: number;
-  y: number;
-  tx: number;
-  ty: number;
-  team: "player" | "enemy";
-  kind: "bullet" | "shell";
-  life: number;
-  maxLife: number;
-};
-type DamageNumber = { x: number; y: number; amount: number; life: number; team: "player" | "enemy" };
-type AttackAlert = {
-  targetId: number;
-  team: "player" | "enemy";
-  x: number;
-  y: number;
-  startedAt: number;
-  expiresAt: number;
-};
-type Game = {
-  units: Unit[];
-  buildings: Building[];
-  crystals: Crystal[];
-  objectives: Objective[];
-  shots: Shot[];
-  damageNumbers: DamageNumber[];
-  attackAlerts: AttackAlert[];
-  credits: number;
-  enemyCredits: number;
-  alloy: number;
-  enemyAlloy: number;
-  intel: number;
-  enemyIntel: number;
-  power: number;
-  enemyPower?: number;
-  wave: number;
-  time: number;
-  selected: number[];
-  camera: P;
-  zoom: number;
-  mode: "select" | "move" | "move-engage" | "move-hq" | "repair" | "set-patrol-a" | "set-patrol-b" | "build-refinery" | "build-barracks" | "build-turret" | "set-rally";
-  message: string;
-  over: "" | "won" | "lost";
-  nextId: number;
-  waveAt: number;
-  aiThinkAt: number;
-  aiActionAt: number;
-  aiAttackAt: number;
-  adaptive: number;
-  resultRecorded?: boolean;
-  matchStats: MatchStats;
-  /** One bit per map cell.  A cell stays revealed after a player has seen it. */
-  fogSeen: number[];
-  /** Player-selected match rule. Older saves default to tactical fog. */
-  fogEnabled: boolean;
-  fortified?: boolean;
-  fortifyProduction?: { elapsed: number; duration: number };
-  enemyFortified?: boolean;
-  enemyFortifyProduction?: { elapsed: number; duration: number };
-  doctrine?: Doctrine;
-  doctrineProduction?: { type: Doctrine; elapsed: number; duration: number };
-  enemyDoctrine?: Doctrine;
-  enemyDoctrineProduction?: { type: Doctrine; elapsed: number; duration: number };
-  tradeNetwork?: boolean;
-  tradeNetworkProduction?: { elapsed: number; duration: number };
-  enemyTradeNetwork?: boolean;
-  enemyTradeNetworkProduction?: { elapsed: number; duration: number };
-  enemyDoctrineKnown?: boolean;
-  scoutedEnemyDoctrine?: Doctrine | "none";
-  mapVersion?: number;
-};
-
-const SAVE_KEY = "frontier-command-save-v1";
-const MANUAL_SAVE_KEY = "frontier-command-manual-save-v1";
-const PROFILE_KEY = "frontier-command-difficulty-v1";
-const COMMAND_PROFILE_KEY = "frontier-command-command-profile-v1";
-const COMMANDER_KEY = "frontier-command-active-commander-v1";
-const SINGLE_SAVE_MIGRATION_KEY = "frontier-command-single-save-migrated-v1";
-
-function migrateCommanderStorage() {
-  if (typeof window === "undefined" || localStorage.getItem(SINGLE_SAVE_MIGRATION_KEY)) return;
-  const selected = localStorage.getItem(COMMANDER_KEY) === "Gabriel" ? "gabriel" : "tyler";
-  const migrate = (target: string, suffix: string) => {
-    const selectedValue = localStorage.getItem(`frontier-command-${selected}-${suffix}-v1`);
-    const fallbackValue = localStorage.getItem(`frontier-command-${selected === "tyler" ? "gabriel" : "tyler"}-${suffix}-v1`);
-    const value = selectedValue || localStorage.getItem(target) || fallbackValue;
-    if (value) localStorage.setItem(target, value);
-  };
-  migrate(SAVE_KEY, "save");
-  migrate(MANUAL_SAVE_KEY, "manual-save");
-  migrate(PROFILE_KEY, "difficulty");
-  localStorage.removeItem(COMMANDER_KEY);
-  localStorage.setItem(SINGLE_SAVE_MIGRATION_KEY, "1");
-}
-
-type MatchStats = {
-  playerActions: number;
-  meaningfulActions: number;
-  orders: number;
-  unitsBuilt: number;
-  combatUnitsBuilt: number;
-  unitsLost: number;
-  enemyUnitsDestroyed: number;
-  baseDamage: number;
-  peakArmy: number;
-  totalCreditsSpent: number;
-  startedAt: number;
-};
-type MatchReview = MatchStats & { result: "won" | "lost"; duration: number; score: number; summary: string; commandXp?: number };
-type DifficultyProfile = { wins: number; losses: number; recent: ("won" | "lost")[]; skill: number; reviews: MatchReview[] };
-type CommandProfile = { xp: number; spentPoints: number; lastAward: number; fireControlRank?: number };
-const FIRE_CONTROL_MAX_RANK = 5;
-const emptyStats = (): MatchStats => ({ playerActions: 0, meaningfulActions: 0, orders: 0, unitsBuilt: 0, combatUnitsBuilt: 0, unitsLost: 0, enemyUnitsDestroyed: 0, baseDamage: 0, peakArmy: 0, totalCreditsSpent: 0, startedAt: 0 });
-function readDifficulty(): DifficultyProfile {
-  if (typeof window === "undefined") return { wins: 0, losses: 0, recent: [], skill: 0, reviews: [] };
-  try {
-    migrateCommanderStorage();
-    const p = JSON.parse(localStorage.getItem(PROFILE_KEY) || "null") as Partial<DifficultyProfile> | null;
-    return {
-      wins: Math.max(0, Number(p?.wins) || 0),
-      losses: Math.max(0, Number(p?.losses) || 0),
-      recent: Array.isArray(p?.recent) ? p!.recent.filter((x) => x === "won" || x === "lost").slice(-5) as ("won" | "lost")[] : [],
-      skill: Math.max(0, Math.min(100, Number(p?.skill) || 0)),
-      reviews: Array.isArray(p?.reviews) ? p!.reviews.slice(-5) as MatchReview[] : [],
-    };
-  } catch { return { wins: 0, losses: 0, recent: [], skill: 0, reviews: [] }; }
-}
-function commandXpForLevel(level: number) {
-  const bounded = Math.max(1, Math.floor(level));
-  return 50 * (bounded - 1) * bounded;
-}
-function commandLevelForXp(xp: number) {
-  let level = 1;
-  while (xp >= commandXpForLevel(level + 1)) level++;
-  return level;
-}
-function readCommandProfile(): CommandProfile {
-  if (typeof window === "undefined") return { xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
-  try {
-    const stored = JSON.parse(localStorage.getItem(COMMAND_PROFILE_KEY) || "null") as Partial<CommandProfile> | null;
-    if (stored) {
-      const fireControlRank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, Math.floor(Number(stored.fireControlRank) || 0)));
-      return {
-        xp: Math.max(0, Math.floor(Number(stored.xp) || 0)),
-        spentPoints: Math.max(fireControlRank, Math.floor(Number(stored.spentPoints) || 0)),
-        lastAward: Math.max(0, Math.floor(Number(stored.lastAward) || 0)),
-        fireControlRank,
-      };
-    }
-    // Existing commanders keep credit for matches completed before the
-    // progression system was introduced.
-    const history = readDifficulty();
-    return { xp: history.wins * 100 + history.losses * 40, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
-  } catch {
-    return { xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 };
-  }
-}
-function commandProfileProgress(profile: CommandProfile) {
-  const level = commandLevelForXp(profile.xp);
-  const floor = commandXpForLevel(level);
-  const ceiling = commandXpForLevel(level + 1);
-  return {
-    level,
-    points: Math.max(0, level - 1 - profile.spentPoints),
-    current: profile.xp - floor,
-    needed: ceiling - floor,
-    progress: Math.max(0, Math.min(1, (profile.xp - floor) / Math.max(1, ceiling - floor))),
-  };
-}
-function adaptiveDifficulty(): number {
-  const p = readDifficulty();
-  if (p.wins === 0 && p.losses === 0 && p.recent.length === 0) return 0.82;
-  return Math.max(0.82, Math.min(1.18, 0.82 + (p.skill / 100) * 0.36));
-}
-function difficultyInfo(value: number) {
-  const level = Math.max(1, Math.min(5, Math.round(((value - 0.82) / 0.36) * 4) + 1));
-  const labels = ["EASIEST", "EASY", "STANDARD", "HARD", "EXPERT"];
-  return { level, label: labels[level - 1] };
-}
-function isEasiest(value: number) {
-  return value <= 0.87;
-}
-function saveResult(result: "won" | "lost", g: Game) {
-  const commandProfile = readCommandProfile();
-  const p = readDifficulty();
-  p[result === "won" ? "wins" : "losses"]++;
-  p.recent = [...p.recent, result].slice(-5);
-  const s = g.matchStats;
-  const army = g.units.filter((u) => u.team === "player" && isCombatUnit(u)).length;
-  const efficiency = Math.min(25, s.combatUnitsBuilt * 1.5 + s.enemyUnitsDestroyed * 2 - s.unitsLost * 1.25);
-  const economy = Math.min(20, s.unitsBuilt * 1.2 + Math.min(8, s.totalCreditsSpent / 600));
-  const discipline = Math.max(-20, Math.min(20, 12 - s.baseDamage / 35 - s.unitsLost * 0.8));
-  const minutes = Math.max(1, g.time / 60);
-  const effectiveApm = s.meaningfulActions / minutes;
-  const orderApm = s.orders / minutes;
-  const clickEfficiency = s.playerActions > 0
-    ? s.meaningfulActions / s.playerActions
-    : 0;
-  const activity = Math.min(12, effectiveApm * 0.9);
-  const control = Math.min(6, orderApm * 1.5) + Math.min(4, clickEfficiency * 4);
-  const score = Math.max(0, Math.min(100, (result === "won" ? 48 : 25) + efficiency + economy + discipline + activity + control + Math.min(12, army * 1.2)));
-  const summary = result === "won"
-    ? score >= 75 ? "Dominant win" : score >= 58 ? "Strong win" : "Close win"
-    : score >= 48 ? "Promising loss" : "Learning match";
-  p.skill = Math.round(Math.max(0, Math.min(100, p.skill * 0.7 + score * 0.3)));
-  const controlledUplinks = (g.objectives || []).filter((objective) => objective.owner === "player").length;
-  const participation = Math.max(.2, Math.min(1, g.time / 240));
-  const commandXp = Math.max(8, Math.round((score * .6 + (result === "won" ? 45 : 18) + controlledUplinks * 8) * participation));
-  p.reviews = [...p.reviews, { ...s, result, duration: g.time, score, summary, commandXp }].slice(-5);
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
-  localStorage.setItem(COMMAND_PROFILE_KEY, JSON.stringify({
-    ...commandProfile,
-    xp: commandProfile.xp + commandXp,
-    lastAward: commandXp,
-  } satisfies CommandProfile));
-}
-
-// The battlefield is intentionally larger than the viewport. The minimap is the
-// fast way to jump around it on touch screens.
-const W = 3000,
-  H = 1900;
-const PLAYER_BASE = { x: 320, y: H / 2 } as const;
-const ENEMY_BASE = { x: W - 320, y: H / 2 } as const;
-const FOG_CELL = 50;
-const FOG_COLS = Math.ceil(W / FOG_CELL);
-const FOG_ROWS = Math.ceil(H / FOG_CELL);
-const FOG_COUNT = FOG_COLS * FOG_ROWS;
-type TacticalPlateau = { id: number; x: number; y: number; rx: number; ry: number; rotation: number; ramps: readonly [number, number] };
-// Elevated plateaus are retired from the web prototype. Keeping the routing
-// helpers dormant makes the later Unity terrain pass easier to revisit without
-// leaving any cliff collision, ramp routing, art, or damage bonus in matches.
-const TACTICAL_PLATEAUS: readonly TacticalPlateau[] = [];
-const angleDelta = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
-// Cliff segments form a closed elevated perimeter except at two real ramp gaps.
-// Ground units must enter through a choke; Drones may fly over the entire ridge.
-const TERRAIN_RIDGES = TACTICAL_PLATEAUS.flatMap((plateau, plateauIndex) =>
-  Array.from({ length: 28 }, (_, index) => {
-    const angle = (index / 28) * Math.PI * 2;
-    const localAngle = angle - plateau.rotation;
-    if (plateau.ramps.some((ramp) => angleDelta(localAngle, ramp) < .3)) return null;
-    return {
-      id: -(200 + plateauIndex * 40 + index),
-      x: plateau.x + Math.cos(angle) * plateau.rx,
-      y: plateau.y + Math.sin(angle) * plateau.ry,
-      r: 27,
-      plateauId: plateau.id,
-    };
-  }).filter((ridge): ridge is { id: number; x: number; y: number; r: number; plateauId: number } => Boolean(ridge)),
-);
-const HIGH_GROUND_RADIUS = 92;
-const UPLINK_DAMAGE_BONUS = 0.05;
-type VisionSource = P & { r: number };
-
-function teamVision(g: Game, team: Unit["team"]): VisionSource[] {
-  return [
-    ...g.units
-      .filter((u) => u.team === team && u.hp > 0)
-      .map((u) => ({ x: u.x, y: u.y, r: u.type === "worker" ? 145 : u.type === "drone" ? 330 : 190 })),
-    ...g.buildings
-      .filter((b) => b.team === team && b.hp > 0)
-      .map((b) => ({ x: b.x, y: b.y, r: b.type === "hq" ? (b.packed ? 190 : SUPPLY_RADIUS) : 230 })),
-  ];
-}
-function playerVision(g: Game): VisionSource[] {
-  return teamVision(g, "player");
-}
-function isVisibleFor(g: Game, team: Unit["team"], point: P, padding = 0) {
-  if (!g.fogEnabled) return true;
-  return teamVision(g, team).some((v) => Math.hypot(v.x - point.x, v.y - point.y) <= v.r + padding);
-}
-function isVisible(g: Game, point: P, padding = 0) {
-  return isVisibleFor(g, "player", point, padding);
-}
-function hasDiscovered(g: Game, point: P) {
-  if (!g.fogEnabled) return true;
-  const col = Math.max(0, Math.min(FOG_COLS - 1, Math.floor(point.x / FOG_CELL)));
-  const row = Math.max(0, Math.min(FOG_ROWS - 1, Math.floor(point.y / FOG_CELL)));
-  return Boolean(g.fogSeen?.[row * FOG_COLS + col]);
-}
-function objectiveIntel(g: Game, objective: Objective) {
-  const visible = isVisible(g, objective, HIGH_GROUND_RADIUS);
-  return { visible, discovered: visible || hasDiscovered(g, objective) };
-}
-function revealFog(g: Game) {
-  if (!Array.isArray(g.fogSeen) || g.fogSeen.length !== FOG_COUNT) g.fogSeen = Array(FOG_COUNT).fill(0);
-  if (!g.fogEnabled) {
-    g.fogSeen.fill(1);
-    return;
-  }
-  const vision = playerVision(g);
-  for (let row = 0; row < FOG_ROWS; row++)
-    for (let col = 0; col < FOG_COLS; col++) {
-      const cx = col * FOG_CELL + FOG_CELL / 2;
-      const cy = row * FOG_CELL + FOG_CELL / 2;
-      if (vision.some((v) => Math.hypot(v.x - cx, v.y - cy) <= v.r + FOG_CELL)) {
-        g.fogSeen[row * FOG_COLS + col] = 1;
-      }
-    }
-}
-const stats = {
-  worker: { r: 13, speed: 52, damage: 3, range: 55, rate: 0.85 },
-  trooper: { r: 11, speed: 66, damage: 7, range: 105, rate: 0.55 },
-  tank: { r: 22, speed: 38, damage: 20, range: 145, rate: 1.15 },
-  drone: { r: 17, speed: 82, damage: 13, range: 130, rate: 0.78 },
-  cipher: { r: 14, speed: 46, damage: 0, range: 0, rate: 1 },
-};
-const buildingStats = {
-  hq: { r: 54 },
-  refinery: { r: 42 },
-  barracks: { r: 44 },
-  turret: { r: 24 },
-};
-/**
- * Sprite sheets have very different transparent margins, so battlefield scale
- * cannot be inferred from their source-frame dimensions. These draw boxes are
- * tuned to the visible silhouettes: armor reads heavier than infantry, while
- * defensive turrets remain subordinate to the Intel Relay and base structures.
- */
-const unitRenderSize = {
-  worker: { w: 58, h: 62 },
-  trooper: { w: 56, h: 60 },
-  tank: { w: 112, h: 104 },
-  drone: { w: 86, h: 70 },
-  cipher: { w: 62, h: 62 },
-} as const;
-const buildingRenderSize = {
-  hq: { w: 142, h: 118 },
-  refinery: { w: 110, h: 92 },
-  barracks: { w: 116, h: 96 },
-  turret: { w: 88, h: 86 },
-} as const;
-const INTEL_RELAY_RENDER_SIZE = 130;
-const buildingHealth = { hq: 900, refinery: 440, barracks: 520, turret: 360 };
-const turretStats = { damage: 12, range: 210, rate: 0.68 };
-const buildingBuildTime = { refinery: 6, barracks: 6, turret: 15 };
-const FORTIFY_DURATION = 40;
-const unitHealth = { worker: 70, trooper: 95, tank: 240, drone: 135, cipher: 60 };
-const unitCost = { worker: 150, trooper: 125, tank: 400, drone: 300, cipher: 300 };
-const unitBuildTime = { worker: 8, trooper: 6, tank: 15, drone: 12, cipher: 20 };
-const MAX_QUEUE = 6;
-const BUILD_COST = { refinery: 260, barracks: 360, turret: 240 } as const;
-const FORTIFY_INTEL_COST = 180;
-const OBJECTIVE_CAPTURE_TIME = 10;
-const OBJECTIVE_CAPTURE_RADIUS = 105;
-const OBJECTIVE_INTEL_RATE = 0.5;
-const RELAY_GARRISON_CAPACITY = 4;
-const RELAY_RANGE_MULTIPLIER = 1.25;
-const RELAY_MAX_HP = 700;
-const RELAY_REBUILD_COOLDOWN = 12;
-const RELAY_REBUILD_DURATION = 18;
-const RELAY_RESOURCE_CLEARANCE = 190;
-const SUPPLY_CAPACITY = 12;
-const SUPPLY_RADIUS = 470;
-const DOCTRINE_INTEL_COST = 140;
-const DOCTRINE_DURATION = 30;
-const TRADE_NETWORK_INTEL_COST = 160;
-const TRADE_NETWORK_DURATION = 45;
-const CIPHER_DEPLOY_DURATION = 8;
-const CIPHER_PACK_DURATION = 4;
-const CIPHER_INCOME_RATE = 1;
-const CIPHER_COMBAT_LOCKOUT = 5;
-
-/**
- * Firing should communicate a weapon discharge without replacing the entire
- * painted unit with a slightly misaligned frame. The body stays locked while a
- * short barrel sleeve and muzzle pulse provide the only recoil motion.
- */
-function drawWeaponFireCue(
-  context: CanvasRenderingContext2D,
-  angle: number,
-  scale = 1,
-  mechanical = true,
-) {
-  context.save();
-  context.rotate(angle);
-  context.lineCap = "round";
-  if (mechanical) {
-    context.strokeStyle = "rgba(8, 16, 18, .92)";
-    context.lineWidth = 5 * scale;
-    context.beginPath();
-    context.moveTo(15 * scale, 0);
-    context.lineTo(24 * scale, 0);
-    context.stroke();
-    context.strokeStyle = "rgba(173, 196, 191, .9)";
-    context.lineWidth = 2 * scale;
-    context.beginPath();
-    context.moveTo(15 * scale, 0);
-    context.lineTo(22 * scale, 0);
-    context.stroke();
-  }
-  const muzzle = (mechanical ? 28 : 22) * scale;
-  context.fillStyle = "rgba(255, 225, 125, .96)";
-  context.shadowColor = "rgba(255, 190, 72, .9)";
-  context.shadowBlur = 7 * scale;
-  context.beginPath();
-  context.moveTo(muzzle + 5 * scale, 0);
-  context.lineTo(muzzle, -3.5 * scale);
-  context.lineTo(muzzle - 2 * scale, 0);
-  context.lineTo(muzzle, 3.5 * scale);
-  context.closePath();
-  context.fill();
-  context.restore();
-}
-const CIPHER_MAX = 4;
-const PRODUCTION_COOLDOWN = 3;
-const UPKEEP_SOFT_CAP = 10;
-const REPAIR_RATE = 24;
-const REPAIR_ALLOY_PER_HP = 0.12;
-const MAINTENANCE_PATROL_SCAN = 185;
-const SENTRY_RANGE_MULTIPLIER = 1.35;
-const TUTORIALS_KEY = "frontier-command-tutorials-v1";
-const DISMISSED_TIPS_KEY = "frontier-command-dismissed-tips-v1";
-function veteranRegenRate(unit: Unit) {
-  const level = unit.level || 1;
-  return level >= 3 ? 0.02 : level >= 2 ? 0.01 : 0;
-}
-function unitCombatRange(unit: Unit) {
-  const stanceMultiplier = unit.type === "trooper" && !unit.garrisonedAt && unit.stance === "hold" ? SENTRY_RANGE_MULTIPLIER : 1;
-  return stats[unit.type].range * stanceMultiplier * (unit.garrisonedAt ? RELAY_RANGE_MULTIPLIER : 1);
-}
-function isCombatType(type: Unit["type"]): type is "trooper" | "tank" | "drone" {
-  return type === "trooper" || type === "tank" || type === "drone";
-}
-function isCombatUnit(unit: Unit) {
-  return isCombatType(unit.type);
-}
-function upkeepPerSecond(count: number) {
-  return count <= UPKEEP_SOFT_CAP ? 0 : Math.pow(count - UPKEEP_SOFT_CAP, 1.25) * .08;
-}
-function productionDurationFor(g: Game, team: Unit["team"], type: Unit["type"]) {
-  if (type === "worker" || type === "cipher") return unitBuildTime[type];
-  const barracks = g.buildings.filter((building) => building.team === team && building.type === "barracks" && buildingOperational(building)).length;
-  return unitBuildTime[type] * (1 + Math.max(0, barracks - 1) * .18);
-}
-function cipherCountForTeam(g: Game, team: Unit["team"]) {
-  const active = g.units.filter((unit) => unit.team === team && unit.type === "cipher").length;
-  const queued = g.buildings
-    .filter((building) => building.team === team)
-    .reduce((count, building) => count +
-      (building.production?.type === "cipher" ? 1 : 0) +
-      (building.production?.queue || []).filter((type) => type === "cipher").length, 0);
-  return active + queued;
-}
-function supplyMultiplier(unit: Unit) {
-  return (unit.supply ?? SUPPLY_CAPACITY) <= 0 ? 0.75 : 1;
-}
-function teamDoctrine(g: Game, team: Unit["team"]) {
-  return team === "player" ? g.doctrine : g.enemyDoctrine;
-}
-function doctrineMultiplier(g: Game, unit: Unit) {
-  const doctrine = teamDoctrine(g, unit.team);
-  if (doctrine === "air" && unit.type === "drone") return 1.18;
-  if (doctrine === "armor" && unit.type === "tank") return 1.18;
-  return 1;
-}
-function counterMultiplier(attacker: Unit, target: Unit | Building) {
-  const targetType = target.type;
-  if (attacker.type === "trooper" && targetType === "drone") return 1.55;
-  if (attacker.type === "drone" && targetType === "tank") return 1.55;
-  if (attacker.type === "tank" && targetType === "trooper") return 1.55;
-  return 1;
-}
-function structureMultiplier(attacker: Unit, target: Unit | Building) {
-  return !isUnit(target) && attacker.type === "drone" ? 1.6 : 1;
-}
-function formationDestinations(units: Unit[], destination: P) {
-  const result = new Map<number, P>();
-  if (units.length < 2 || !units.every(isCombatUnit)) {
-    units.forEach((unit, index) => result.set(unit.id, {
-      x: destination.x + (index % 3) * 26,
-      y: destination.y + Math.floor(index / 3) * 26,
-    }));
-    return result;
-  }
-  const center = units.reduce((point, unit) => ({ x: point.x + unit.x, y: point.y + unit.y }), { x: 0, y: 0 });
-  center.x /= units.length;
-  center.y /= units.length;
-  const angle = Math.atan2(destination.y - center.y, destination.x - center.x);
-  const forward = { x: Math.cos(angle), y: Math.sin(angle) };
-  const side = { x: -forward.y, y: forward.x };
-  const rows: Array<{ type: Unit["type"]; forwardOffset: number }> = [
-    { type: "tank", forwardOffset: 42 },
-    { type: "trooper", forwardOffset: 0 },
-    { type: "drone", forwardOffset: -48 },
-  ];
-  rows.forEach(({ type, forwardOffset }) => {
-    const row = units.filter((unit) => unit.type === type);
-    row.forEach((unit, index) => {
-      const sideOffset = (index - (row.length - 1) / 2) * 38;
-      result.set(unit.id, {
-        x: Math.max(30, Math.min(W - 30, destination.x + forward.x * forwardOffset + side.x * sideOffset)),
-        y: Math.max(30, Math.min(H - 30, destination.y + forward.y * forwardOffset + side.y * sideOffset)),
-      });
-    });
-  });
-  return result;
-}
-function terrainMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
-  const controlled = (g.objectives || []).filter((objective) => objective.owner === attacker.team).length;
-  const attackerPlateau = attacker.type !== "drone" && plateauAt(attacker);
-  const targetPlateau = plateauAt(target);
-  const elevation = attackerPlateau && attackerPlateau.id !== targetPlateau?.id ? 1.1 : 1;
-  return (1 + Math.min(2, controlled) * UPLINK_DAMAGE_BONUS) * elevation;
-}
-
-function plateauAt(point: P) {
-  return TACTICAL_PLATEAUS.find((plateau) => plateauContains(point, plateau, .78, .76));
-}
-function plateauContains(point: P, plateau: TacticalPlateau, scaleX = 1, scaleY = scaleX) {
-  const dx = point.x - plateau.x, dy = point.y - plateau.y;
-  const c = Math.cos(-plateau.rotation), s = Math.sin(-plateau.rotation);
-  const lx = dx * c - dy * s, ly = dx * s + dy * c;
-  return (lx / (plateau.rx * scaleX)) ** 2 + (ly / (plateau.ry * scaleY)) ** 2 <= 1;
-}
-function plateauRampPoint(plateau: TacticalPlateau, rampIndex: number, scale: number): P {
-  const ramp = plateau.ramps[rampIndex];
-  const localX = Math.cos(ramp) * plateau.rx * scale;
-  const localY = Math.sin(ramp) * plateau.ry * scale;
-  const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
-  return {
-    x: plateau.x + localX * c - localY * s,
-    y: plateau.y + localX * s + localY * c,
-  };
-}
-function distanceToSegment(point: P, start: P, end: P) {
-  const dx = end.x - start.x, dy = end.y - start.y;
-  const lengthSquared = dx * dx + dy * dy;
-  const t = lengthSquared > 0
-    ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
-    : 0;
-  return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
-}
-function inPlateauRampLane(point: P, padding = 0) {
-  return TACTICAL_PLATEAUS.some((plateau) =>
-    plateau.ramps.some((_, rampIndex) =>
-      distanceToSegment(
-        point,
-        plateauRampPoint(plateau, rampIndex, .58),
-        plateauRampPoint(plateau, rampIndex, 1.34),
-      ) <= 56 + padding,
-    ),
-  );
-}
-function segmentCrossesPlateau(start: P, end: P, plateau: TacticalPlateau, scale = 1) {
-  const toNormalized = (point: P) => {
-    const dx = point.x - plateau.x, dy = point.y - plateau.y;
-    const c = Math.cos(-plateau.rotation), s = Math.sin(-plateau.rotation);
-    return {
-      x: (dx * c - dy * s) / (plateau.rx * scale),
-      y: (dx * s + dy * c) / (plateau.ry * scale),
-    };
-  };
-  return distanceToSegment({ x: 0, y: 0 }, toNormalized(start), toNormalized(end)) <= 1;
-}
-function plateauBypassPoint(start: P, destination: P, plateau: TacticalPlateau) {
-  const candidates = Array.from({ length: 12 }, (_, index) => {
-    const angle = (index / 12) * Math.PI * 2;
-    const localX = Math.cos(angle) * plateau.rx * 1.55;
-    const localY = Math.sin(angle) * plateau.ry * 1.55;
-    const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
-    return {
-      x: plateau.x + localX * c - localY * s,
-      y: plateau.y + localX * s + localY * c,
-    };
-  });
-  // A unit already pressed against the collision ring first needs a clean
-  // outward escape point. On the next frame the regular two-leg bypass takes
-  // over and carries it around the plateau instead of back into the cliff.
-  if (plateauContains(start, plateau, 1.18)) {
-    return candidates.sort((a, b) =>
-      Math.hypot(start.x - a.x, start.y - a.y) - Math.hypot(start.x - b.x, start.y - b.y),
-    )[0];
-  }
-  return candidates
-    .filter((point) =>
-      !segmentCrossesPlateau(start, point, plateau, 1.16) &&
-      !segmentCrossesPlateau(point, destination, plateau, 1.16),
-    )
-    .sort((a, b) =>
-      Math.hypot(start.x - a.x, start.y - a.y) + Math.hypot(destination.x - a.x, destination.y - a.y) -
-      Math.hypot(start.x - b.x, start.y - b.y) - Math.hypot(destination.x - b.x, destination.y - b.y),
-    )[0];
-}
-function objectRadius(object: Unit | Building) {
-  return object.type === "worker" || object.type === "trooper" || object.type === "tank" || object.type === "drone" || object.type === "cipher"
-    ? stats[object.type].r
-    : buildingStats[object.type].r;
-}
-function isUnit(object: Unit | Building): object is Unit {
-  return ["worker", "trooper", "tank", "drone", "cipher"].includes(object.type as Unit["type"]);
-}
-const unitName = (type: Unit["type"]) =>
-  type === "tank" ? "TANK" : type === "drone" ? "STRIKE DRONE" : type.toUpperCase();
-const unitRole = (type: Unit["type"]) =>
-  type === "worker" ? "MINER" : type === "trooper" ? "ANTI-AIR INFANTRY" : type === "tank" ? "ANTI-INFANTRY ARMOR" : type === "drone" ? "ANTI-ARMOR AIR" : "ECONOMIC SPECIALIST";
-const unitDuty = (unit: Unit) => {
-  if (unit.garrisonedAt) return `INTEL RELAY GARRISON Â· +${Math.round((RELAY_RANGE_MULTIPLIER - 1) * 100)}% RANGE`;
-  if (unit.type === "cipher") {
-    if (unit.cipherMode === "deployed") return "TRADE NETWORK Â· +60 CREDITS/MIN";
-    if (unit.cipherMode === "deploying") return `DEPLOYING Â· ${Math.round(((unit.cipherProgress || 0) / CIPHER_DEPLOY_DURATION) * 100)}%`;
-    if (unit.cipherMode === "packing") return `PACKING Â· ${Math.round(((unit.cipherProgress || 0) / CIPHER_PACK_DURATION) * 100)}%`;
-    return "ECONOMIC SPECIALIST Â· MOBILE";
-  }
-  if (isCombatUnit(unit)) return `${unitRole(unit.type)}${unit.type === "trooper" && unit.stance === "hold" ? ` Â· SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
-  if (unit.autoRepair) return `MAINTENANCE${unit.stance === "patrol" ? " PATROL" : ""}${unit.repairing ? " Â· REPAIRING" : ""}`;
-  if (unit.workerMode === "construct") {
-    const queued = unit.buildQueue?.length || (unit.buildTarget ? 1 : 0);
-    return `CONSTRUCTION DUTY${queued ? ` Â· ${queued} SITE${queued === 1 ? "" : "S"} QUEUED` : ""}`;
-  }
-  if (unit.workerMode === "repair") return "REPAIR DUTY";
-  if (unit.workerMode === "hold") return "GUARD POST Â· MINING PAUSED";
-  return Number.isInteger(unit.resourceTarget) ? "TARGETED MINING" : "MINER";
-};
-function normalizeUnits(units: Unit[]): Unit[] {
-  return units.map((raw) => {
-    const type = (raw.type as string) === "walker" ? "tank" : raw.type;
-    const base = unitHealth[type];
-    const level = Math.max(1, Math.min(3, Number(raw.level) || 1));
-    const rankMax = Math.round(base * Math.pow(1.12, level - 1));
-    const max =
-      Number.isFinite(raw.max) && raw.max > 0
-        ? Math.min(raw.max, rankMax)
-        : rankMax;
-    const hp = Number.isFinite(raw.hp)
-      ? Math.max(0, Math.min(raw.hp, max))
-      : max;
-    return {
-      ...raw,
-      type,
-      max,
-      hp,
-      xp: Math.max(0, Number(raw.xp) || 0),
-      level,
-      lastCombatAt: Number.isFinite(raw.lastCombatAt) ? raw.lastCombatAt : undefined,
-      facing: Number.isFinite(raw.facing)
-        ? raw.facing
-        : raw.team === "player" ? 0 : Math.PI,
-      moveEngage: Boolean(raw.moveEngage && raw.target),
-      garrisonedAt: Number.isInteger(raw.garrisonedAt) ? raw.garrisonedAt : undefined,
-      garrisonTarget: Number.isInteger(raw.garrisonTarget) ? raw.garrisonTarget : undefined,
-      supply: Math.max(0, Math.min(SUPPLY_CAPACITY, Number(raw.supply) || SUPPLY_CAPACITY)),
-      autoRepair: Boolean(raw.autoRepair),
-      repairTarget: Number.isInteger(raw.repairTarget) ? raw.repairTarget : undefined,
-      repairRelayTarget: Number.isInteger(raw.repairRelayTarget) ? raw.repairRelayTarget : undefined,
-      resourceTarget: Number.isInteger(raw.resourceTarget) ? raw.resourceTarget : undefined,
-      workerMode:
-        raw.type === "worker" && ["mine", "hold", "construct", "repair"].includes(raw.workerMode || "")
-          ? raw.workerMode
-          : raw.type === "worker" ? "mine" : undefined,
-      buildTarget: Number.isInteger(raw.buildTarget) ? raw.buildTarget : undefined,
-      buildQueue: Array.isArray(raw.buildQueue)
-        ? raw.buildQueue.filter((id) => Number.isInteger(id))
-        : Number.isInteger(raw.buildTarget) ? [raw.buildTarget!] : [],
-      stance: raw.stance === "patrol" || (type === "trooper" && raw.stance === "hold") ? raw.stance : "pursue",
-      cipherMode:
-        type === "cipher" && ["mobile", "deploying", "deployed", "packing"].includes(raw.cipherMode || "")
-          ? raw.cipherMode
-          : type === "cipher" ? "mobile" : undefined,
-      cipherProgress:
-        type === "cipher" && (raw.cipherMode === "deploying" || raw.cipherMode === "packing")
-          ? Math.max(0, Number(raw.cipherProgress) || 0)
-          : undefined,
-      patrol:
-        raw.patrol && raw.patrol.a && raw.patrol.b
-          ? {
-              a: { x: Number(raw.patrol.a.x) || 0, y: Number(raw.patrol.a.y) || 0 },
-              b: { x: Number(raw.patrol.b.x) || 0, y: Number(raw.patrol.b.y) || 0 },
-              next: raw.patrol.next === "a" ? "a" : "b",
-            }
-          : undefined,
-    };
-  });
-}
-function repairGameIds(g: Game) {
-  const objects = [...g.buildings, ...g.units];
-  let next = 1;
-  const seen = new Set<number>();
-  for (const object of objects) {
-    if (!Number.isInteger(object.id) || object.id < 1 || seen.has(object.id)) {
-      while (seen.has(next)) next++;
-      object.id = next;
-    }
-    seen.add(object.id);
-    next = Math.max(next, object.id + 1);
-  }
-  g.nextId = Math.max(next, Number.isInteger(g.nextId) ? g.nextId : 1);
-}
-
-function buildingOperational(b: Building) {
-  return b.hp > 0 && !b.packed && !b.relocation && (b.progress === undefined || b.progress >= 1);
-}
-
-function unitInSupplyRange(g: Game, unit: Unit) {
-  return g.buildings.some(
-    (building) =>
-      building.team === unit.team &&
-      building.type !== "turret" &&
-      buildingOperational(building) &&
-      Math.hypot(building.x - unit.x, building.y - unit.y) <= SUPPLY_RADIUS,
-  );
-}
-
-function hqBlockedAt(g: Game, hq: Building, x: number, y: number, deploying = false) {
-  const radius = buildingStats.hq.r * (deploying ? 1 : .8);
-  return x < radius + 24 || x > W - radius - 24 || y < radius + 24 || y > H - radius - 24 ||
-    g.buildings.some((building) => building.id !== hq.id && building.hp > 0 &&
-      Math.hypot(building.x - x, building.y - y) < buildingStats[building.type].r + radius + 14) ||
-    g.crystals.some((crystal) => crystal.amount > 0 && Math.hypot(crystal.x - x, crystal.y - y) < radius + 31) ||
-    TERRAIN_RIDGES.some((ridge) => Math.hypot(ridge.x - x, ridge.y - y) < ridge.r + radius + 7);
-}
-
-function movePackedHq(g: Game, hq: Building, dt: number) {
-  if (!hq.mobileTarget || hq.relocation) return;
-  const dx = hq.mobileTarget.x - hq.x, dy = hq.mobileTarget.y - hq.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance < 7) {
-    hq.mobileTarget = undefined;
-    return;
-  }
-  const desired = Math.atan2(dy, dx);
-  const speed = 12;
-  const step = Math.min(distance, speed * dt);
-  const steering = [0, .42, -.42, .82, -.82, 1.2, -1.2, Math.PI / 2, -Math.PI / 2];
-  const choice = steering
-    .map((offset) => {
-      const angle = desired + offset;
-      return { angle, x: hq.x + Math.cos(angle) * step, y: hq.y + Math.sin(angle) * step };
-    })
-    .find((candidate) => !hqBlockedAt(g, hq, candidate.x, candidate.y));
-  if (!choice) return;
-  hq.x = choice.x;
-  hq.y = choice.y;
-  hq.mobileFacing = choice.angle;
-}
-
-function queueWorkerConstruction(worker: Unit, buildingId: number) {
-  const queue = Array.isArray(worker.buildQueue) ? worker.buildQueue : [];
-  if (!queue.includes(buildingId)) queue.push(buildingId);
-  worker.buildQueue = queue;
-  worker.buildTarget = queue[0];
-  worker.workerMode = "construct";
-  worker.resourceTarget = undefined;
-  worker.repairTarget = undefined;
-  worker.repairRelayTarget = undefined;
-  worker.enemy = undefined;
-  worker.target = undefined;
-  worker.nav = undefined;
-}
-
-/** Put a selected Worker on an existing wireframe immediately, preserving later jobs. */
-function assignWorkerToPendingConstruction(worker: Unit, buildingId: number) {
-  const queue = Array.isArray(worker.buildQueue)
-    ? worker.buildQueue
-    : worker.buildTarget ? [worker.buildTarget] : [];
-  worker.buildQueue = [buildingId, ...queue.filter((id) => id !== buildingId)];
-  worker.buildTarget = buildingId;
-  worker.workerMode = "construct";
-  worker.resourceTarget = undefined;
-  worker.repairTarget = undefined;
-  worker.repairRelayTarget = undefined;
-  worker.enemy = undefined;
-  worker.target = undefined;
-  worker.nav = undefined;
-}
-
-function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "hold") {
-  worker.buildQueue = [];
-  worker.buildTarget = undefined;
-  worker.workerMode = nextMode;
-  worker.resourceTarget = undefined;
-  worker.repairTarget = undefined;
-  worker.repairRelayTarget = undefined;
-}
-
-function assignWorkersToRelayRepair(workers: Unit[], relay: Objective) {
-  workers.forEach((worker) => {
-    clearWorkerConstruction(worker, "repair");
-    worker.repairRelayTarget = relay.id;
-    worker.workerMode = "repair";
-    worker.target = undefined;
-    worker.enemy = undefined;
-    worker.nav = undefined;
-  });
-}
-
-function repairableRelayNear(g: Game, team: Unit["team"], x: number, y: number) {
-  return (g.objectives || [])
-    .filter((relay) =>
-      relay.owner === team &&
-      intelRelayOperational(relay) &&
-      relay.hp < relay.max,
-    )
-    .sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0];
-}
-
-function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number) {
-  const resource = g.crystals[resourceIndex];
-  if (!resource || resource.amount <= 0) return false;
-  workers.forEach((worker) => {
-    clearWorkerConstruction(worker, "mine");
-    worker.resourceTarget = resourceIndex;
-    worker.autoRepair = false;
-    worker.repairTarget = undefined;
-    worker.repairRelayTarget = undefined;
-    worker.enemy = undefined;
-    worker.target = undefined;
-    worker.nav = undefined;
-    worker.patrol = undefined;
-    worker.retreating = false;
-    if (worker.stance === "patrol") worker.stance = "pursue";
-  });
-  return true;
-}
-
-function isIdleWorker(g: Game, unit: Unit) {
-  if (unit.team !== "player" || unit.type !== "worker" || unit.hp <= 0 || unit.garrisonedAt) return false;
-  const hasPendingConstruction = (unit.buildQueue || (unit.buildTarget ? [unit.buildTarget] : []))
-    .some((id) => g.buildings.some((building) =>
-      building.id === id && building.team === unit.team && building.hp > 0 && (building.progress ?? 1) < 1,
-    ));
-  return !hasPendingConstruction &&
-    !unit.target && !unit.enemy && !unit.nav && !unit.repairTarget && !unit.repairRelayTarget &&
-    !unit.mining && !unit.building && !unit.repairing &&
-    (unit.workerMode === "hold" || unit.workerMode === "repair" || Boolean(unit.autoRepair));
-}
-
-function plateauTravelRoute(u: Unit, destination: P) {
-  if (u.type === "drone") {
-    u.plateauRoute = undefined;
-    return undefined;
-  }
-  let route = u.plateauRoute;
-  let plateau = route
-    ? TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId)
-    : undefined;
-  if (route && !plateau) {
-    u.plateauRoute = undefined;
-    route = undefined;
-  }
-  if (route && plateau) {
-    if (route.phase === "bypass") {
-      const bypass = route.bypass;
-      if (!bypass || !segmentCrossesPlateau(u, destination, plateau, 1.16)) {
-        u.plateauRoute = undefined;
-        u.nav = undefined;
-        return undefined;
-      }
-      if (Math.hypot(u.x - bypass.x, u.y - bypass.y) < 14) {
-        u.plateauRoute = undefined;
-        u.nav = undefined;
-        return plateauTravelRoute(u, destination);
-      }
-      return { goal: bypass, ignorePlateauId: undefined };
-    }
-    // Use the actual walkable top, not the wider visual/cliff footprint. A
-    // destination beside the cliff must route through a ramp instead of
-    // convincing the unit it can walk straight over the back edge.
-    const destinationInside = plateauAt(destination)?.id === plateau.id;
-    const entering = route.phase === "approach" || route.phase === "enter";
-    if ((entering && !destinationInside) || (!entering && destinationInside)) {
-      u.plateauRoute = undefined;
-      route = undefined;
-      plateau = undefined;
-    } else if (entering && plateauContains(u, plateau, .76)) {
-      u.plateauRoute = undefined;
-      return undefined;
-    } else if (!entering && route.phase === "clear" && !plateauContains(u, plateau, 1.38)) {
-      u.plateauRoute = undefined;
-      return undefined;
-    }
-  }
-  if (!route) {
-    const insidePlateau = TACTICAL_PLATEAUS.find((candidate) => plateauContains(u, candidate, .98));
-    const rampPlateau = TACTICAL_PLATEAUS.find((candidate) =>
-      plateauContains(u, candidate, 1.34) && inPlateauRampLane(u, 18),
-    );
-    const destinationPlateau = plateauAt(destination);
-    plateau = insidePlateau || rampPlateau;
-    if (plateau && destinationPlateau?.id === plateau.id) return undefined;
-    if (!plateau && !destinationPlateau) {
-      const blockingPlateau = TACTICAL_PLATEAUS
-        .filter((candidate) => segmentCrossesPlateau(u, destination, candidate, 1.16))
-        .sort((a, b) =>
-          distanceToSegment(a, u, destination) - distanceToSegment(b, u, destination),
-        )[0];
-      if (!blockingPlateau) return undefined;
-      const bypass = plateauBypassPoint(u, destination, blockingPlateau);
-      if (!bypass) return undefined;
-      route = {
-        plateauId: blockingPlateau.id,
-        rampIndex: 0,
-        phase: "bypass",
-        bypass,
-      };
-      u.plateauRoute = route;
-      u.nav = undefined;
-      return { goal: bypass, ignorePlateauId: undefined };
-    }
-    const routePlateau = plateau || destinationPlateau!;
-    const rampIndex = routePlateau.ramps
-      .map((_, index) => {
-        const inner = plateauRampPoint(routePlateau, index, .72);
-        const outer = plateauRampPoint(routePlateau, index, 1.28);
-        return {
-          index,
-          cost: plateau
-            ? Math.hypot(u.x - inner.x, u.y - inner.y) + Math.hypot(destination.x - outer.x, destination.y - outer.y)
-            : Math.hypot(u.x - outer.x, u.y - outer.y) + Math.hypot(destination.x - inner.x, destination.y - inner.y),
-        };
-      })
-      .sort((a, b) => a.cost - b.cost)[0].index;
-    route = {
-      plateauId: routePlateau.id,
-      rampIndex,
-      phase: plateau ? (insidePlateau ? "exit" : "clear") : "approach",
-    };
-    u.plateauRoute = route;
-    u.nav = undefined;
-    plateau = routePlateau;
-  }
-  plateau ||= TACTICAL_PLATEAUS.find((candidate) => candidate.id === route!.plateauId);
-  if (!plateau) return undefined;
-  const outer = plateauRampPoint(plateau, route.rampIndex, 1.28);
-  const inner = plateauRampPoint(plateau, route.rampIndex, .72);
-  if (route.phase === "approach" && Math.hypot(u.x - outer.x, u.y - outer.y) < 16) {
-    route.phase = "enter";
-    u.nav = undefined;
-  }
-  if (route.phase === "enter" && (Math.hypot(u.x - inner.x, u.y - inner.y) < 13 || plateauContains(u, plateau, .76))) {
-    u.plateauRoute = undefined;
-    u.nav = undefined;
-    return undefined;
-  }
-  if (route.phase === "exit" && Math.hypot(u.x - outer.x, u.y - outer.y) < 13) {
-    route.phase = "clear";
-    u.nav = undefined;
-  }
-  if (route.phase === "clear" && !plateauContains(u, plateau, 1.38)) {
-    u.plateauRoute = undefined;
-    return undefined;
-  }
-  return {
-    goal: route.phase === "approach" ? outer : route.phase === "enter" ? inner : route.phase === "exit" ? outer : destination,
-    ignorePlateauId: route.phase === "enter" || route.phase === "exit" || route.phase === "clear" ? plateau.id : undefined,
-  };
-}
-
-function blockingObstacle(
-  g: Game,
-  u: Unit,
-  destination: P,
-  ignoreBuildingId?: number,
-  ignorePlateauId?: number,
-) {
-  const dx = destination.x - u.x;
-  const dy = destination.y - u.y;
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared < 1) return undefined;
-  const obstacles = [
-    ...g.buildings
-      .filter((building) => building.hp > 0 && building.id !== ignoreBuildingId)
-      .map((building) => ({ id: building.id, x: building.x, y: building.y, r: buildingStats[building.type].r })),
-    ...g.crystals
-      .map((crystal, index) => ({ crystal, index }))
-      .filter(({ crystal }) =>
-        crystal.amount > 0 &&
-        !inPlateauRampLane(crystal, 28) &&
-        Math.hypot(crystal.x - destination.x, crystal.y - destination.y) > 42,
-      )
-      .map(({ crystal, index }) => ({ id: -(index + 1000), x: crystal.x, y: crystal.y, r: 24 })),
-    ...(g.objectives || [])
-      .filter((objective) => Math.hypot(objective.x - destination.x, objective.y - destination.y) > 64)
-      .map((objective) => ({ id: -(objective.id + 5000), x: objective.x, y: objective.y, r: 38 })),
-    ...TERRAIN_RIDGES.filter((ridge) => ridge.plateauId !== ignorePlateauId),
-  ];
-  return obstacles
-    .map((obstacle) => {
-      const t = Math.max(
-        0,
-        Math.min(1, ((obstacle.x - u.x) * dx + (obstacle.y - u.y) * dy) / lengthSquared),
-      );
-      const px = u.x + dx * t;
-      const py = u.y + dy * t;
-      const clearance = stats[u.type].r + obstacle.r + 12;
-      return { obstacle, t, blocked: Math.hypot(obstacle.x - px, obstacle.y - py) < clearance };
-    })
-    .filter((candidate) => candidate.blocked && candidate.t > 0.04 && candidate.t < 0.96)
-    .sort((a, b) => a.t - b.t)[0]?.obstacle;
-}
-
-function moveUnitToward(
-  g: Game,
-  u: Unit,
-  destination: P,
-  dt: number,
-  ignoreBuildingId?: number,
-) {
-  const plateauRoute = plateauTravelRoute(u, destination);
-  const travelDestination = plateauRoute?.goal || destination;
-  const ignorePlateauId = plateauRoute?.ignorePlateauId;
-  if (
-    u.nav &&
-    Number.isFinite(u.navCheckAt) &&
-    g.time >= (u.navCheckAt || 0)
-  ) {
-    const progress = Math.hypot(u.x - (u.navCheckX ?? u.x), u.y - (u.navCheckY ?? u.y));
-    if (progress < 4) {
-      u.nav = undefined;
-      u.navSide = u.navSide === 1 ? -1 : 1;
-    }
-    u.navCheckAt = g.time + 0.65;
-    u.navCheckX = u.x;
-    u.navCheckY = u.y;
-  }
-  if (u.nav && Math.hypot(u.nav.x - u.x, u.nav.y - u.y) < 9) u.nav = undefined;
-  if (!u.nav) {
-    const blocker = u.type === "drone" ? undefined : blockingObstacle(g, u, travelDestination, ignoreBuildingId, ignorePlateauId);
-    if (blocker) {
-      const dx = travelDestination.x - u.x;
-      const dy = travelDestination.y - u.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const forwardX = dx / distance;
-      const forwardY = dy / distance;
-      const clearance = stats[u.type].r + blocker.r + 22;
-      const preferredSide = u.navSide || ((u.id + blocker.id) % 2 === 0 ? 1 : -1);
-      const candidates = ([preferredSide, -preferredSide] as const).map((side) => ({
-        side,
-        point: {
-          x: Math.max(20, Math.min(W - 20, blocker.x - forwardY * clearance * side + forwardX * 34)),
-          y: Math.max(20, Math.min(H - 20, blocker.y + forwardX * clearance * side + forwardY * 34)),
-        },
-      }));
-      const chosen = candidates.find(({ point }) => {
-        const probe = { ...u, x: point.x, y: point.y, nav: undefined };
-        return !blockingObstacle(g, probe, travelDestination, ignoreBuildingId, ignorePlateauId);
-      }) || candidates[0];
-      u.navSide = chosen.side;
-      u.nav = chosen.point;
-      u.navCheckAt = g.time + 0.65;
-      u.navCheckX = u.x;
-      u.navCheckY = u.y;
-    }
-  }
-  const goal = u.nav || travelDestination;
-  const dx = goal.x - u.x;
-  const dy = goal.y - u.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance < 0.01) return;
-  u.facing = Math.atan2(dy, dx);
-  const doctrineSpeed = stats[u.type].speed * (teamDoctrine(g, u.team) === "air" && u.type === "drone" ? 1.15 : 1);
-  const travelSpeed = u.formationSpeed ? Math.min(doctrineSpeed, u.formationSpeed) : doctrineSpeed;
-  const step = Math.min(distance, travelSpeed * supplyMultiplier(u) * (u.retreating ? 1.2 : 1) * dt);
-  u.moving = step > 0.01;
-  u.x = Math.max(stats[u.type].r, Math.min(W - stats[u.type].r, u.x + (dx / distance) * step));
-  u.y = Math.max(stats[u.type].r, Math.min(H - stats[u.type].r, u.y + (dy / distance) * step));
-}
-
-function recordAttackAlert(g: Game, target: Unit | Building) {
-  const alerts = g.attackAlerts || (g.attackAlerts = []);
-  const existing = alerts.find((alert) => alert.targetId === target.id && alert.team === target.team);
-  if (existing) {
-    existing.x = target.x;
-    existing.y = target.y;
-    existing.expiresAt = g.time + 4.5;
-  } else {
-    alerts.push({
-      targetId: target.id,
-      team: target.team,
-      x: target.x,
-      y: target.y,
-      startedAt: g.time,
-      expiresAt: g.time + 4.5,
-    });
-  }
-  if (alerts.length > 8) alerts.splice(0, alerts.length - 8);
-}
-
-function resourceCluster(
-  center: P,
-  count: number,
-  amount: number,
-  kinds: ResourceKind[] = ["credits"],
-): Crystal[] {
-  const rotation = Math.random() * Math.PI * 2;
-  return Array.from({ length: count }, (_, index) => {
-    const ring = 54 + index * 25 + Math.random() * 12;
-    const angle = rotation + index * ((Math.PI * 2) / count) + (Math.random() - 0.5) * 0.4;
-    return {
-      x: Math.round(Math.max(70, Math.min(W - 70, center.x + Math.cos(angle) * ring))),
-      y: Math.round(Math.max(70, Math.min(H - 70, center.y + Math.sin(angle) * ring))),
-      amount,
-      kind: kinds[index % kinds.length],
-    };
-  });
-}
-
-function balancedResourceFields(objectives: Objective[]): Crystal[] {
-  const openingOffset = 390 + Math.random() * 90;
-  const openingY = PLAYER_BASE.y - 170 + Math.random() * 340;
-  const playerCenter = { x: PLAYER_BASE.x + openingOffset, y: openingY };
-  const enemyCenter = { x: W - playerCenter.x, y: openingY };
-  const contestedSpread = 430 + Math.random() * 170;
-  const contestedOffset = -150 + Math.random() * 300;
-  const contestedA = { x: W / 2 + contestedOffset, y: H / 2 - contestedSpread };
-  const contestedB = { x: W / 2 - contestedOffset, y: H / 2 + contestedSpread };
-  return clearRelayApproaches([
-    ...resourceCluster(playerCenter, 4, 1300, ["credits", "alloy"]),
-    ...resourceCluster(enemyCenter, 4, 1300, ["credits", "alloy"]),
-    ...resourceCluster(contestedA, 3, 1250, ["credits", "credits", "alloy"]),
-    ...resourceCluster(contestedB, 3, 1250, ["alloy", "alloy", "credits"]),
-  ], objectives);
-}
-
-function randomResourceFields(objectives: Objective[]): Crystal[] {
-  return balancedResourceFields(objectives);
-}
-
-function multiplayerResourceFields(objectives: Objective[]): Crystal[] {
-  return balancedResourceFields(objectives);
-}
-
-function mapObjectives(): Objective[] {
-  const verticalSpread = 430 + Math.random() * 220;
-  const horizontalOffset = -110 + Math.random() * 220;
-  return [
-    { id: 1, x: W / 2 + horizontalOffset, y: H / 2 - verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
-    { id: 2, x: W / 2 - horizontalOffset, y: H / 2 + verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
-  ];
-}
-
-/** Keep a full walking/repair lane around every relay, including old saved maps. */
-function clearRelayApproaches(crystals: Crystal[], objectives: Objective[]): Crystal[] {
-  return crystals.map((crystal, index) => {
-    const moved = { ...crystal };
-    for (const objective of objectives) {
-      const dx = moved.x - objective.x;
-      const dy = moved.y - objective.y;
-      const distance = Math.hypot(dx, dy);
-      if (distance >= RELAY_RESOURCE_CLEARANCE) continue;
-      const angle = distance > 1
-        ? Math.atan2(dy, dx) + (index % 2 === 0 ? -.08 : .08)
-        : index * 2.399;
-      const clearance = RELAY_RESOURCE_CLEARANCE + (index % 3) * 16;
-      moved.x = Math.round(Math.max(70, Math.min(W - 70, objective.x + Math.cos(angle) * clearance)));
-      moved.y = Math.round(Math.max(70, Math.min(H - 70, objective.y + Math.sin(angle) * clearance)));
-    }
-    return moved;
-  });
-}
-
-function intelRelayOperational(objective: Objective) {
-  return objective.hp > 0 && objective.rebuildAt === undefined;
-}
-
-function recordRelayAttackAlert(g: Game, objective: Objective, defendingTeam: Unit["team"]) {
-  const alerts = g.attackAlerts || (g.attackAlerts = []);
-  const targetId = -(10000 + objective.id);
-  const existing = alerts.find((alert) => alert.targetId === targetId && alert.team === defendingTeam);
-  if (existing) {
-    existing.x = objective.x;
-    existing.y = objective.y;
-    existing.expiresAt = g.time + 4.5;
-  } else {
-    alerts.push({
-      targetId,
-      team: defendingTeam,
-      x: objective.x,
-      y: objective.y,
-      startedAt: g.time,
-      expiresAt: g.time + 4.5,
-    });
-  }
-  if (alerts.length > 8) alerts.splice(0, alerts.length - 8);
-}
-
-function destroyIntelRelay(g: Game, objective: Objective, defendingTeam: Unit["team"]) {
-  objective.hp = 0;
-  objective.owner = "neutral";
-  objective.capture = 0;
-  objective.rebuildAt = g.time + RELAY_REBUILD_COOLDOWN;
-  objective.rebuildProgress = 0;
-  relayOccupants(g, objective).forEach((occupant) => ejectFromIntelRelay(g, occupant));
-  g.units.forEach((unit) => {
-    if (unit.garrisonTarget === objective.id) unit.garrisonTarget = undefined;
-  });
-  if (defendingTeam === "player" || isVisible(g, objective, HIGH_GROUND_RADIUS)) {
-    g.message = `${defendingTeam === "player" ? "INTEL RELAY BREACHED" : "ENEMY RELAY BREACHED"} â€” garrison exposed; rebuild lock active.`;
-  }
-}
-
-function relayOccupants(g: Game, objective: Objective, team?: Unit["team"]) {
-  return g.units.filter((unit) =>
-    unit.hp > 0 &&
-    unit.type === "trooper" &&
-    unit.garrisonedAt === objective.id &&
-    (!team || unit.team === team),
-  );
-}
-
-function enterIntelRelay(g: Game, unit: Unit, objective: Objective) {
-  if (unit.type !== "trooper" || unit.hp <= 0 || !intelRelayOperational(objective)) return false;
-  const occupants = relayOccupants(g, objective);
-  if (occupants.some((occupant) => occupant.team !== unit.team) || occupants.length >= RELAY_GARRISON_CAPACITY) return false;
-  const slot = occupants.length;
-  const ownershipChanged = objective.owner !== unit.team;
-  const offsets = [{ x: -18, y: -9 }, { x: 18, y: -9 }, { x: -18, y: 9 }, { x: 18, y: 9 }];
-  unit.garrisonedAt = objective.id;
-  unit.garrisonTarget = undefined;
-  unit.x = objective.x + offsets[slot].x;
-  unit.y = objective.y + offsets[slot].y;
-  unit.target = undefined;
-  unit.enemy = undefined;
-  unit.moveEngage = false;
-  unit.nav = undefined;
-  unit.plateauRoute = undefined;
-  unit.stance = "pursue";
-  objective.owner = unit.team;
-  objective.capture = unit.team === "player" ? OBJECTIVE_CAPTURE_TIME : -OBJECTIVE_CAPTURE_TIME;
-  g.selected = g.selected.filter((id) => id !== unit.id);
-  if (ownershipChanged && (unit.team === "player" || isVisible(g, objective, HIGH_GROUND_RADIUS))) {
-    g.message = `${unit.team === "player" ? "INTEL RELAY SECURED" : "ENEMY RELAY CAPTURED"} Â· garrison ${occupants.length + 1}/${RELAY_GARRISON_CAPACITY}.`;
-  }
-  return true;
-}
-
-function ejectFromIntelRelay(g: Game, unit: Unit) {
-  if (!unit.garrisonedAt) return;
-  const objective = (g.objectives || []).find((candidate) => candidate.id === unit.garrisonedAt);
-  unit.garrisonedAt = undefined;
-  unit.garrisonTarget = undefined;
-  if (!objective) return;
-  const angle = unit.id * 2.399;
-  unit.x = objective.x + Math.cos(angle) * 68;
-  unit.y = objective.y + Math.sin(angle) * 48;
-  unit.nav = undefined;
-  unit.plateauRoute = undefined;
-}
-
-function initial(options: { fogEnabled?: boolean } = {}): Game {
-  const adaptive = adaptiveDifficulty();
-  const easiest = isEasiest(adaptive);
-  const fogEnabled = options.fogEnabled ?? true;
-  const objectives = mapObjectives();
-  return {
-    credits: 650,
-    enemyCredits: 550,
-    alloy: 520,
-    enemyAlloy: 520,
-    intel: 40,
-    enemyIntel: 40,
-    power: 12,
-    enemyPower: 12,
-    wave: 0,
-    time: 0,
-    waveAt: easiest ? 240 : 150,
-        aiThinkAt: 6,
-    aiActionAt: 0,
-    aiAttackAt: easiest ? 240 : 150,
-    adaptive,
-    fogSeen: Array(FOG_COUNT).fill(0),
-    fogEnabled,
-    matchStats: emptyStats(),
-    selected: [],
-    camera: { x: 440, y: PLAYER_BASE.y },
-    zoom: 1,
-    mode: "select",
-    message:
-      `${easiest ? 240 : 150} seconds to prepare. Mine credits for units, alloy for structures, and secure Intel Relays. AI level ${adaptive < .95 ? "easing" : adaptive > 1.05 ? "rising" : "steady"}.`,
-    over: "",
-    fortified: false,
-    fortifyProduction: undefined,
-    enemyFortified: false,
-    enemyFortifyProduction: undefined,
-    doctrine: undefined,
-    doctrineProduction: undefined,
-    enemyDoctrine: undefined,
-    enemyDoctrineProduction: undefined,
-    tradeNetwork: false,
-    tradeNetworkProduction: undefined,
-    enemyTradeNetwork: false,
-    enemyTradeNetworkProduction: undefined,
-    enemyDoctrineKnown: false,
-    scoutedEnemyDoctrine: undefined,
-    mapVersion: 2,
-    nextId: 20,
-    shots: [],
-    damageNumbers: [],
-    attackAlerts: [],
-    objectives,
-    units: [
-      {
-        id: 1,
-        team: "player",
-        type: "worker",
-        x: PLAYER_BASE.x - 5,
-        y: PLAYER_BASE.y + 70,
-        hp: 70,
-        max: 70,
-      },
-      {
-        id: 2,
-        team: "player",
-        type: "trooper",
-        x: PLAYER_BASE.x + 60,
-        y: PLAYER_BASE.y + 100,
-        hp: 95,
-        max: 95,
-      },
-      {
-        id: 3,
-        team: "player",
-        type: "trooper",
-        x: PLAYER_BASE.x + 90,
-        y: PLAYER_BASE.y + 80,
-        hp: 95,
-        max: 95,
-      },
-      {
-        id: 8,
-        team: "enemy",
-        type: "worker",
-        x: ENEMY_BASE.x - 70,
-        y: ENEMY_BASE.y - 90,
-        hp: 70,
-        max: 70,
-        xp: 0,
-        level: 1,
-      },
-    ],
-    buildings: [
-      { id: 4, team: "player", type: "hq", x: PLAYER_BASE.x, y: PLAYER_BASE.y, hp: 900, max: 900 },
-      { id: 5, team: "enemy", type: "hq", x: ENEMY_BASE.x, y: ENEMY_BASE.y, hp: 900, max: 900 },
-      {
-        id: 6,
-        team: "enemy",
-        type: "barracks",
-        x: ENEMY_BASE.x - 80,
-        y: ENEMY_BASE.y + 130,
-        hp: 520,
-        max: 520,
-      },
-      {
-        id: 7,
-        team: "enemy",
-        type: "refinery",
-        x: ENEMY_BASE.x - 20,
-        y: ENEMY_BASE.y - 135,
-        hp: 440,
-        max: 440,
-        progress: 1,
-      },
-    ],
-    crystals: randomResourceFields(objectives),
-  };
-}
-
-function initialMultiplayer(options: { fogEnabled?: boolean } = {}): Game {
-  const fogEnabled = options.fogEnabled ?? true;
-  const g = initial({ fogEnabled });
-  g.credits = 650;
-  g.enemyCredits = 650;
-  g.alloy = 520;
-  g.enemyAlloy = 520;
-  g.intel = 40;
-  g.enemyIntel = 40;
-  g.power = 12;
-  g.enemyPower = 12;
-  g.wave = 0;
-  g.waveAt = Number.MAX_SAFE_INTEGER;
-  g.aiThinkAt = Number.MAX_SAFE_INTEGER;
-  g.aiActionAt = Number.MAX_SAFE_INTEGER;
-  g.aiAttackAt = Number.MAX_SAFE_INTEGER;
-  g.message = "PRIVATE 1V1 CONNECTED â€” destroy the opposing command core.";
-  g.units = [
-    { id: 1, team: "player", type: "worker", x: PLAYER_BASE.x - 5, y: PLAYER_BASE.y + 70, hp: 70, max: 70, facing: 0 },
-    { id: 2, team: "player", type: "trooper", x: PLAYER_BASE.x + 60, y: PLAYER_BASE.y + 100, hp: 95, max: 95, facing: 0 },
-    { id: 3, team: "player", type: "trooper", x: PLAYER_BASE.x + 90, y: PLAYER_BASE.y + 80, hp: 95, max: 95, facing: 0 },
-    { id: 8, team: "enemy", type: "worker", x: ENEMY_BASE.x + 5, y: ENEMY_BASE.y + 70, hp: 70, max: 70, facing: Math.PI },
-    { id: 9, team: "enemy", type: "trooper", x: ENEMY_BASE.x - 60, y: ENEMY_BASE.y + 100, hp: 95, max: 95, facing: Math.PI },
-    { id: 10, team: "enemy", type: "trooper", x: ENEMY_BASE.x - 90, y: ENEMY_BASE.y + 80, hp: 95, max: 95, facing: Math.PI },
-  ];
-  g.buildings = [
-    { id: 4, team: "player", type: "hq", x: PLAYER_BASE.x, y: PLAYER_BASE.y, hp: 900, max: 900 },
-    { id: 5, team: "enemy", type: "hq", x: ENEMY_BASE.x, y: ENEMY_BASE.y, hp: 900, max: 900 },
-  ];
-  g.objectives = mapObjectives();
-  g.crystals = multiplayerResourceFields(g.objectives);
-  g.nextId = 20;
-  g.camera = { x: 440, y: PLAYER_BASE.y };
-  g.selected = [];
-  g.fogSeen = Array(FOG_COUNT).fill(0);
-  revealFog(g);
-  return g;
-}
-
-function swapTeam(team: Unit["team"]): Unit["team"] {
-  return team === "player" ? "enemy" : "player";
-}
-
-function guestPerspective(authoritative: Game, local: Game | null, firstSnapshot: boolean): Game {
-  const view = structuredClone(authoritative);
-  view.units = view.units.map((unit) => ({ ...unit, team: swapTeam(unit.team) }));
-  view.buildings = view.buildings.map((building) => ({ ...building, team: swapTeam(building.team) }));
-  view.shots = view.shots.map((shot) => ({ ...shot, team: swapTeam(shot.team) }));
-  view.damageNumbers = view.damageNumbers.map((number) => ({ ...number, team: swapTeam(number.team) }));
-  view.attackAlerts = (view.attackAlerts || []).map((alert) => ({ ...alert, team: swapTeam(alert.team) }));
-  [view.credits, view.enemyCredits] = [view.enemyCredits, view.credits];
-  [view.alloy, view.enemyAlloy] = [view.enemyAlloy, view.alloy];
-  [view.intel, view.enemyIntel] = [view.enemyIntel, view.intel];
-  view.objectives = (view.objectives || []).map((objective) => ({
-    ...objective,
-    owner: objective.owner === "player" ? "enemy" : objective.owner === "enemy" ? "player" : "neutral",
-    capture: -objective.capture,
-  }));
-  const hostPower = view.power;
-  view.power = view.enemyPower ?? 12;
-  view.enemyPower = hostPower;
-  [view.fortified, view.enemyFortified] = [view.enemyFortified, view.fortified];
-  [view.fortifyProduction, view.enemyFortifyProduction] = [view.enemyFortifyProduction, view.fortifyProduction];
-  [view.doctrine, view.enemyDoctrine] = [view.enemyDoctrine, view.doctrine];
-  [view.doctrineProduction, view.enemyDoctrineProduction] = [view.enemyDoctrineProduction, view.doctrineProduction];
-  [view.tradeNetwork, view.enemyTradeNetwork] = [view.enemyTradeNetwork, view.tradeNetwork];
-  [view.tradeNetworkProduction, view.enemyTradeNetworkProduction] = [view.enemyTradeNetworkProduction, view.tradeNetworkProduction];
-  view.over = authoritative.over === "won" ? "lost" : authoritative.over === "lost" ? "won" : "";
-  view.camera = firstSnapshot ? { x: W - 440, y: ENEMY_BASE.y } : local?.camera || { x: W - 440, y: ENEMY_BASE.y };
-  view.zoom = local?.zoom || 1;
-  view.selected = (local?.selected || []).filter((id) =>
-    [...view.units, ...view.buildings].some((object) => object.id === id && object.team === "player"),
-  );
-  view.mode = local?.mode || "select";
-  view.message = local?.message || "PRIVATE 1V1 CONNECTED â€” destroy the opposing command core.";
-  view.fogSeen = local?.fogSeen?.length === FOG_COUNT ? [...local.fogSeen] : Array(FOG_COUNT).fill(0);
-  revealFog(view);
-  const enemyHq = view.buildings.find((building) => building.team === "enemy" && building.type === "hq");
-  const enemyHqVisible = Boolean(enemyHq && isVisible(view, enemyHq, buildingStats.hq.r));
-  view.scoutedEnemyDoctrine = enemyHqVisible ? (view.enemyDoctrine || "none") : local?.scoutedEnemyDoctrine;
-  view.enemyDoctrineKnown = view.scoutedEnemyDoctrine !== undefined;
-  return view;
-}
-
-function repairBuilding(b: Building): Building {
-  const max =
-    Number.isFinite(b.max) && b.max > 0
-      ? b.max
-      : buildingHealth[b.type];
-  const production =
-    b.production && ["worker", "trooper", "tank", "drone", "cipher"].includes(b.production.type)
-      ? {
-          ...b.production,
-          elapsed: Math.max(0, Number(b.production.elapsed) || 0),
-          duration: Math.max(
-            1,
-            Number(b.production.duration) || unitBuildTime[b.production.type],
-          ),
-          queue: Array.isArray(b.production.queue)
-            ? b.production.queue.filter((type) =>
-                ["worker", "trooper", "tank", "drone", "cipher"].includes(type),
-              )
-            : [],
-        }
-      : undefined;
-  return {
-    ...b,
-    max,
-    hp: Number.isFinite(b.hp) ? Math.max(0, Math.min(b.hp, max)) : max,
-    production,
-    constructionDuration:
-      b.progress !== undefined
-        ? Math.max(
-            1,
-            Number(b.constructionDuration) ||
-              (b.type === "turret" ? buildingBuildTime.turret : 6),
-          )
-        : undefined,
-    constructionStarted:
-      b.progress !== undefined && b.progress < 1
-        ? Boolean(b.constructionStarted || b.progress > 0)
-        : undefined,
-    rally:
-      b.rally && Number.isFinite(b.rally.x) && Number.isFinite(b.rally.y)
-        ? b.rally
-        : undefined,
-    cooldown: Math.max(0, Number(b.cooldown) || 0),
-    packed: b.type === "hq" ? Boolean(b.packed) : undefined,
-    mobileTarget:
-      b.type === "hq" && b.mobileTarget && Number.isFinite(b.mobileTarget.x) && Number.isFinite(b.mobileTarget.y)
-        ? b.mobileTarget
-        : undefined,
-    mobileFacing: b.type === "hq" && Number.isFinite(b.mobileFacing) ? b.mobileFacing : undefined,
-    relocation:
-      b.type === "hq" && b.relocation && (b.relocation.mode === "pack" || b.relocation.mode === "deploy")
-        ? {
-            mode: b.relocation.mode,
-            elapsed: Math.max(0, Number(b.relocation.elapsed) || 0),
-            duration: Math.max(1, Number(b.relocation.duration) || 5),
-          }
-        : undefined,
-  };
-}
-
-function hydrateGame(parsed: Game, message: string): Game {
-  if (
-    !Array.isArray(parsed.units) ||
-    !Array.isArray(parsed.buildings) ||
-    !Array.isArray(parsed.crystals)
-  ) throw new Error("Invalid save");
-  const savedTime = Math.max(0, Number(parsed.time) || 0);
-  const savedAdaptive = Math.max(
-    0.82,
-    Math.min(1.18, Number(parsed.adaptive) || adaptiveDifficulty()),
-  );
-  const aiAttackAt = isEasiest(savedAdaptive) && (Number(parsed.wave) || 0) === 0
-    ? Math.max(Number(parsed.aiAttackAt) || 0, 240)
-    : Number(parsed.aiAttackAt) || Math.max(savedTime + 20, 90);
-  const repaired: Game = {
-    ...parsed,
-    credits: Math.max(0, Number(parsed.credits) || 0),
-    enemyCredits: Number.isFinite(Number(parsed.enemyCredits))
-      ? Math.max(0, Number(parsed.enemyCredits))
-      : 650,
-    alloy: Number.isFinite(Number(parsed.alloy)) ? Math.max(0, Number(parsed.alloy)) : 520,
-    enemyAlloy: Number.isFinite(Number(parsed.enemyAlloy)) ? Math.max(0, Number(parsed.enemyAlloy)) : 520,
-    intel: Number.isFinite(Number(parsed.intel)) ? Math.max(0, Number(parsed.intel)) : 40,
-    enemyIntel: Number.isFinite(Number(parsed.enemyIntel)) ? Math.max(0, Number(parsed.enemyIntel)) : 40,
-    power: Math.max(0, Number(parsed.power) || 0),
-    enemyPower: Math.max(0, Number(parsed.enemyPower) || 12),
-    wave: Math.max(0, Number(parsed.wave) || 0),
-    time: savedTime,
-    waveAt: Number(parsed.waveAt) || aiAttackAt,
-    aiThinkAt: Math.min(Number(parsed.aiThinkAt) || savedTime, savedTime + 0.25),
-    aiActionAt: Number(parsed.aiActionAt) || savedTime,
-    aiAttackAt,
-    adaptive: savedAdaptive,
-    matchStats: { ...emptyStats(), ...(parsed.matchStats || {}) },
-    fogSeen: Array.isArray(parsed.fogSeen) && parsed.fogSeen.length === FOG_COUNT
-      ? parsed.fogSeen.map((cell) => (cell ? 1 : 0))
-      : Array(FOG_COUNT).fill(0),
-    fogEnabled: parsed.fogEnabled !== false,
-    fortified: Boolean(parsed.fortified),
-    fortifyProduction:
-      parsed.fortifyProduction && !parsed.fortified
-        ? {
-            elapsed: Math.max(0, Number(parsed.fortifyProduction.elapsed) || 0),
-            duration: Math.max(1, Number(parsed.fortifyProduction.duration) || FORTIFY_DURATION),
-          }
-        : undefined,
-    enemyFortified: Boolean(parsed.enemyFortified),
-    enemyFortifyProduction:
-      parsed.enemyFortifyProduction && !parsed.enemyFortified
-        ? {
-            elapsed: Math.max(0, Number(parsed.enemyFortifyProduction.elapsed) || 0),
-            duration: Math.max(1, Number(parsed.enemyFortifyProduction.duration) || FORTIFY_DURATION),
-          }
-        : undefined,
-    doctrine: parsed.doctrine === "air" || parsed.doctrine === "armor" ? parsed.doctrine : undefined,
-    doctrineProduction:
-      (parsed.doctrineProduction?.type === "air" || parsed.doctrineProduction?.type === "armor") && !parsed.doctrine
-        ? { type: parsed.doctrineProduction.type, elapsed: Math.max(0, Number(parsed.doctrineProduction.elapsed) || 0), duration: Math.max(1, Number(parsed.doctrineProduction.duration) || DOCTRINE_DURATION) }
-        : undefined,
-    enemyDoctrine: parsed.enemyDoctrine === "air" || parsed.enemyDoctrine === "armor" ? parsed.enemyDoctrine : undefined,
-    enemyDoctrineProduction:
-      (parsed.enemyDoctrineProduction?.type === "air" || parsed.enemyDoctrineProduction?.type === "armor") && !parsed.enemyDoctrine
-        ? { type: parsed.enemyDoctrineProduction.type, elapsed: Math.max(0, Number(parsed.enemyDoctrineProduction.elapsed) || 0), duration: Math.max(1, Number(parsed.enemyDoctrineProduction.duration) || DOCTRINE_DURATION) }
-        : undefined,
-    tradeNetwork: Boolean(parsed.tradeNetwork),
-    tradeNetworkProduction:
-      parsed.tradeNetworkProduction && !parsed.tradeNetwork
-        ? {
-            elapsed: Math.max(0, Number(parsed.tradeNetworkProduction.elapsed) || 0),
-            duration: Math.max(1, Number(parsed.tradeNetworkProduction.duration) || TRADE_NETWORK_DURATION),
-          }
-        : undefined,
-    enemyTradeNetwork: Boolean(parsed.enemyTradeNetwork),
-    enemyTradeNetworkProduction:
-      parsed.enemyTradeNetworkProduction && !parsed.enemyTradeNetwork
-        ? {
-            elapsed: Math.max(0, Number(parsed.enemyTradeNetworkProduction.elapsed) || 0),
-            duration: Math.max(1, Number(parsed.enemyTradeNetworkProduction.duration) || TRADE_NETWORK_DURATION),
-          }
-        : undefined,
-    enemyDoctrineKnown: Boolean(parsed.enemyDoctrineKnown),
-    scoutedEnemyDoctrine:
-      parsed.scoutedEnemyDoctrine === "air" || parsed.scoutedEnemyDoctrine === "armor" || parsed.scoutedEnemyDoctrine === "none"
-        ? parsed.scoutedEnemyDoctrine
-        : undefined,
-    mapVersion: 2,
-    shots: [],
-    damageNumbers: [],
-    attackAlerts: Array.isArray(parsed.attackAlerts)
-      ? parsed.attackAlerts
-          .filter((alert) => alert && Number.isFinite(alert.targetId) && Number.isFinite(alert.expiresAt))
-          .map((alert) => ({
-            targetId: alert.targetId,
-            team: alert.team === "enemy" ? "enemy" : "player",
-            x: Number(alert.x) || 0,
-            y: Number(alert.y) || 0,
-            startedAt: Number(alert.startedAt) || savedTime,
-            expiresAt: Number(alert.expiresAt) || savedTime,
-          }))
-      : [],
-    selected: [],
-    mode: "select",
-    camera:
-      parsed.camera && Number.isFinite(parsed.camera.x) && Number.isFinite(parsed.camera.y)
-        ? parsed.camera
-        : { x: 440, y: PLAYER_BASE.y },
-    zoom: Math.max(0.55, Math.min(1.7, Number(parsed.zoom) || 1)),
-    units: normalizeUnits(parsed.units).map((u) => ({
-      ...u,
-      nav: undefined,
-      navCheckAt: undefined,
-      navCheckX: undefined,
-      navCheckY: undefined,
-      plateauRoute: undefined,
-      carryingType: u.carryingType === "alloy" ? "alloy" : "credits",
-    })),
-    buildings: parsed.buildings.map(repairBuilding),
-    crystals: parsed.crystals.map((node, index) => ({
-      ...node,
-      amount: Math.max(0, Number(node.amount) || 0),
-      kind: node.kind === "alloy" ? "alloy" : index % 2 === 0 ? "credits" : "alloy",
-    })),
-    objectives: Array.isArray(parsed.objectives) && parsed.objectives.length
-      ? parsed.objectives.map((objective, index) => ({
-          id: Number.isInteger(objective.id) ? objective.id : index + 1,
-          x: Number.isFinite(objective.x) ? objective.x : W / 2,
-          y: Number.isFinite(objective.y) ? objective.y : index === 0 ? 300 : H - 300,
-          owner: ["player", "enemy", "neutral"].includes(objective.owner) ? objective.owner : "neutral",
-          capture: Math.max(-OBJECTIVE_CAPTURE_TIME, Math.min(OBJECTIVE_CAPTURE_TIME, Number(objective.capture) || 0)),
-          hp: Math.max(0, Math.min(RELAY_MAX_HP, Number.isFinite(objective.hp) ? Number(objective.hp) : RELAY_MAX_HP)),
-          max: RELAY_MAX_HP,
-          rebuildAt: Number.isFinite(objective.rebuildAt) ? Number(objective.rebuildAt) : undefined,
-          rebuildProgress: Number.isFinite(objective.rebuildProgress)
-            ? Math.max(0, Math.min(1, Number(objective.rebuildProgress)))
-            : undefined,
-        }))
-      : mapObjectives(),
-    message,
-  };
-  repaired.crystals = clearRelayApproaches(repaired.crystals, repaired.objectives);
-  repairGameIds(repaired);
-  return repaired;
-}
-function loadGame(): Game {
-  if (typeof window === "undefined") return initial();
-  try {
-    migrateCommanderStorage();
-    const saved = localStorage.getItem(SAVE_KEY);
-    if (!saved) return initial();
-    const parsed = JSON.parse(saved) as Game;
-    return hydrateGame(parsed, "Match resumed from your last autosave.");
-  } catch {
-    localStorage.removeItem(SAVE_KEY);
-    return initial();
-  }
-}
-
-export default function Home() {
-  const canvas = useRef<HTMLCanvasElement>(null),
-    game = useRef<Game>(initial()),
-    art = useRef<{
-      terrain?: HTMLImageElement;
-      terrainLayer?: HTMLCanvasElement;
-      units?: HTMLImageElement;
-      workerDirections?: HTMLImageElement;
-      workerWalk?: HTMLImageElement;
-      workerWalkC?: HTMLImageElement;
-      trooperDirections?: HTMLImageElement;
-      trooperWalk?: HTMLImageElement;
-      trooperWalkC?: HTMLImageElement;
-      tankDirections?: HTMLImageElement;
-      droneDirections?: HTMLImageElement;
-      droneMove?: HTMLImageElement;
-      cipherDirections?: HTMLImageElement;
-      cipherDeployed?: HTMLImageElement;
-      workerMine?: HTMLImageElement;
-      turretDirections?: HTMLImageElement;
-      buildings?: HTMLImageElement;
-      crystal?: HTMLImageElement;
-      alloyCrystal?: HTMLCanvasElement;
-      tacticalPlateau?: HTMLImageElement;
-      commandCrawler?: HTMLImageElement;
-      intelRelay?: HTMLImageElement;
-    }>({}),
-    keys = useRef(new Set<string>()),
-    pointer = useRef<{
-      x: number;
-      y: number;
-      wx: number;
-      wy: number;
-      drag: boolean;
-      start: P;
-    } | null>(null),
-    touchPoints = useRef(new Map<number, P>()),
-    pinch = useRef<{
-      distance: number;
-      zoom: number;
-      worldMid: P;
-    } | null>(null),
-    pinchConsumed = useRef(false),
-    moveGesture = useRef<{
-      timer?: ReturnType<typeof setTimeout>;
-      opened: boolean;
-      start: P;
-      world: P;
-      choice: "engage" | "direct" | null;
-    } | null>(null),
-    last = useRef(0),
-    attackTimers = useRef<Record<number, number>>({}),
-    lastTap = useRef<{ id: number; time: number } | null>(null),
-    controlGroups = useRef<Record<number, number[]>>({}),
-    lastGroupKey = useRef<{ group: number; time: number } | null>(null),
-    matchStarted = useRef(false),
-    peer = useRef<PeerSession | null>(null),
-    multiplayerRole = useRef<MultiplayerRole>("solo"),
-    privateMatchFog = useRef(true),
-    guestSnapshotReady = useRef(false),
-    networkSnapshotAt = useRef(0),
-    lastHudTick = useRef(-1);
-  const [ui, setUi] = useState({
-    credits: 650,
-    alloy: 520,
-    intel: 40,
-    objectives: 0,
-    army: 2,
-    upkeep: 0,
-    power: 12,
-    wave: 0,
-    nextWave: 150,
-    selected: "No selection",
-    message: "Secure your base with Sentry Turrets after your first refinery.",
-    over: "",
-    production: null as (Production & { building: "hq" | "barracks" }) | null,
-    productionBuilding: null as ("hq" | "barracks") | null,
-    buildMode: null as ("build-refinery" | "build-barracks" | "build-turret") | null,
-    hasHq: true,
-    hasBarracks: false,
-    barracksBuilding: false,
-    selectedBuilding: null as Building["type"] | null,
-    selectedConstruction: false,
-    hqPacked: false,
-    hqRelocation: null as Building["relocation"] | null,
-    fortified: false,
-    fortifyProduction: null as { elapsed: number; duration: number } | null,
-    productionCooldown: 0,
-    doctrine: null as Doctrine | null,
-    doctrineProduction: null as { type: Doctrine; elapsed: number; duration: number } | null,
-    tradeNetwork: false,
-    tradeNetworkProduction: null as { elapsed: number; duration: number } | null,
-    cipherCount: 0,
-    enemyDoctrine: null as Doctrine | null,
-    enemyDoctrineKnown: false,
-    canClear: false,
-    cancelMode: false,
-    selectedCombat: 0,
-    selectedUnits: 0,
-    selectedWorkers: 0,
-    selectedUnitType: null as Unit["type"] | "mixed" | null,
-    selectedCipherMode: null as Unit["cipherMode"] | "mixed" | null,
-    selectedStance: null as Unit["stance"] | "mixed" | null,
-    autoRepair: false,
-    repairingWorkers: 0,
-    idleWorkers: 0,
-    selectedUnitCards: [] as Array<{ id: number; type: Unit["type"]; hp: number; max: number; level: number }>,
-  });
-  const [saveStatus, setSaveStatus] = useState("AUTOSAVE ON");
-  const [moveChooser, setMoveChooser] = useState<{
-    x: number;
-    y: number;
-    world: P;
-    choice: "engage" | "direct" | null;
-  } | null>(null);
-  const [paused, setPaused] = useState(false);
-  const [homeOpen, setHomeOpen] = useState(true);
-  const [commandProfile, setCommandProfile] = useState<CommandProfile>({ xp: 0, spentPoints: 0, lastAward: 0, fireControlRank: 0 });
-  const [hasAutosave, setHasAutosave] = useState(false);
-  const [newMatchFog, setNewMatchFog] = useState(true);
-  const [joinCode, setJoinCode] = useState("");
-  const [network, setNetwork] = useState<{
-    role: MultiplayerRole;
-    status: PeerStatus;
-    code: string;
-    detail: string;
-  }>({ role: "solo", status: "idle", code: "", detail: "" });
-  const [commandTab, setCommandTab] = useState<"buildings" | "units" | "tech">(
-    "units",
-  );
-  const commandSelection = useRef("");
-  const [tutorialsEnabled, setTutorialsEnabled] = useState(true);
-  const [dismissedTips, setDismissedTips] = useState<string[]>([]);
-  const pausedRef = useRef(true);
-  const lastCountdown = useRef(90);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setCommandProfile(readCommandProfile());
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (network.role === "solo") privateMatchFog.current = newMatchFog;
-  }, [network.role, newMatchFog]);
-
-  useEffect(() => {
-    let active = true;
-    const load = (
-      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "cipherDirections" | "cipherDeployed" | "workerMine" | "turretDirections" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
-      src: string,
-    ) => {
-      const image = new Image();
-      image.decoding = "async";
-      image.onload = () => {
-        if (!active) return;
-        art.current[key] = image;
-        if (key === "crystal") {
-          // iPhone canvas filters do not reliably recolor the shared cyan
-          // crystal. Build an isolated amber sprite once so alloy deposits are
-          // visibly different on every frame and browser.
-          const alloy = document.createElement("canvas");
-          alloy.width = image.naturalWidth || image.width;
-          alloy.height = image.naturalHeight || image.height;
-          const alloyContext = alloy.getContext("2d")!;
-          alloyContext.drawImage(image, 0, 0);
-          alloyContext.globalCompositeOperation = "source-atop";
-          alloyContext.fillStyle = "rgba(244, 157, 46, .82)";
-          alloyContext.fillRect(0, 0, alloy.width, alloy.height);
-          alloyContext.globalCompositeOperation = "source-over";
-          art.current.alloyCrystal = alloy;
-        }
-        if (key === "terrain") {
-          const layer = document.createElement("canvas");
-          layer.width = W;
-          layer.height = H;
-          const ctx = layer.getContext("2d")!;
-          ctx.fillStyle = "#101b1b";
-          ctx.fillRect(0, 0, W, H);
-          const tile = 768;
-          for (let py = 0, row = 0; py < H; py += tile, row++)
-            for (let px = 0, col = 0; px < W; px += tile, col++) {
-              ctx.save();
-              ctx.translate(px + tile / 2, py + tile / 2);
-              ctx.rotate(((row + col) % 4) * Math.PI / 2);
-              ctx.drawImage(image, -tile / 2, -tile / 2, tile, tile);
-              ctx.restore();
-            }
-          ctx.fillStyle = "rgba(2, 10, 11, .16)";
-          ctx.fillRect(0, 0, W, H);
-          ctx.fillStyle = "rgba(14, 52, 51, .18)";
-          ctx.fillRect(0, 0, 680, H);
-          ctx.fillStyle = "rgba(78, 25, 32, .12)";
-          ctx.fillRect(W - 680, 0, 680, H);
-          ctx.fillStyle = "rgba(3, 10, 11, .14)";
-          ctx.fillRect(680, 0, W - 1360, H);
-          art.current.terrainLayer = layer;
-        }
-      };
-      image.src = src;
-    };
-    load("terrain", "/game-art/frontier-terrain-v1.webp");
-    load("units", "/game-art/frontier-units-atlas-v1.png");
-    load("workerDirections", "/game-art/frontier-worker-directions-v2.png");
-    load("workerWalk", "/game-art/frontier-worker-walk-b-v3.png");
-    load("workerWalkC", "/game-art/frontier-worker-walk-c-v4.png");
-    load("trooperDirections", "/game-art/frontier-trooper-directions-v2.png");
-    load("trooperWalk", "/game-art/frontier-trooper-walk-b-v3.png");
-    load("trooperWalkC", "/game-art/frontier-trooper-walk-c-v4.png");
-    load("tankDirections", "/game-art/frontier-tank-directions-v2.png");
-    load("droneDirections", "/game-art/frontier-strike-drone-directions-v1.png");
-    load("droneMove", "/game-art/frontier-strike-drone-move-b-v2.png");
-    load("cipherDirections", "/game-art/frontier-cipher-directions-v1.png");
-    load("cipherDeployed", "/game-art/frontier-cipher-deployed-v1.png");
-    load("workerMine", "/game-art/frontier-worker-mine-v1.png");
-    load("turretDirections", "/game-art/frontier-turret-directions-v1.png");
-    load("buildings", "/game-art/frontier-buildings-atlas-v1.png");
-    load("crystal", "/game-art/frontier-crystal-v1.png");
-    load("commandCrawler", "/game-art/frontier-command-crawler-v1.png");
-    load("intelRelay", "/game-art/frontier-intel-relay-bunker-v1.png");
-    return () => {
-      active = false;
-    };
-  }, []);
-  const resize = useCallback(() => {
-    const c = canvas.current;
-    if (!c) return;
-    const d = devicePixelRatio || 1,
-      r = c.getBoundingClientRect();
-    c.width = r.width * d;
-    c.height = r.height * d;
-    c.getContext("2d")?.setTransform(d, 0, 0, d, 0, 0);
-  }, []);
-  const screenToWorld = (sx: number, sy: number) => {
-    const c = canvas.current!,
-      g = game.current;
-    return {
-      x: (sx - c.clientWidth / 2) / g.zoom + g.camera.x,
-      y: (sy - c.clientHeight / 2) / g.zoom + g.camera.y,
-    };
-  };
-  const moveCameraTo = (x: number, y: number) => {
-    const c = canvas.current;
-    if (!c) return;
-    const g = game.current;
-    const halfW = c.clientWidth / (2 * g.zoom);
-    const halfH = c.clientHeight / (2 * g.zoom);
-    g.camera.x = Math.max(halfW, Math.min(W - halfW, x));
-    g.camera.y = Math.max(halfH, Math.min(H - halfH, y));
-  };
-  const sync = () => {
-    const g = game.current,
-      chosen = [...g.units, ...g.buildings].filter((o) =>
-        g.selected.includes(o.id),
-      );
-    const selectionKey = g.selected.join(",");
-    if (selectionKey !== commandSelection.current) {
-      commandSelection.current = selectionKey;
-      setCommandTab("units");
-    }
-    const chosenUnits = chosen.filter(isUnit);
-    const chosenTypes = [...new Set(chosenUnits.map((unit) => unit.type))];
-    const chosenCipherModes = [...new Set(chosenUnits.filter((unit) => unit.type === "cipher").map((unit) => unit.cipherMode || "mobile"))];
-    const chosenStances = [...new Set(chosenUnits
-      .filter((unit) => isCombatUnit(unit) || (unit.type === "worker" && unit.autoRepair))
-      .map((unit) => unit.stance || "pursue"))];
-    const one = chosen[0],
-      rank =
-        one && isUnit(one)
-          ? ` Â· RANK ${one.level || 1} Â· ${one.xp || 0} XP`
-          : "";
-    const selectedBuilding = g.buildings.find(
-      (b) => b.team === "player" && g.selected.includes(b.id),
-    );
-    const playerBarracks = g.buildings.filter(
-      (b) => b.team === "player" && b.type === "barracks",
-    );
-    setUi({
-      credits: Math.floor(g.credits),
-      alloy: Math.floor(g.alloy),
-      intel: Math.floor(g.intel),
-      objectives: (g.objectives || []).filter((objective) => objective.owner === "player").length,
-      army: g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length,
-      upkeep: upkeepPerSecond(g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length) * 60,
-      power: g.power,
-      wave: g.wave,
-      nextWave: Math.max(0, Math.ceil(g.aiAttackAt - g.time)),
-      selected: chosen.length
-        ? chosen.length === 1
-          ? isUnit(one)
-            ? one.type === "cipher"
-              ? `${unitName(one.type)} Â· ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP Â· ${unitDuty(one)}`
-              : `${unitName(one.type)} Â· ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP Â· ${Math.round(stats[one.type].damage * (1 + ((one.level || 1) - 1) * 0.18))} DMG Â· ${unitDuty(one)} Â· ${(one.supply ?? SUPPLY_CAPACITY) > 0 ? `SUPPLY ${Math.ceil(one.supply ?? SUPPLY_CAPACITY)}s` : "OUT OF SUPPLY âˆ’25%"}${(one.level || 1) > 1 ? ` Â· REGEN ${(veteranRegenRate(one) * 100).toFixed(0)}% HP/s` : ""}${one.retreating ? " Â· RETREATING" : ""}${rank}`
-            : (one.progress ?? 1) < 1
-              ? `${one.type.toUpperCase()} WIREFRAME Â· ${one.constructionStarted ? `${Math.round((one.progress || 0) * 100)}% BUILT` : "WAITING FOR WORKER"}`
-              : `${one.type === "turret" ? "SENTRY TURRET Â· 210 RANGE Â· 12 DMG" : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : one.type.toUpperCase()} Â· ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` Â· ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " Â· MOBILE Â· SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " Â· FORTIFIED" : ""}`
-          : `${chosen.length} UNITS SELECTED`
-        : "No selection",
-      message: g.message,
-      over: g.over,
-      production: selectedBuilding?.production
-        ? {
-            ...selectedBuilding.production,
-            building: selectedBuilding.type as "hq" | "barracks",
-          }
-        : null,
-      productionCooldown: selectedBuilding?.cooldown || 0,
-      productionBuilding:
-        selectedBuilding &&
-        ["hq", "barracks"].includes(selectedBuilding.type) &&
-        buildingOperational(selectedBuilding)
-          ? (selectedBuilding.type as "hq" | "barracks")
-          : null,
-      hasHq: g.buildings.some((b) => b.team === "player" && b.type === "hq"),
-      hasBarracks: playerBarracks.some(
-        (b) => b.progress === undefined || b.progress >= 1,
-      ),
-      barracksBuilding: playerBarracks.some(
-        (b) => b.progress !== undefined && b.progress < 1,
-      ),
-      buildMode: g.mode.startsWith("build")
-        ? (g.mode as "build-refinery" | "build-barracks" | "build-turret")
-        : null,
-      selectedBuilding: selectedBuilding?.type || null,
-      selectedConstruction: Boolean(selectedBuilding && (selectedBuilding.progress ?? 1) < 1),
-      hqPacked: Boolean(selectedBuilding?.type === "hq" && selectedBuilding.packed),
-      hqRelocation: selectedBuilding?.type === "hq" && selectedBuilding.relocation ? { ...selectedBuilding.relocation } : null,
-      fortified: Boolean(g.fortified),
-      fortifyProduction: g.fortifyProduction || null,
-      doctrine: g.doctrine || null,
-      doctrineProduction: g.doctrineProduction || null,
-      tradeNetwork: Boolean(g.tradeNetwork),
-      tradeNetworkProduction: g.tradeNetworkProduction || null,
-      cipherCount: cipherCountForTeam(g, "player"),
-      enemyDoctrine: g.scoutedEnemyDoctrine === "air" || g.scoutedEnemyDoctrine === "armor" ? g.scoutedEnemyDoctrine : null,
-      enemyDoctrineKnown: Boolean(g.enemyDoctrineKnown),
-      canClear: chosen.length > 0 || g.mode !== "select",
-      cancelMode: g.mode !== "select",
-      selectedCombat: chosen.filter((object) => isUnit(object) && isCombatUnit(object)).length,
-      selectedUnits: chosenUnits.length,
-      selectedWorkers: chosenUnits.filter((unit) => unit.type === "worker").length,
-      selectedUnitType: chosenTypes.length === 1 ? chosenTypes[0] : chosenTypes.length ? "mixed" : null,
-      selectedCipherMode: chosenCipherModes.length === 1 ? chosenCipherModes[0] : chosenCipherModes.length ? "mixed" : null,
-      selectedStance: chosenStances.length === 1 ? chosenStances[0] : chosenStances.length ? "mixed" : null,
-      autoRepair: chosenUnits.some((unit) => unit.type === "worker") && chosenUnits.filter((unit) => unit.type === "worker").every((unit) => unit.autoRepair),
-      repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && (unit.repairTarget || unit.repairRelayTarget)).length,
-      idleWorkers: g.units.filter((unit) => isIdleWorker(g, unit)).length,
-      selectedUnitCards: chosenUnits
-        .filter((unit) => unit.team === "player" && isCombatUnit(unit))
-        .map((unit) => ({ id: unit.id, type: unit.type, hp: unit.hp, max: unit.max, level: unit.level || 1 })),
-    });
-  };
-
-  const removeSelectedUnit = (id: number) => {
-    const g = game.current;
-    g.selected = g.selected.filter((selectedId) => selectedId !== id);
-    g.message = g.selected.length ? `${g.selected.length} units selected.` : "Selection cleared.";
-    lastTap.current = null;
-    sync();
-  };
-
-  const peerSend = (message: unknown) => peer.current?.send(message);
-
-  function applyRemotePoint(payload: Record<string, unknown>) {
-    const g = game.current;
-    const wx = Number(payload.x), wy = Number(payload.y);
-    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
-    const selectedIds = Array.isArray(payload.selected)
-      ? payload.selected.filter((id): id is number => Number.isInteger(id))
-      : [];
-    const mode = typeof payload.mode === "string" ? payload.mode : "select";
-    if (mode === "move-hq") {
-      const hq = g.buildings.find((building) =>
-        building.team === "enemy" && building.type === "hq" && building.packed && selectedIds.includes(building.id));
-      if (hq) {
-        hq.mobileTarget = { x: Math.max(80, Math.min(W - 80, wx)), y: Math.max(80, Math.min(H - 80, wy)) };
-        hq.mobileFacing = Math.atan2(wy - hq.y, wx - hq.x);
-      }
-      return;
-    }
-    if (mode === "set-rally") {
-      const building = g.buildings.find((b) =>
-        b.team === "enemy" && selectedIds.includes(b.id) && ["hq", "barracks"].includes(b.type) && buildingOperational(b));
-      if (building) building.rally = { x: Math.max(30, Math.min(W - 30, wx)), y: Math.max(30, Math.min(H - 30, wy)) };
-      return;
-    }
-    const remoteUnits = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id));
-    const remoteWorkersForResource = remoteUnits.filter((unit) => unit.type === "worker");
-    const resourceHit = g.crystals
-      .map((resource, index) => ({ resource, index }))
-      .filter(({ resource }) => resource.amount > 0 && isVisibleFor(g, "enemy", resource, 24))
-      .sort((a, b) => Math.hypot(a.resource.x - wx, a.resource.y - wy) - Math.hypot(b.resource.x - wx, b.resource.y - wy))[0];
-    if (
-      mode === "select" &&
-      remoteWorkersForResource.length &&
-      resourceHit &&
-      Math.hypot(resourceHit.resource.x - wx, resourceHit.resource.y - wy) < 48
-    ) {
-      assignWorkersToResource(g, remoteWorkersForResource, resourceHit.index);
-      return;
-    }
-    if (mode === "repair") {
-      const workers = remoteUnits.filter((unit) => unit.type === "worker");
-      const relay = repairableRelayNear(g, "enemy", wx, wy);
-      if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 76) {
-        assignWorkersToRelayRepair(workers, relay);
-        return;
-      }
-      const repairable = [...g.buildings, ...g.units]
-        .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
-        .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-      if (repairable && Math.hypot(repairable.x - wx, repairable.y - wy) < 70) {
-        workers.filter((worker) => worker.id !== repairable.id).forEach((worker) => {
-          clearWorkerConstruction(worker, "repair");
-          worker.repairTarget = repairable.id;
-          worker.workerMode = "repair";
-          worker.target = undefined;
-          worker.enemy = undefined;
-          worker.nav = undefined;
-        });
-      }
-      return;
-    }
-    if (mode === "set-patrol-a" || mode === "set-patrol-b") {
-      const patrollers = remoteUnits.filter((unit) => isCombatUnit(unit) || (unit.type === "worker" && unit.autoRepair));
-      if (mode === "set-patrol-a") {
-        patrollers.forEach((unit) => { unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" }; });
-      } else {
-        patrollers.forEach((unit, index) => {
-          const a = unit.patrol?.a || { x: unit.x, y: unit.y };
-          unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
-          unit.stance = "patrol";
-          if (unit.type === "worker") unit.workerMode = "hold";
-          unit.retreating = false;
-          unit.moveEngage = false;
-          unit.enemy = undefined;
-          unit.target = { x: a.x + (index % 3) * 22, y: a.y + Math.floor(index / 3) * 22 };
-          unit.formationSpeed = undefined;
-          unit.nav = undefined;
-        });
-      }
-      return;
-    }
-    if (mode.startsWith("build-")) {
-      const type = mode === "build-refinery" ? "refinery" : mode === "build-barracks" ? "barracks" : mode === "build-turret" ? "turret" : null;
-      if (!type) return;
-      const cost = BUILD_COST[type];
-      const radius = buildingStats[type].r;
-      const blocked =
-        g.buildings.some((b) => Math.hypot(b.x - wx, b.y - wy) < buildingStats[b.type].r + radius + 18) ||
-        g.crystals.some((crystal) => crystal.amount > 0 && Math.hypot(crystal.x - wx, crystal.y - wy) < radius + 36) ||
-        TERRAIN_RIDGES.some((ridge) => Math.hypot(ridge.x - wx, ridge.y - wy) < ridge.r + radius + 18) ||
-        wx < radius + 20 || wx > W - radius - 20 || wy < radius + 20 || wy > H - radius - 20;
-      if (blocked || g.enemyAlloy < cost) return;
-      g.enemyAlloy -= cost;
-      const buildingId = g.nextId++;
-      g.buildings.push({
-        id: buildingId, team: "enemy", type, x: wx, y: wy, hp: 1,
-        max: buildingHealth[type], progress: 0, constructionDuration: buildingBuildTime[type], constructionStarted: false,
-      });
-      remoteUnits.filter((unit) => unit.type === "worker").forEach((worker) => {
-        queueWorkerConstruction(worker, buildingId);
-      });
-      return;
-    }
-    const units = remoteUnits.filter((unit) => unit.type !== "cipher" || (unit.cipherMode || "mobile") === "mobile");
-    if (!units.length) return;
-    const relay = (g.objectives || [])
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
-      if (
-        units.length > 0 &&
-        units.every((unit) => unit.type === "worker") &&
-        relay.owner === "enemy" &&
-        intelRelayOperational(relay) &&
-        relay.hp < relay.max
-      ) {
-        assignWorkersToRelayRepair(units, relay);
-        return;
-      }
-      if (!intelRelayOperational(relay)) return;
-      const hostileOccupants = relayOccupants(g, relay, "player");
-      if (hostileOccupants.length) {
-        units.filter(isCombatUnit).forEach((unit, index) => {
-          if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
-          unit.retreating = false;
-          unit.enemy = hostileOccupants[index % hostileOccupants.length].id;
-          unit.target = undefined;
-          unit.moveEngage = false;
-          unit.garrisonTarget = undefined;
-          unit.nav = undefined;
-          if (unit.stance === "hold" || unit.stance === "patrol") unit.stance = "pursue";
-        });
-      } else {
-        const available = Math.max(0, RELAY_GARRISON_CAPACITY - relayOccupants(g, relay, "enemy").length);
-        units.filter((unit) => unit.type === "trooper" && unit.garrisonedAt !== relay.id).slice(0, available).forEach((unit) => {
-          if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
-          unit.garrisonTarget = relay.id;
-          unit.retreating = false;
-          unit.enemy = undefined;
-          unit.target = { x: relay.x, y: relay.y };
-          unit.moveEngage = relay.owner === "player";
-          unit.nav = undefined;
-          unit.stance = "pursue";
-        });
-      }
-      return;
-    }
-    const remoteWorkers = units.filter((unit) => unit.type === "worker");
-    const pendingConstruction = g.buildings
-      .filter((building) => building.team === "enemy" && (building.progress ?? 1) < 1)
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (remoteWorkers.length && pendingConstruction && Math.hypot(pendingConstruction.x - wx, pendingConstruction.y - wy) <= buildingStats[pendingConstruction.type].r + 18) {
-      remoteWorkers.forEach((worker) => assignWorkerToPendingConstruction(worker, pendingConstruction.id));
-      return;
-    }
-    const friendlyRepairable = [...g.buildings, ...g.units]
-      .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (remoteWorkers.length === units.length && friendlyRepairable && Math.hypot(friendlyRepairable.x - wx, friendlyRepairable.y - wy) < 65) {
-      remoteWorkers.filter((worker) => worker.id !== friendlyRepairable.id).forEach((worker) => {
-        clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = friendlyRepairable.id;
-        worker.workerMode = "repair";
-        worker.target = undefined;
-        worker.enemy = undefined;
-        worker.nav = undefined;
-      });
-      return;
-    }
-    const victim = [...g.units, ...g.buildings]
-      .filter((object) => object.team === "player" && isVisibleFor(g, "enemy", object, objectRadius(object)))
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    const forcedTravel = mode === "move" || mode === "move-engage";
-    const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
-    const formation = formationDestinations(units, { x: wx, y: wy });
-    const formationSpeed = units.length > 1 && units.every(isCombatUnit)
-      ? Math.min(...units.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
-      : undefined;
-    for (const [index, unit] of units.entries()) {
-      if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
-      unit.garrisonTarget = undefined;
-      if (attacking && isCombatUnit(unit)) {
-        unit.enemy = victim!.id;
-        unit.target = undefined;
-        unit.moveEngage = false;
-        unit.formationSpeed = undefined;
-      } else {
-        unit.enemy = undefined;
-        unit.target = formation.get(unit.id) || { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
-        unit.moveEngage = isCombatUnit(unit) && mode === "move-engage";
-        unit.formationSpeed = formationSpeed;
-        if (unit.moveEngage) unit.stance = "pursue";
-      }
-      unit.retreating = false;
-      unit.repairTarget = undefined;
-      if (unit.type === "worker") {
-        clearWorkerConstruction(unit, "hold");
-      }
-      unit.patrol = undefined;
-      if (unit.stance === "patrol" || (forcedTravel && unit.stance === "hold")) unit.stance = "pursue";
-      unit.nav = undefined;
-    }
-  }
-
-  function applyRemoteAction(payload: Record<string, unknown>) {
-    const g = game.current;
-    const name = typeof payload.name === "string" ? payload.name : "";
-    const selectedIds = Array.isArray(payload.selected)
-      ? payload.selected.filter((id): id is number => Number.isInteger(id))
-      : [];
-    let building = g.buildings.find((b) => b.team === "enemy" && selectedIds.includes(b.id));
-    if (name === "cancel-construction") {
-      if (!building || (building.progress ?? 1) >= 1) return;
-      const refund = building.constructionStarted ? Math.floor(BUILD_COST[building.type] / 2) : BUILD_COST[building.type];
-      g.enemyAlloy += refund;
-      const cancelledId = building.id;
-      g.buildings = g.buildings.filter((candidate) => candidate.id !== cancelledId);
-      for (const worker of g.units.filter((unit) => unit.team === "enemy" && unit.type === "worker")) {
-        const queue = (worker.buildQueue || (worker.buildTarget ? [worker.buildTarget] : [])).filter((id) => id !== cancelledId);
-        worker.buildQueue = queue;
-        worker.buildTarget = queue[0];
-        if (!queue.length && worker.workerMode === "construct") worker.workerMode = "mine";
-        worker.nav = undefined;
-      }
-      return;
-    }
-    if (name === "sell") {
-      if (!building || building.type === "hq") return;
-      const refund = Math.floor(BUILD_COST[building.type] / 2);
-      if (building.type === "barracks") g.enemyCredits += refund;
-      else g.enemyAlloy += refund;
-      if (building.progress === 1 && building.type !== "turret")
-        g.enemyPower = Math.max(0, (g.enemyPower ?? 12) - (building.type === "refinery" ? 4 : 2));
-      g.buildings = g.buildings.filter((candidate) => candidate.id !== building!.id);
-      return;
-    }
-    if (name === "fortify") {
-      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyFortified || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction || g.enemyIntel < FORTIFY_INTEL_COST || building.production) return;
-      g.enemyIntel -= FORTIFY_INTEL_COST;
-      g.enemyFortifyProduction = { elapsed: 0, duration: FORTIFY_DURATION };
-      return;
-    }
-    if (name === "doctrine-air" || name === "doctrine-armor") {
-      const doctrine: Doctrine = name === "doctrine-air" ? "air" : "armor";
-      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyDoctrine || g.enemyDoctrineProduction || g.enemyFortifyProduction || g.enemyTradeNetworkProduction || g.enemyIntel < DOCTRINE_INTEL_COST || building.production) return;
-      g.enemyIntel -= DOCTRINE_INTEL_COST;
-      g.enemyDoctrineProduction = { type: doctrine, elapsed: 0, duration: DOCTRINE_DURATION };
-      return;
-    }
-    if (name === "trade-network") {
-      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyTradeNetwork || g.enemyTradeNetworkProduction || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyIntel < TRADE_NETWORK_INTEL_COST || building.production) return;
-      g.enemyIntel -= TRADE_NETWORK_INTEL_COST;
-      g.enemyTradeNetworkProduction = { elapsed: 0, duration: TRADE_NETWORK_DURATION };
-      return;
-    }
-    if (name === "retreat") {
-      const hq = g.buildings.find((building) => building.team === "enemy" && building.type === "hq" && buildingOperational(building));
-      const units = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id) && isCombatUnit(unit));
-      if (!hq || !units.length) return;
-      units.forEach((unit, index) => {
-        unit.enemy = undefined;
-        unit.nav = undefined;
-        unit.retreating = true;
-        unit.moveEngage = false;
-        unit.target = { x: hq.x + (index % 3) * 28 - 28, y: hq.y + 95 + Math.floor(index / 3) * 24 };
-      });
-      return;
-    }
-    if (name === "pack-hq" || name === "deploy-hq") {
-      const hq = g.buildings.find((candidate) =>
-        candidate.team === "enemy" && candidate.type === "hq" && selectedIds.includes(candidate.id));
-      if (!hq || hq.production || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction || hq.relocation) return;
-      if (name === "pack-hq" && !hq.packed) hq.relocation = { mode: "pack", elapsed: 0, duration: 5 };
-      if (name === "deploy-hq" && hq.packed) {
-        if (hqBlockedAt(g, hq, hq.x, hq.y, true)) return;
-        hq.mobileTarget = undefined;
-        hq.relocation = { mode: "deploy", elapsed: 0, duration: 6 };
-      }
-      return;
-    }
-    const selectedUnits = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id));
-    if (name === "deploy-cipher" || name === "pack-cipher") {
-      selectedUnits.filter((unit) => unit.type === "cipher").forEach((unit) => {
-        const mode = unit.cipherMode || "mobile";
-        if (name === "deploy-cipher" && mode === "mobile") {
-          unit.cipherMode = "deploying";
-          unit.cipherProgress = 0;
-          unit.target = undefined;
-          unit.enemy = undefined;
-          unit.nav = undefined;
-          unit.patrol = undefined;
-          unit.moveEngage = false;
-        } else if (name === "pack-cipher" && mode === "deployed") {
-          unit.cipherMode = "packing";
-          unit.cipherProgress = 0;
-        }
-      });
-      return;
-    }
-    if (name === "auto-repair") {
-      const workers = selectedUnits.filter((unit) => unit.type === "worker");
-      const enable = workers.some((worker) => !worker.autoRepair);
-      workers.forEach((worker) => {
-        worker.autoRepair = enable;
-        clearWorkerConstruction(worker, enable ? "hold" : "mine");
-        worker.repairTarget = undefined;
-        worker.enemy = undefined;
-        worker.target = undefined;
-        worker.nav = undefined;
-        if (!enable) {
-          worker.patrol = undefined;
-          if (worker.stance === "patrol") worker.stance = "pursue";
-        }
-      });
-      return;
-    }
-    if (name === "repair" || name === "patrol" || name === "move" || name === "move-engage" || name === "move-hq") return;
-    if (name === "hold" || name === "pursue") {
-      selectedUnits.filter((unit) =>
-        isCombatUnit(unit) && (name === "pursue" || unit.type === "trooper"),
-      ).forEach((unit) => {
-        unit.stance = name;
-        unit.retreating = false;
-        unit.moveEngage = false;
-        unit.patrol = undefined;
-        if (name === "hold") {
-          unit.target = undefined;
-          unit.enemy = undefined;
-          unit.nav = undefined;
-        }
-      });
-      return;
-    }
-    const type = name as Unit["type"];
-    if (!["worker", "trooper", "tank", "drone", "cipher"].includes(type)) return;
-    const wanted = type === "worker" || type === "cipher" ? "hq" : "barracks";
-    building = g.buildings.find((b) =>
-      b.team === "enemy" && selectedIds.includes(b.id) && b.type === wanted && buildingOperational(b));
-    if (!building || ((type === "worker" || type === "cipher") && (g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction))) return;
-    if (type === "cipher" && (!g.enemyTradeNetwork || cipherCountForTeam(g, "enemy") >= CIPHER_MAX)) return;
-    if (!building.production && (building.cooldown || 0) > 0) return;
-    const pending = (building.production?.queue?.length || 0) + (building.production ? 1 : 0);
-    if (pending >= MAX_QUEUE || g.enemyCredits < unitCost[type]) return;
-    g.enemyCredits -= unitCost[type];
-    if (!building.production) {
-      building.production = { type, elapsed: 0, duration: productionDurationFor(g, "enemy", type), queue: [] };
-    } else {
-      building.production.queue = [...(building.production.queue || []), type];
-    }
-  }
-
-  function sendGuestPoint(wx: number, wy: number) {
-    const g = game.current;
-    if (g.over) return;
-    const mode = g.mode;
-    peerSend({ type: "command", kind: "point", x: wx, y: wy, mode, selected: g.selected });
-    if (mode === "set-patrol-a") {
-      g.mode = "set-patrol-b";
-      g.message = "PATROL: now choose the second patrol point.";
-    } else {
-      if (mode !== "select" && !mode.startsWith("build-")) g.mode = "select";
-      g.message = mode.startsWith("build-")
-        ? "Construction queued. Tap another site or press Cancel."
-          : mode === "set-rally" ? "Rally point transmitted."
-          : mode === "move-hq" ? "Command Crawler destination transmitted."
-          : mode === "move-engage" ? "Move + Engage transmitted â€” destination remains locked."
-            : mode === "move" ? "Direct Move transmitted â€” units fire in range without chasing."
-              : "Order transmitted.";
-    }
-    sync();
-  }
-
-  function guestAction(name: string) {
-    const g = game.current;
-    if (name === "deselect") {
-      g.selected = [];
-      g.mode = "select";
-      g.message = "Selection cleared.";
-      sync();
-      return;
-    }
-    if (name.startsWith("build-")) {
-      const hasWorker = g.units.some((unit) =>
-        unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
-      if (!hasWorker) {
-        g.message = "Select a Worker, then open Construction.";
-        sync();
-        return;
-      }
-      g.mode = name as Game["mode"];
-      g.message = `${name.replace("build-", "").toUpperCase()} PLACEMENT: choose a clear location.`;
-      sync();
-      return;
-    }
-    if (name === "rally") {
-      const building = g.buildings.find((b) => b.team === "player" && g.selected.includes(b.id) && ["hq", "barracks"].includes(b.type));
-      if (!building || !buildingOperational(building)) {
-        g.message = "Select your HQ or a Barracks first.";
-      } else {
-        g.mode = "set-rally";
-        g.message = "RALLY POINT: choose a location.";
-      }
-      sync();
-      return;
-    }
-    if (name === "move-hq") {
-      const hq = g.buildings.find((building) =>
-        building.team === "player" && building.type === "hq" && building.packed && g.selected.includes(building.id));
-      if (!hq) g.message = "Pack and select your Headquarters before moving it.";
-      else {
-        g.mode = "move-hq";
-        g.message = "COMMAND CRAWLER: choose a destination. It moves extremely slowly.";
-      }
-      sync();
-      return;
-    }
-    if (name === "move" || name === "move-engage" || name === "repair" || name === "patrol") {
-      const wantedMode: Game["mode"] = name === "move" || name === "move-engage" ? name : name === "repair" ? "repair" : "set-patrol-a";
-      g.mode = wantedMode;
-      g.message = name === "move" || name === "move-engage"
-        ? name === "move-engage"
-          ? "MOVE + ENGAGE: choose a destination."
-          : "DIRECT MOVE: choose a destination Â· units fire in range without chasing."
-        : name === "repair"
-          ? "REPAIR ORDER: choose a damaged friendly unit or structure."
-          : "PATROL: choose the first patrol point.";
-      sync();
-      return;
-    }
-    if (name === "reset") return;
-    peerSend({ type: "command", kind: "action", name, selected: g.selected });
-    g.message = `${name.toUpperCase()} order transmitted.`;
-    sync();
-  }
-
-  function handlePeerMessage(message: unknown) {
-    if (!message || typeof message !== "object") return;
-    const payload = message as Record<string, unknown>;
-    if (multiplayerRole.current === "host" && payload.type === "command") {
-      if (payload.kind === "point") applyRemotePoint(payload);
-      if (payload.kind === "action") applyRemoteAction(payload);
-      sync();
-      return;
-    }
-    if (multiplayerRole.current === "guest" && payload.type === "state" && payload.game) {
-      const first = !guestSnapshotReady.current;
-      game.current = guestPerspective(payload.game as Game, first ? null : game.current, first);
-      guestSnapshotReady.current = true;
-      setHomeOpen(false);
-      pausedRef.current = false;
-      setPaused(false);
-      sync();
-    }
-  }
-
-  function peerHandlers(role: "host" | "guest", roomFog = privateMatchFog.current) {
-    return {
-      onOpen: () => {
-        setNetwork((current) => ({ ...current, role, status: "connected", detail: "Private link established." }));
-        if (role === "host") {
-          game.current = initialMultiplayer({ fogEnabled: roomFog });
-          multiplayerRole.current = "host";
-          matchStarted.current = false;
-          setHomeOpen(false);
-          setPause(false);
-          sync();
-          window.setTimeout(() => peerSend({ type: "state", game: game.current }), 40);
-        }
-      },
-      onMessage: handlePeerMessage,
-      onStatus: (status: PeerStatus, detail = "") => {
-        setNetwork((current) => ({ ...current, role, status, detail }));
-      },
-    };
-  }
-
-  async function createPrivateMatch() {
-    peer.current?.close();
-    multiplayerRole.current = "host";
-    guestSnapshotReady.current = false;
-    setNetwork({ role: "host", status: "creating", code: "", detail: "Preparing a private roomâ€¦" });
-    try {
-      const roomFog = privateMatchFog.current;
-      const session = await hostRoom(roomFog, peerHandlers("host", roomFog));
-      peer.current = session;
-      setNetwork((current) => ({ ...current, role: "host", code: session.code, status: current.status === "creating" ? "waiting" : current.status }));
-    } catch (error) {
-      multiplayerRole.current = "solo";
-      setNetwork({ role: "solo", status: "error", code: "", detail: error instanceof Error ? error.message : "Could not create the room." });
-    }
-  }
-
-  async function joinPrivateMatch() {
-    if (!/^[A-Z2-9]{6}$/.test(joinCode.trim().toUpperCase())) {
-      setNetwork({ role: "solo", status: "error", code: "", detail: "Enter the six-character room code." });
-      return;
-    }
-    peer.current?.close();
-    multiplayerRole.current = "guest";
-    guestSnapshotReady.current = false;
-    const code = joinCode.trim().toUpperCase();
-    setNetwork({ role: "guest", status: "joining", code, detail: "Finding the private roomâ€¦" });
-    try {
-      const joined = await joinRoom(code, peerHandlers("guest"));
-      peer.current = joined.session;
-      privateMatchFog.current = joined.fogEnabled;
-      setNewMatchFog(joined.fogEnabled);
-      setNetwork((current) => ({ ...current, role: "guest", code }));
-    } catch (error) {
-      multiplayerRole.current = "solo";
-      setNetwork({ role: "solo", status: "error", code, detail: error instanceof Error ? error.message : "Could not join the room." });
-    }
-  }
-
-  function leaveMultiplayer() {
-    peer.current?.close();
-    peer.current = null;
-    multiplayerRole.current = "solo";
-    guestSnapshotReady.current = false;
-    setNetwork({ role: "solo", status: "idle", code: "", detail: "" });
-  }
-
-  const command = (wx: number, wy: number) => {
-    const g = game.current;
-    if (g.over) return;
-    if (multiplayerRole.current === "guest") {
-      sendGuestPoint(wx, wy);
-      return;
-    }
-    if (g.mode === "move-hq") {
-      const hq = g.buildings.find((building) =>
-        building.team === "player" && building.type === "hq" && building.packed && g.selected.includes(building.id));
-      if (!hq || hq.relocation) {
-        g.mode = "select";
-        g.message = "Crawler move canceled â€” select a fully packed Headquarters.";
-      } else {
-        hq.mobileTarget = { x: Math.max(80, Math.min(W - 80, wx)), y: Math.max(80, Math.min(H - 80, wy)) };
-        hq.mobileFacing = Math.atan2(wy - hq.y, wx - hq.x);
-        g.mode = "select";
-        g.matchStats.meaningfulActions++;
-        g.matchStats.orders++;
-        g.message = "COMMAND CRAWLER moving â€” extremely slow; production, supply, and research remain offline.";
-      }
-      sync();
-      return;
-    }
-    if (g.mode === "set-rally") {
-      const b = g.buildings.find(
-        (x) =>
-          x.team === "player" &&
-          g.selected.includes(x.id) &&
-          ["hq", "barracks"].includes(x.type) &&
-          buildingOperational(x),
-      );
-      if (!b) {
-        g.mode = "select";
-        g.message =
-          "Rally point canceled â€” select a production building first.";
-        sync();
-        return;
-      }
-      b.rally = {
-        x: Math.max(30, Math.min(W - 30, wx)),
-        y: Math.max(30, Math.min(H - 30, wy)),
-      };
-      g.mode = "select";
-      g.matchStats.meaningfulActions++;
-      g.matchStats.orders++;
-      g.message = `${b.type.toUpperCase()} rally point set.`;
-      sync();
-      return;
-    }
-    const selectedWorkers = g.units.filter((unit) => unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
-    const selectedCombat = g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
-    const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
-    const resourceHit = g.crystals
-      .map((resource, index) => ({ resource, index }))
-      .filter(({ resource }) => resource.amount > 0 && isVisible(g, resource, 24))
-      .sort((a, b) => Math.hypot(a.resource.x - wx, a.resource.y - wy) - Math.hypot(b.resource.x - wx, b.resource.y - wy))[0];
-    if (
-      g.mode === "select" &&
-      selectedWorkers.length &&
-      resourceHit &&
-      Math.hypot(resourceHit.resource.x - wx, resourceHit.resource.y - wy) < 48
-    ) {
-      assignWorkersToResource(g, selectedWorkers, resourceHit.index);
-      const kind = resourceHit.resource.kind === "alloy" ? "alloy" : "credits";
-      const hasRefinery = g.buildings.some((building) =>
-        building.team === "player" && building.type === "refinery" && buildingOperational(building));
-      g.matchStats.meaningfulActions++;
-      g.matchStats.orders++;
-      g.message = hasRefinery
-        ? `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to this ${kind} deposit.`
-        : `${kind.toUpperCase()} deposit assigned Â· complete a Refinery to begin mining.`;
-      sync();
-      return;
-    }
-    if (g.mode === "repair") {
-      const relay = repairableRelayNear(g, "player", wx, wy);
-      if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 76) {
-        assignWorkersToRelayRepair(selectedWorkers, relay);
-        g.mode = "select";
-        g.matchStats.meaningfulActions++;
-        g.matchStats.orders++;
-        g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} repairing Intel Relay Â· repairs consume alloy.`;
-        sync();
-        return;
-      }
-      const repairable = [...g.buildings, ...g.units]
-        .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
-        .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-      if (!repairable || Math.hypot(repairable.x - wx, repairable.y - wy) >= 70) {
-        g.message = "REPAIR ORDER: choose a damaged friendly unit or structure.";
-        sync();
-        return;
-      }
-      const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== repairable.id);
-      assignedWorkers.forEach((worker) => {
-        clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = repairable.id;
-        worker.workerMode = "repair";
-        worker.target = undefined;
-        worker.enemy = undefined;
-        worker.nav = undefined;
-      });
-      g.mode = "select";
-      g.matchStats.meaningfulActions++;
-      g.matchStats.orders++;
-      g.message = assignedWorkers.length
-        ? `${assignedWorkers.length} Worker${assignedWorkers.length === 1 ? "" : "s"} repairing ${isUnit(repairable) ? unitName(repairable.type) : repairable.type.toUpperCase()} Â· repairs consume alloy.`
-        : "A Worker cannot repair itself â€” assign another Worker.";
-      sync();
-      return;
-    }
-    if (g.mode === "set-patrol-a") {
-      selectedPatrollers.forEach((unit) => {
-        unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" };
-      });
-      g.mode = "set-patrol-b";
-      g.message = "PATROL: now choose the second patrol point.";
-      sync();
-      return;
-    }
-    if (g.mode === "set-patrol-b") {
-      selectedPatrollers.forEach((unit, index) => {
-        const a = unit.patrol?.a || { x: unit.x, y: unit.y };
-        unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
-        unit.stance = "patrol";
-        if (unit.type === "worker") unit.workerMode = "hold";
-        unit.retreating = false;
-        unit.moveEngage = false;
-        unit.enemy = undefined;
-        unit.target = { x: a.x + (index % 3) * 22, y: a.y + Math.floor(index / 3) * 22 };
-        unit.formationSpeed = undefined;
-        unit.nav = undefined;
-      });
-      g.mode = "select";
-      g.matchStats.meaningfulActions++;
-      g.matchStats.orders++;
-      g.message = selectedPatrollers.some((unit) => unit.type === "worker")
-        ? "MAINTENANCE PATROL ACTIVE â€” Workers repair nearby allies, then resume their route."
-        : "PATROL ROUTE ACTIVE â€” units engage threats, then resume their route.";
-      sync();
-      return;
-    }
-    if (g.mode.startsWith("build")) {
-      const type = g.mode === "build-refinery" ? "refinery" : g.mode === "build-barracks" ? "barracks" : "turret",
-        cost = BUILD_COST[type],
-        r = buildingStats[type].r;
-      const blocked =
-        g.buildings.some(
-          (b) =>
-            Math.hypot(b.x - wx, b.y - wy) < buildingStats[b.type].r + r + 18,
-        ) ||
-        g.crystals.some(
-          (c) => c.amount > 0 && Math.hypot(c.x - wx, c.y - wy) < r + 36,
-        ) ||
-        TERRAIN_RIDGES.some((ridge) => Math.hypot(ridge.x - wx, ridge.y - wy) < ridge.r + r + 18) ||
-        wx < r + 20 ||
-        wx > W - r - 20 ||
-        wy < r + 20 ||
-        wy > H - r - 20;
-      if (blocked) {
-        g.message = "Can't build there â€” choose a clear location.";
-        sync();
-        return;
-      }
-      if (g.alloy < cost) {
-        g.message = "Insufficient alloy.";
-        sync();
-        return;
-      }
-      g.alloy -= cost;
-      g.matchStats.totalCreditsSpent += cost;
-      g.matchStats.meaningfulActions++;
-      const buildingId = g.nextId++;
-      g.buildings.push({
-        id: buildingId,
-        team: "player",
-        type,
-        x: wx,
-        y: wy,
-        hp: 1,
-        max: buildingHealth[type],
-        progress: 0,
-        constructionDuration: buildingBuildTime[type],
-        constructionStarted: false,
-      });
-      selectedWorkers.forEach((worker) => {
-        queueWorkerConstruction(worker, buildingId);
-      });
-      g.message = `${type.toUpperCase()} queued â€” assigned Worker${selectedWorkers.length === 1 ? "" : "s"} will build it in order. Tap another site or press Cancel.`;
-      sync();
-      return;
-    }
-    const ours = g.units.filter((u) => g.selected.includes(u.id) && (u.type !== "cipher" || (u.cipherMode || "mobile") === "mobile"));
-    if (!ours.length) return;
-    const relay = (g.objectives || [])
-      .filter((objective) => objectiveIntel(g, objective).visible)
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
-      if (
-        selectedWorkers.length === ours.length &&
-        relay.owner === "player" &&
-        intelRelayOperational(relay) &&
-        relay.hp < relay.max
-      ) {
-        assignWorkersToRelayRepair(selectedWorkers, relay);
-        g.matchStats.meaningfulActions++;
-        g.matchStats.orders++;
-        g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} repairing Intel Relay Â· repairs consume alloy.`;
-        sync();
-        return;
-      }
-      if (!intelRelayOperational(relay)) {
-        const coolingDown = relay.rebuildAt !== undefined && g.time < relay.rebuildAt;
-        g.message = coolingDown
-          ? `INTEL RELAY OFFLINE Â· reconstruction begins in ${Math.max(1, Math.ceil(relay.rebuildAt! - g.time))}s.`
-          : `INTEL RELAY REBUILDING Â· ${Math.round((relay.rebuildProgress || 0) * 100)}% complete.`;
-        sync();
-        return;
-      }
-      const hostileOccupants = relayOccupants(g, relay).filter((unit) => unit.team === "enemy");
-      if (hostileOccupants.length) {
-        const attackers = ours.filter(isCombatUnit);
-        attackers.forEach((unit, index) => {
-          unit.retreating = false;
-          unit.enemy = hostileOccupants[index % hostileOccupants.length].id;
-          unit.target = undefined;
-          unit.moveEngage = false;
-          unit.nav = undefined;
-          if (!unit.garrisonedAt) unit.garrisonTarget = relay.id;
-          if (unit.stance === "hold" || unit.stance === "patrol") unit.stance = "pursue";
-        });
-        g.message = attackers.length
-          ? `INTEL RELAY OCCUPIED Â· clear ${hostileOccupants.length}/${RELAY_GARRISON_CAPACITY} defenders before capture.`
-          : "Only combat units can clear an occupied Intel Relay.";
-      } else {
-        const available = Math.max(0, RELAY_GARRISON_CAPACITY - relayOccupants(g, relay, "player").length);
-        const troopers = ours.filter((unit) => unit.type === "trooper" && unit.garrisonedAt !== relay.id).slice(0, available);
-        troopers.forEach((unit) => {
-          if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
-          unit.garrisonTarget = relay.id;
-          unit.retreating = false;
-          unit.enemy = undefined;
-          unit.target = { x: relay.x, y: relay.y };
-          unit.moveEngage = relay.owner === "enemy";
-          unit.nav = undefined;
-          unit.stance = "pursue";
-        });
-        g.message = troopers.length
-          ? `${troopers.length} Trooper${troopers.length === 1 ? "" : "s"} ordered into the Intel Relay Â· ${available - troopers.length} slot${available - troopers.length === 1 ? "" : "s"} remain.`
-          : available <= 0 ? "INTEL RELAY GARRISON FULL Â· tap it without a selection to command the occupants." : "Only Troopers can garrison an Intel Relay.";
-      }
-      g.matchStats.meaningfulActions++;
-      g.matchStats.orders++;
-      sync();
-      return;
-    }
-    const friendlyRepairable = [...g.buildings, ...g.units]
-      .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
-      .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
-    if (
-      selectedWorkers.length === ours.length &&
-      friendlyRepairable &&
-      Math.hypot(friendlyRepairable.x - wx, friendlyRepairable.y - wy) < 65
-    ) {
-      const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== friendlyRepairable.id);
-      assignedWorkers.forEach((worker) => {
-        clearWorkerConstruction(worker, "repair");
-        worker.repairTarget = friendlyRepairable.id;
-        worker.workerMode = "repair";
-        worker.target = undefined;
-        worker.enemy = undefined;
-        worker.nav = undefined;
-      });
-      g.message = assignedWorkers.length
-        ? `Repair order confirmed for ${isUnit(friendlyRepairable) ? unitName(friendlyRepairable.type) : friendlyRepairable.type.toUpperCase()} Â· repairs consume alloy.`
-        : "A Worker cannot repair itself â€” assign another Worker.";
-      sync();
-      return;
-    }
-    const victim = [...g.units, ...g.buildings]
-      .filter((o) => o.team === "enemy" && isVisible(g, o, objectRadius(o)))
-      .sort(
-        (a, b) =>
-          Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy),
-      )[0];
-    const forcedTravel = g.mode === "move" || g.mode === "move-engage";
-    const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
-    const formation = formationDestinations(ours, { x: wx, y: wy });
-    const formationSpeed = ours.length > 1 && ours.every(isCombatUnit)
-      ? Math.min(...ours.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
-      : undefined;
-    if (attacking)
-      ours.forEach((u, index) => {
-        if (!isCombatUnit(u)) {
-          u.enemy = undefined;
-          u.target = { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
-          u.moveEngage = false;
-          u.formationSpeed = undefined;
-          u.nav = undefined;
-          return;
-        }
-        u.retreating = false;
-        u.enemy = victim!.id;
-        u.target = undefined;
-        u.moveEngage = false;
-        u.formationSpeed = undefined;
-        u.nav = undefined;
-        u.repairTarget = undefined;
-        if (u.type === "worker") {
-          clearWorkerConstruction(u, "hold");
-        }
-        u.patrol = undefined;
-        if (u.stance === "patrol" || u.stance === "hold") u.stance = "pursue";
-      });
-    else
-      ours.forEach((u, i) => {
-        if (u.garrisonedAt) ejectFromIntelRelay(g, u);
-        u.retreating = false;
-        u.enemy = undefined;
-        u.target = formation.get(u.id) || { x: wx + (i % 3) * 26, y: wy + Math.floor(i / 3) * 26 };
-        u.moveEngage = isCombatUnit(u) && g.mode === "move-engage";
-        u.formationSpeed = formationSpeed;
-        if (u.moveEngage) u.stance = "pursue";
-        u.nav = undefined;
-        u.repairTarget = undefined;
-        if (u.type === "worker") {
-          clearWorkerConstruction(u, "hold");
-        }
-        u.patrol = undefined;
-        if (u.stance === "patrol" || u.stance === "hold") u.stance = "pursue";
-      });
-    g.matchStats.meaningfulActions++;
-    g.matchStats.orders++;
-    g.message =
-      attacking
-        ? "Attack order confirmed."
-        : forcedTravel
-          ? g.mode === "move-engage" ? "MOVE + ENGAGE â€” destination locked; units will resume after nearby threats." : "DIRECT MOVE â€” destination locked; units fire in range without chasing."
-          : "Moving out.";
-    if (forcedTravel) g.mode = "select";
-    sync();
-  };
-  const setPause = (value: boolean) => {
-    pausedRef.current = multiplayerRole.current === "solo" ? value : false;
-    setPaused(value);
-    last.current = performance.now();
-  };
-  const startNewMatch = (fogEnabled = newMatchFog) => {
-    leaveMultiplayer();
-    localStorage.removeItem(SAVE_KEY);
-    game.current = initial({ fogEnabled });
-    lastCountdown.current = Math.max(0, Math.ceil(game.current.aiAttackAt));
-    attackTimers.current = {};
-    matchStarted.current = true;
-    setSaveStatus("NEW MATCH");
-    setHasAutosave(true);
-    setHomeOpen(false);
-    setPause(false);
-    sync();
-  };
-  const continueMatch = () => {
-    game.current = loadGame();
-    attackTimers.current = {};
-    matchStarted.current = true;
-    lastCountdown.current = Math.max(0, Math.ceil(game.current.aiAttackAt - game.current.time));
-    setHomeOpen(false);
-    setPause(false);
-    sync();
-  };
-  const openHome = () => {
-    const wasSolo = multiplayerRole.current === "solo";
-    if (wasSolo) {
-      save();
-      setHasAutosave(true);
-    } else {
-      leaveMultiplayer();
-    }
-    setPause(false);
-    pausedRef.current = true;
-    setHomeOpen(true);
-  };
-  const toggleTutorials = () => {
-    const next = !tutorialsEnabled;
-    localStorage.setItem(TUTORIALS_KEY, next ? "on" : "off");
-    if (next) {
-      setDismissedTips([]);
-      localStorage.removeItem(DISMISSED_TIPS_KEY);
-    }
-    setTutorialsEnabled(next);
-  };
-  const dismissTip = (tip: string) => {
-    setDismissedTips((current) => {
-      const next = [...new Set([...current, tip])];
-      localStorage.setItem(DISMISSED_TIPS_KEY, JSON.stringify(next));
-      return next;
-    });
-  };
-  const save = useCallback(() => {
-    if (!matchStarted.current || multiplayerRole.current !== "solo") return;
-    try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(game.current));
-      setSaveStatus("AUTOSAVED");
-    } catch {
-      setSaveStatus("SAVE FAILED");
-    }
-  }, []);
-  const saveManual = () => {
-    try {
-      const snapshot = JSON.stringify(game.current);
-      localStorage.setItem(MANUAL_SAVE_KEY, snapshot);
-      localStorage.setItem(SAVE_KEY, snapshot);
-      setSaveStatus("GAME SAVED");
-    } catch {
-      setSaveStatus("SAVE FAILED");
-    }
-  };
-  const loadManual = () => {
-    try {
-      const saved = localStorage.getItem(MANUAL_SAVE_KEY);
-      if (!saved) {
-        setSaveStatus("NO MANUAL SAVE");
-        return;
-      }
-      const parsed = JSON.parse(saved) as Game;
-      game.current = hydrateGame(parsed, "Manual save loaded.");
-      attackTimers.current = {};
-      lastCountdown.current = Math.max(
-        0,
-        Math.ceil(game.current.aiAttackAt - game.current.time),
-      );
-      localStorage.setItem(SAVE_KEY, JSON.stringify(game.current));
-      setSaveStatus("GAME LOADED");
-      setPause(false);
-      sync();
-    } catch {
-      setSaveStatus("LOAD FAILED");
-    }
-  };
-  const action = (name: string) => {
-    const g = game.current;
-    if (multiplayerRole.current === "guest") {
-      guestAction(name);
-      return;
-    }
-    g.matchStats.playerActions++;
-    if (name === "deselect") {
-      g.selected = [];
-      g.mode = "select";
-      g.message = "Selection cleared.";
-      lastTap.current = null;
-      sync();
-      return;
-    }
-    if (name === "reset") {
-      localStorage.removeItem(SAVE_KEY);
-      setHasAutosave(false);
-      game.current = initial({ fogEnabled: g.fogEnabled });
-      lastCountdown.current = 240;
-      attackTimers.current = {};
-      setSaveStatus("NEW MATCH");
-      sync();
-      return;
-    }
-    if (name.startsWith("build")) {
-      const hasWorker = g.units.some((unit) =>
-        unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
-      if (!hasWorker) {
-        g.message = "Select a Worker, then open Construction.";
-        sync();
-        return;
-      }
-      g.mode = name as Game["mode"];
-      g.message =
-        name === "build-refinery"
-          ? "REFINERY PLACEMENT: tap a clear location on the battlefield."
-          : name === "build-barracks"
-            ? "BARRACKS PLACEMENT: tap a clear location on the battlefield."
-            : "SENTRY TURRET PLACEMENT: tap a clear location to cover an approach.";
-      sync();
-      return;
-    }
-    let b = g.buildings.find(
-      (x) => g.selected.includes(x.id) && x.team === "player",
-    );
-    if (name === "pack-hq" || name === "deploy-hq" || name === "move-hq") {
-      setCommandTab("units");
-      if (!b || b.type !== "hq") {
-        g.message = "Select your Headquarters first.";
-      } else if (name === "move-hq") {
-        if (!b.packed || b.relocation) g.message = "Finish packing the Headquarters before moving it.";
-        else {
-          g.mode = "move-hq";
-          g.message = "COMMAND CRAWLER: choose a destination. It moves extremely slowly.";
-        }
-      } else if (b.relocation) {
-        g.message = `${b.relocation.mode === "pack" ? "Packing" : "Deployment"} is already in progress.`;
-      } else if (name === "pack-hq") {
-        if (b.packed) g.message = "Headquarters is already packed.";
-        else if (b.production || g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction) g.message = "HQ is busy â€” finish production or research before packing.";
-        else {
-          b.relocation = { mode: "pack", elapsed: 0, duration: 5 };
-          g.matchStats.meaningfulActions++;
-          g.message = "PACKING HEADQUARTERS â€” command systems go offline in 5 seconds.";
-        }
-      } else if (!b.packed) {
-        g.message = "Headquarters is already deployed.";
-      } else if (hqBlockedAt(g, b, b.x, b.y, true)) {
-        g.message = "DEPLOYMENT BLOCKED â€” move the crawler to clear level ground away from cliffs, deposits, and structures.";
-      } else {
-        b.mobileTarget = undefined;
-        b.relocation = { mode: "deploy", elapsed: 0, duration: 6 };
-        g.matchStats.meaningfulActions++;
-        g.message = "DEPLOYING HEADQUARTERS â€” command systems restore in 6 seconds.";
-      }
-      sync();
-      return;
-    }
-    if (name === "rally") {
-      if (!b || !(["hq", "barracks"] as string[]).includes(b.type) || !buildingOperational(b)) {
-        g.message =
-          "Select your HQ or a Barracks first, then set its rally point.";
-        sync();
-        return;
-      }
-      g.mode = "set-rally";
-      g.message = `RALLY POINT: tap where new ${b.type === "hq" ? "HQ units" : "combat units"} should go.`;
-      sync();
-      return;
-    }
-    if (name === "sell") {
-      if (!b || b.type === "hq") {
-        g.message =
-          "Select a refinery, barracks, or turret first, then tap Sell Selected.";
-        sync();
-        return;
-      }
-      const refund = Math.floor(BUILD_COST[b.type] / 2);
-      const soldId = b.id;
-      g.buildings = g.buildings.filter((x) => x.id !== soldId);
-      g.selected = [];
-      if (b.type === "barracks") g.credits += refund;
-      else g.alloy += refund;
-      g.matchStats.meaningfulActions++;
-      if (b.progress === 1 && b.type !== "turret")
-        g.power = Math.max(0, g.power - (b.type === "refinery" ? 4 : 2));
-      g.message = `${b.type} sold for ${refund} ${b.type === "barracks" ? "credits" : "alloy"}.`;
-      sync();
-      return;
-    }
-    if (name === "cancel-construction") {
-      if (!b || (b.progress ?? 1) >= 1) {
-        g.message = "Select an unfinished construction wireframe first.";
-        sync();
-        return;
-      }
-      const refund = b.constructionStarted ? Math.floor(BUILD_COST[b.type] / 2) : BUILD_COST[b.type];
-      const cancelledId = b.id;
-      g.buildings = g.buildings.filter((building) => building.id !== cancelledId);
-      for (const worker of g.units.filter((unit) => unit.team === "player" && unit.type === "worker")) {
-        const queue = (worker.buildQueue || (worker.buildTarget ? [worker.buildTarget] : [])).filter((id) => id !== cancelledId);
-        worker.buildQueue = queue;
-        worker.buildTarget = queue[0];
-        if (!queue.length && worker.workerMode === "construct") worker.workerMode = "mine";
-        worker.nav = undefined;
-      }
-      g.selected = [];
-      g.mode = "select";
-      g.alloy += refund;
-      g.matchStats.meaningfulActions++;
-      g.message = `${b.type.toUpperCase()} construction cancelled Â· ${refund} alloy refunded. Remaining sites renumbered.`;
-      sync();
-      return;
-    }
-    if (name === "fortify") {
-      if (!b || b.type !== "hq" || !buildingOperational(b)) {
-        g.message = "Select your HQ first to run the Fortify Base upgrade.";
-      } else if (g.fortified) {
-        g.message = "Fortify Base is already complete.";
-      } else if (g.fortifyProduction) {
-        g.message = `Fortify Base is already in progress â€” ${Math.max(0, Math.ceil(g.fortifyProduction.duration - g.fortifyProduction.elapsed))} seconds remaining.`;
-      } else if (g.intel < FORTIFY_INTEL_COST) {
-        g.message = `Fortify Base requires ${FORTIFY_INTEL_COST} intel.`;
-      } else if (g.doctrineProduction) {
-        g.message = "HQ is researching a doctrine â€” wait for it to complete.";
-      } else if (g.tradeNetworkProduction) {
-        g.message = "HQ is researching Trade Network â€” wait for it to complete.";
-      } else if (b.production) {
-        g.message = "HQ is producing a unit â€” finish its queue before starting Fortify Base.";
-      } else {
-        g.intel -= FORTIFY_INTEL_COST;
-        g.matchStats.meaningfulActions++;
-        g.fortifyProduction = { elapsed: 0, duration: FORTIFY_DURATION };
-        g.message = "FORTIFY BASE started â€” HQ upgrade completes in 40 seconds.";
-      }
-      sync();
-      return;
-    }
-    if (name === "doctrine-air" || name === "doctrine-armor") {
-      const doctrine: Doctrine = name === "doctrine-air" ? "air" : "armor";
-      if (!b || b.type !== "hq" || !buildingOperational(b)) {
-        g.message = "Select your HQ first to commit to a doctrine.";
-      } else if (g.doctrine) {
-        g.message = `${g.doctrine === "air" ? "Air Superiority" : "Armored Command"} is locked in for this match.`;
-      } else if (g.doctrineProduction) {
-        g.message = "Doctrine research is already in progress.";
-      } else if (g.fortifyProduction || g.tradeNetworkProduction || b.production) {
-        g.message = "HQ is busy â€” finish its current operation first.";
-      } else if (g.intel < DOCTRINE_INTEL_COST) {
-        g.message = `${doctrine === "air" ? "Air Superiority" : "Armored Command"} requires ${DOCTRINE_INTEL_COST} intel.`;
-      } else {
-        g.intel -= DOCTRINE_INTEL_COST;
-        g.doctrineProduction = { type: doctrine, elapsed: 0, duration: DOCTRINE_DURATION };
-        g.message = `${doctrine === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"} research started â€” choice becomes permanent in ${DOCTRINE_DURATION} seconds.`;
-      }
-      sync();
-      return;
-    }
-    if (name === "trade-network") {
-      if (!b || b.type !== "hq" || !buildingOperational(b)) {
-        g.message = "Select your HQ first to research Trade Network.";
-      } else if (g.tradeNetwork) {
-        g.message = "Trade Network is already online.";
-      } else if (g.tradeNetworkProduction) {
-        g.message = `Trade Network research is already in progress â€” ${Math.max(0, Math.ceil(g.tradeNetworkProduction.duration - g.tradeNetworkProduction.elapsed))} seconds remaining.`;
-      } else if (g.fortifyProduction || g.doctrineProduction || b.production) {
-        g.message = "HQ is busy â€” finish its current operation first.";
-      } else if (g.intel < TRADE_NETWORK_INTEL_COST) {
-        g.message = `Trade Network requires ${TRADE_NETWORK_INTEL_COST} intel.`;
-      } else {
-        g.intel -= TRADE_NETWORK_INTEL_COST;
-        g.tradeNetworkProduction = { elapsed: 0, duration: TRADE_NETWORK_DURATION };
-        g.matchStats.meaningfulActions++;
-        g.message = `TRADE NETWORK research started â€” Cipher access in ${TRADE_NETWORK_DURATION} seconds.`;
-      }
-      sync();
-      return;
-    }
-    const selectedUnits = g.units.filter((unit) => unit.team === "player" && g.selected.includes(unit.id));
-    const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
-    const selectedCombat = selectedUnits.filter(isCombatUnit);
-    const selectedCiphers = selectedUnits.filter((unit) => unit.type === "cipher");
-    if (name === "deploy-cipher" || name === "pack-cipher") {
-      const eligible = selectedCiphers.filter((unit) =>
-        name === "deploy-cipher" ? (unit.cipherMode || "mobile") === "mobile" : unit.cipherMode === "deployed",
-      );
-      if (!eligible.length) {
-        g.message = name === "deploy-cipher" ? "Select a mobile Cipher first." : "Select a deployed Cipher first.";
-      } else {
-        eligible.forEach((unit) => {
-          unit.cipherMode = name === "deploy-cipher" ? "deploying" : "packing";
-          unit.cipherProgress = 0;
-          unit.target = undefined;
-          unit.enemy = undefined;
-          unit.nav = undefined;
-          unit.patrol = undefined;
-          unit.moveEngage = false;
-          unit.formationSpeed = undefined;
-        });
-        g.matchStats.meaningfulActions++;
-        g.message = name === "deploy-cipher"
-          ? `CIPHER DEPLOYING â€” income link opens in ${CIPHER_DEPLOY_DURATION} seconds.`
-          : `CIPHER PACKING â€” mobile in ${CIPHER_PACK_DURATION} seconds.`;
-      }
-      sync();
-      return;
-    }
-    if (name === "move" || name === "move-engage") {
-      const movableUnits = selectedUnits.filter((unit) => unit.type !== "cipher" || (unit.cipherMode || "mobile") === "mobile");
-      if (!selectedUnits.length) g.message = "Select units before issuing a move order.";
-      else if (!movableUnits.length) g.message = "Pack the deployed Cipher before moving it.";
-      else {
-        g.mode = name;
-        g.message = name === "move-engage"
-          ? "MOVE + ENGAGE: choose a destination."
-          : "DIRECT MOVE: choose a destination Â· units fire in range without chasing.";
-      }
-      sync();
-      return;
-    }
-    if (name === "repair") {
-      if (!selectedWorkers.length) g.message = "Select one or more Workers first.";
-      else {
-        g.mode = "repair";
-        g.message = "REPAIR ORDER: choose a damaged friendly unit or structure.";
-      }
-      sync();
-      return;
-    }
-    if (name === "auto-repair") {
-      if (!selectedWorkers.length) g.message = "Select one or more Workers first.";
-      else {
-        const enable = selectedWorkers.some((worker) => !worker.autoRepair);
-        selectedWorkers.forEach((worker) => {
-          worker.autoRepair = enable;
-          clearWorkerConstruction(worker, enable ? "hold" : "mine");
-          worker.repairTarget = undefined;
-          worker.enemy = undefined;
-          worker.target = undefined;
-          worker.nav = undefined;
-          if (!enable) {
-            worker.patrol = undefined;
-            if (worker.stance === "patrol") worker.stance = "pursue";
-          }
-        });
-        g.matchStats.meaningfulActions++;
-        g.message = enable
-          ? "AUTO REPAIR ON â€” selected Workers stop mining and repair damaged friendly units and structures."
-          : "AUTO REPAIR OFF â€” selected Workers return to normal mining duty.";
-      }
-      sync();
-      return;
-    }
-    if (name === "hold" || name === "pursue") {
-      const eligibleUnits = name === "hold"
-        ? selectedCombat.filter((unit) => unit.type === "trooper")
-        : selectedCombat;
-      if (!eligibleUnits.length) g.message = name === "hold"
-        ? "Sentry Mode is available only to Troopers."
-        : "Select combat units before changing engagement behavior.";
-      else {
-        eligibleUnits.forEach((unit) => {
-          unit.stance = name;
-          unit.retreating = false;
-          unit.moveEngage = false;
-          unit.patrol = undefined;
-          unit.formationSpeed = undefined;
-          if (name === "hold") {
-            unit.target = undefined;
-            unit.enemy = undefined;
-            unit.nav = undefined;
-          }
-        });
-        g.matchStats.meaningfulActions++;
-        g.message = name === "hold"
-          ? "SENTRY MODE â€” Troopers deploy as stationary turrets with 35% greater range."
-          : "PURSUE â€” units may chase visible enemies within their sight range.";
-      }
-      sync();
-      return;
-    }
-    if (name === "patrol") {
-      const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
-      if (!selectedPatrollers.length) g.message = "Select combat units or Auto Repair Workers before creating a patrol route.";
-      else {
-        g.mode = "set-patrol-a";
-        g.message = selectedPatrollers.some((unit) => unit.type === "worker")
-          ? "MAINTENANCE PATROL: choose the first patrol point."
-          : "PATROL: choose the first patrol point.";
-      }
-      sync();
-      return;
-    }
-    if (name === "retreat") {
-      const hq = g.buildings.find((building) => building.team === "player" && building.type === "hq" && buildingOperational(building));
-      const units = g.units.filter((unit) => unit.team === "player" && g.selected.includes(unit.id) && isCombatUnit(unit));
-      if (!hq || !units.length) {
-        g.message = "Select combat units and keep your HQ deployed before issuing a retreat.";
-      } else {
-        units.forEach((unit, index) => {
-          unit.enemy = undefined;
-          unit.nav = undefined;
-          unit.retreating = true;
-          unit.moveEngage = false;
-          unit.formationSpeed = undefined;
-          unit.target = { x: hq.x + (index % 3) * 28 - 28, y: hq.y + 95 + Math.floor(index / 3) * 24 };
-        });
-        g.message = "RETREAT ORDER â€” units move 20% faster and reinforce at HQ, but will not engage en route.";
-      }
-      sync();
-      return;
-    }
-    const type = name as Unit["type"];
-    if (!["worker", "trooper", "tank", "drone", "cipher"].includes(type)) return;
-    const wanted = type === "worker" || type === "cipher" ? "hq" : "barracks";
-    const selectedProduction = g.buildings.find(
-      (x) =>
-        x.team === "player" &&
-        g.selected.includes(x.id) &&
-        x.type === wanted &&
-        buildingOperational(x),
-    );
-    if (!selectedProduction) {
-      g.message =
-        type === "worker" || type === "cipher"
-          ? `Select your HQ first to show and train ${type === "worker" ? "Workers" : "Ciphers"}.`
-          : g.buildings.some((x) => x.team === "player" && x.type === "barracks")
-            ? "Select a completed Barracks first to show and train combat units."
-            : "Build and complete a Barracks first to unlock Troopers, Tanks, and Drones.";
-      sync();
-      return;
-    }
-    if ((type === "worker" || type === "cipher") && (g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction)) {
-      g.message = `HQ is busy with research â€” ${unitName(type)} production is paused.`;
-      sync();
-      return;
-    }
-    if (type === "cipher" && !g.tradeNetwork) {
-      g.message = "Research Trade Network at the HQ before training a Cipher.";
-      sync();
-      return;
-    }
-    if (type === "cipher" && cipherCountForTeam(g, "player") >= CIPHER_MAX) {
-      g.message = `Cipher limit reached (${CIPHER_MAX}).`;
-      sync();
-      return;
-    }
-    b = selectedProduction;
-    if (!b.production && (b.cooldown || 0) > 0) {
-      g.message = `${b.type.toUpperCase()} recovering â€” ${Math.ceil(b.cooldown || 0)} seconds until the next production burst.`;
-      sync();
-      return;
-    }
-    const pending = (b.production?.queue?.length || 0) + (b.production ? 1 : 0);
-    if (pending >= MAX_QUEUE) {
-      g.message = `${b.type.toUpperCase()} queue is full (${MAX_QUEUE} units).`;
-      sync();
-      return;
-    }
-    if (g.credits < unitCost[type]) {
-      g.message = "Insufficient credits.";
-      sync();
-      return;
-    }
-    g.credits -= unitCost[type];
-    g.matchStats.totalCreditsSpent += unitCost[type];
-    g.matchStats.meaningfulActions++;
-    g.matchStats.unitsBuilt += type === "worker" ? 1 : 0;
-    g.matchStats.combatUnitsBuilt += isCombatType(type) ? 1 : 0;
-    g.selected = [b.id];
-    if (!b.production) {
-      b.production = {
-        type,
-        elapsed: 0,
-        duration: productionDurationFor(g, "player", type),
-        queue: [],
-      };
-      g.message = `${unitName(type)} production started at ${b.type.toUpperCase()}.`;
-    } else {
-      b.production.queue = [...(b.production.queue || []), type];
-      g.message = `${unitName(type)} added to queue Â· ${pending + 1}/${MAX_QUEUE} units queued.`;
-    }
-    sync();
-  };
-
-  const centerOnSelection = () => {
-    const g = game.current;
-    const selected = [...g.units, ...g.buildings].filter((o) =>
-      g.selected.includes(o.id),
-    );
-    if (!selected.length) return;
-    g.camera.x = selected.reduce((sum, o) => sum + o.x, 0) / selected.length;
-    g.camera.y = selected.reduce((sum, o) => sum + o.y, 0) / selected.length;
-    g.message = "Camera centered on selection.";
-    sync();
-  };
-
-  const selectNextIdleWorker = () => {
-    const g = game.current;
-    const idleWorkers = g.units.filter((unit) => isIdleWorker(g, unit));
-    if (!idleWorkers.length) return;
-    const currentIndex = idleWorkers.findIndex((unit) => g.selected.includes(unit.id));
-    const worker = idleWorkers[(currentIndex + 1) % idleWorkers.length];
-    g.selected = [worker.id];
-    g.mode = "select";
-    moveCameraTo(worker.x, worker.y);
-    g.message = `Idle Worker selected Â· ${idleWorkers.length} awaiting orders.`;
-    sync();
-  };
-
-  const chooseNewMatchFog = (fogEnabled: boolean) => {
-    if (network.role !== "solo") return;
-    privateMatchFog.current = fogEnabled;
-    setNewMatchFog(fogEnabled);
-  };
-
-  const cancelCommandMode = () => {
-    const g = game.current;
-    if (g.mode === "select") return false;
-    if (g.mode === "set-patrol-a" || g.mode === "set-patrol-b") {
-      g.units.filter((unit) => g.selected.includes(unit.id)).forEach((unit) => {
-        if (unit.stance !== "patrol") unit.patrol = undefined;
-      });
-    }
-    g.mode = "select";
-    g.message = "Command canceled.";
-    sync();
-    return true;
-  };
-
-  useEffect(() => {
-    resize();
-    addEventListener("resize", resize);
-    const kd = (e: KeyboardEvent) => {
-      const key = e.key.toLowerCase();
-      keys.current.add(key);
-      if (["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "tab"].includes(key))
-        e.preventDefault();
-      if (e.repeat && !["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key))
-        return;
-
-      const g = game.current;
-      if (key === "escape") {
-        e.preventDefault();
-        if (cancelCommandMode()) return;
-        setPause(!pausedRef.current);
-        return;
-      }
-      if (key === "p" && !g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player"))) {
-        setPause(!pausedRef.current);
-        return;
-      }
-      if (pausedRef.current || g.over) return;
-
-      if (/^[1-9]$/.test(key)) {
-        const group = Number(key);
-        if (e.ctrlKey || e.metaKey) {
-          e.preventDefault();
-          const valid = new Set([...g.units, ...g.buildings].map((o) => o.id));
-          controlGroups.current[group] = g.selected.filter((id) => valid.has(id));
-          g.message = controlGroups.current[group].length
-            ? `Control group ${group} assigned (${controlGroups.current[group].length}).`
-            : `Control group ${group} cleared.`;
-          lastGroupKey.current = null;
-          sync();
-        } else {
-          const valid = new Set([...g.units, ...g.buildings].map((o) => o.id));
-          const recalled = (controlGroups.current[group] || []).filter((id) => valid.has(id));
-          controlGroups.current[group] = recalled;
-          if (recalled.length) {
-            const now = performance.now();
-            const doublePress = lastGroupKey.current?.group === group && now - lastGroupKey.current.time < 400;
-            g.selected = recalled;
-            g.mode = "select";
-            g.message = `Control group ${group} selected (${recalled.length}).`;
-            lastGroupKey.current = { group, time: now };
-            if (doublePress) centerOnSelection();
-            else sync();
-          } else {
-            g.message = `Control group ${group} is empty.`;
-            sync();
-          }
-        }
-        return;
-      }
-
-      if (key === " ") return centerOnSelection();
-      if (key === "tab") {
-        const hasWorker = g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type === "worker"));
-        const hasHq = g.selected.some((id) => g.buildings.some((building) => building.id === id && building.team === "player" && building.type === "hq" && buildingOperational(building)));
-        if (hasWorker) setCommandTab((tab) => tab === "buildings" ? "units" : "buildings");
-        else if (hasHq) setCommandTab((tab) => tab === "tech" ? "units" : "tech");
-        return;
-      }
-      if (key === "x") return action("deselect");
-      if (key === "h") {
-        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type === "trooper"))) return action("hold");
-        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && isCombatUnit(unit)))) {
-          g.message = "Sentry Mode is available only to Troopers.";
-          sync();
-          return;
-        }
-        const hq = g.buildings.find((b) => b.team === "player" && b.type === "hq");
-        if (hq) {
-          g.selected = [hq.id];
-          g.mode = "select";
-          g.message = "HQ selected.";
-          sync();
-        }
-        return;
-      }
-      if (key === "z") return action("move");
-      if (key === "c") return action("pursue");
-      if (key === "p") return action("patrol");
-      if (key === "y") return action("repair");
-      if (key === "o") return action("auto-repair");
-      if (key === "r") { setCommandTab("buildings"); return action("build-refinery"); }
-      if (key === "b") { setCommandTab("buildings"); return action("build-barracks"); }
-      if (key === "t") { setCommandTab("buildings"); return action("build-turret"); }
-      if (key === "v") { setCommandTab("units"); return action("worker"); }
-      if (key === "i") { setCommandTab("units"); return action("trooper"); }
-      if (key === "k") { setCommandTab("units"); return action("tank"); }
-      if (key === "n") { setCommandTab("units"); return action("drone"); }
-      if (key === "e") { setCommandTab("units"); return action("retreat"); }
-      if (key === "j") {
-        const hq = g.buildings.find((building) => building.team === "player" && building.type === "hq" && g.selected.includes(building.id));
-        if (hq) return action(hq.packed ? "deploy-hq" : "pack-hq");
-      }
-      if (key === "l") return action("move-hq");
-      if (key === "q") {
-        const hasHq = g.selected.some((id) => g.buildings.some((building) => building.id === id && building.team === "player" && building.type === "hq" && buildingOperational(building)));
-        if (hasHq) setCommandTab("tech");
-        else {
-          g.message = "Select your HQ to open Research.";
-          sync();
-        }
-        return;
-      }
-      if (key === "u") { setCommandTab("tech"); return action("doctrine-air"); }
-      if (key === "m") { setCommandTab("tech"); return action("doctrine-armor"); }
-      if (key === "g") return action("rally");
-      if (key === "f") return action("fortify");
-    },
-      ku = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
-    addEventListener("keydown", kd);
-    addEventListener("keyup", ku);
-    return () => {
-      removeEventListener("resize", resize);
-      removeEventListener("keydown", kd);
-      removeEventListener("keyup", ku);
-    };
-  }, [resize]);
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    migrateCommanderStorage();
-    setTutorialsEnabled(localStorage.getItem(TUTORIALS_KEY) !== "off");
-    try {
-      const savedTips = JSON.parse(localStorage.getItem(DISMISSED_TIPS_KEY) || "[]");
-      setDismissedTips(Array.isArray(savedTips) ? savedTips.filter((tip) => typeof tip === "string") : []);
-    } catch {
-      setDismissedTips([]);
-    }
-    const existingSave = localStorage.getItem(SAVE_KEY);
-    game.current = loadGame();
-    matchStarted.current = Boolean(existingSave);
-    setHasAutosave(Boolean(existingSave));
-    setNewMatchFog(existingSave ? game.current.fogEnabled : true);
-    lastCountdown.current = Math.max(
-      0,
-      Math.ceil(game.current.waveAt - game.current.time),
-    );
-    sync();
-    const timer = window.setInterval(save, 3000);
-    const preserve = () => save();
-    const visibility = () => {
-      if (document.hidden) {
-        setPause(true);
-        save();
-      }
-    };
-    addEventListener("pagehide", preserve);
-    document.addEventListener("visibilitychange", visibility);
-    return () => {
-      clearInterval(timer);
-      removeEventListener("pagehide", preserve);
-      document.removeEventListener("visibilitychange", visibility);
-      save();
-    };
-  }, [save]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    let raf: number;
-    const tick = (ts: number) => {
-      const dt = Math.min(0.04, (ts - last.current) / 1000 || 0);
-      last.current = ts;
-      if (!pausedRef.current) update(dt);
-      draw();
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-  useEffect(() => () => peer.current?.close(), []);
-
-  function update(dt: number) {
-    const g = game.current;
-    if (multiplayerRole.current === "guest") {
-      const c = canvas.current;
-      if (!c) return;
-      if (keys.current.has("a") || keys.current.has("arrowleft")) g.camera.x -= 350 * dt;
-      if (keys.current.has("d") || keys.current.has("arrowright")) g.camera.x += 350 * dt;
-      if (keys.current.has("w") || keys.current.has("arrowup")) g.camera.y -= 350 * dt;
-      if (keys.current.has("s") || keys.current.has("arrowdown")) g.camera.y += 350 * dt;
-      const halfW = c.clientWidth / (2 * g.zoom), halfH = c.clientHeight / (2 * g.zoom);
-      g.camera.x = Math.max(halfW, Math.min(W - halfW, g.camera.x));
-      g.camera.y = Math.max(halfH, Math.min(H - halfH, g.camera.y));
-      revealFog(g);
-      return;
-    }
-    if (g.over) return;
-    g.time += dt;
-    g.attackAlerts = (g.attackAlerts || []).filter((alert) => alert.expiresAt > g.time);
-    for (const hq of g.buildings.filter((building) => building.type === "hq" && building.hp > 0)) {
-      if (hq.relocation) {
-        hq.relocation.elapsed = Math.min(hq.relocation.duration, hq.relocation.elapsed + dt);
-        if (hq.relocation.elapsed >= hq.relocation.duration) {
-          const mode = hq.relocation.mode;
-          hq.relocation = undefined;
-          hq.packed = mode === "pack";
-          if (mode === "deploy") hq.mobileTarget = undefined;
-          if (hq.team === "player") {
-            g.message = mode === "pack"
-              ? "COMMAND CRAWLER ready â€” move it slowly, then deploy on clear terrain."
-              : "HEADQUARTERS deployed â€” production, supply, research, and reinforcement restored.";
-            sync();
-          }
-        }
-      }
-      if (hq.packed) movePackedHq(g, hq, dt);
-    }
-    for (const unit of g.units) {
-      unit.moving = false;
-      unit.mining = false;
-      unit.building = false;
-      unit.repairing = false;
-      const inSupply = unitInSupplyRange(g, unit);
-      unit.supply = inSupply
-        ? Math.min(SUPPLY_CAPACITY, (unit.supply ?? SUPPLY_CAPACITY) + dt * 3)
-        : Math.max(0, (unit.supply ?? SUPPLY_CAPACITY) - dt);
-      const homeHq = g.buildings.find((building) => building.team === unit.team && building.type === "hq" && buildingOperational(building));
-      if (homeHq && Math.hypot(homeHq.x - unit.x, homeHq.y - unit.y) <= 155) {
-        unit.hp = Math.min(unit.max, unit.hp + (unit.retreating ? 12 : 4) * dt);
-        if (unit.retreating && Math.hypot(homeHq.x - unit.x, homeHq.y - unit.y) <= 120) {
-          unit.retreating = false;
-          unit.target = undefined;
-          unit.nav = undefined;
-        }
-      }
-      if (unit.retreating) unit.enemy = undefined;
-      const regenRate = veteranRegenRate(unit);
-      if (regenRate > 0) {
-        unit.hp = Math.min(unit.max, unit.hp + unit.max * regenRate * dt);
-      }
-    }
-    revealFog(g);
-    const enemyHq = g.buildings.find((building) => building.team === "enemy" && building.type === "hq");
-    if (enemyHq && isVisible(g, enemyHq, buildingStats.hq.r)) {
-      const discovered = g.enemyDoctrine || "none";
-      if (g.scoutedEnemyDoctrine !== discovered) {
-        g.scoutedEnemyDoctrine = discovered;
-        g.enemyDoctrineKnown = true;
-        g.message = discovered === "none"
-          ? "SCOUT REPORT: No completed enemy doctrine detected."
-          : `SCOUT REPORT: Enemy ${discovered === "air" ? "Air Superiority" : "Armored Command"} doctrine detected.`;
-        sync();
-      }
-    }
-    g.shots = (g.shots || [])
-      .map((s) => ({ ...s, life: s.life - dt }))
-      .filter((s) => s.life > 0);
-    g.damageNumbers = (g.damageNumbers || [])
-      .map((n) => ({ ...n, life: n.life - dt, y: n.y - 18 * dt }))
-      .filter((n) => n.life > 0);
-    for (const objective of g.objectives || []) {
-      if (!intelRelayOperational(objective)) {
-        objective.owner = "neutral";
-        objective.capture = 0;
-        const rebuildAt = objective.rebuildAt ?? g.time + RELAY_REBUILD_COOLDOWN;
-        objective.rebuildAt = rebuildAt;
-        if (g.time >= rebuildAt) {
-          objective.rebuildProgress = Math.min(1, (objective.rebuildProgress || 0) + dt / RELAY_REBUILD_DURATION);
-          objective.hp = Math.round(objective.max * objective.rebuildProgress);
-          if (objective.rebuildProgress >= 1) {
-            objective.hp = objective.max;
-            objective.rebuildAt = undefined;
-            objective.rebuildProgress = undefined;
-            if (isVisible(g, objective, HIGH_GROUND_RADIUS)) {
-              g.message = "INTEL RELAY REBUILT â€” garrison access restored.";
-              sync();
-            }
-          }
-        }
-        continue;
-      }
-      const oldOwner = objective.owner;
-      const occupants = relayOccupants(g, objective);
-      const garrisonTeam = occupants[0]?.team;
-      const playerPresence = g.units.filter(
-        (unit) => unit.team === "player" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= OBJECTIVE_CAPTURE_RADIUS,
-      ).length;
-      const enemyPresence = g.units.filter(
-        (unit) => unit.team === "enemy" && unit.hp > 0 && Math.hypot(unit.x - objective.x, unit.y - objective.y) <= OBJECTIVE_CAPTURE_RADIUS,
-      ).length;
-      if (garrisonTeam) {
-        // An occupied relay cannot be captured by standing beside it. Clear
-        // every defender first; the surviving garrison keeps full control.
-        objective.capture = garrisonTeam === "player" ? OBJECTIVE_CAPTURE_TIME : -OBJECTIVE_CAPTURE_TIME;
-      } else if (playerPresence > 0 && enemyPresence === 0) {
-        objective.capture = Math.min(OBJECTIVE_CAPTURE_TIME, objective.capture + dt * Math.min(2, playerPresence));
-      } else if (enemyPresence > 0 && playerPresence === 0) {
-        objective.capture = Math.max(-OBJECTIVE_CAPTURE_TIME, objective.capture - dt * Math.min(2, enemyPresence));
-      }
-      if (objective.capture >= OBJECTIVE_CAPTURE_TIME) objective.owner = "player";
-      else if (objective.capture <= -OBJECTIVE_CAPTURE_TIME) objective.owner = "enemy";
-      else if ((objective.owner === "player" && objective.capture <= 0) || (objective.owner === "enemy" && objective.capture >= 0)) objective.owner = "neutral";
-      if (objective.owner === "player") g.intel += OBJECTIVE_INTEL_RATE * dt;
-      if (objective.owner === "enemy") g.enemyIntel += OBJECTIVE_INTEL_RATE * dt;
-      if (objective.owner !== oldOwner) {
-        if (objective.owner !== "enemy" || isVisible(g, objective, HIGH_GROUND_RADIUS)) {
-          g.message = objective.owner === "neutral"
-            ? "INTEL RELAY CONTESTED â€” feed interrupted."
-            : `${objective.owner === "player" ? "INTEL RELAY SECURED" : "ENEMY RELAY SECURED"} â€” intel income active.`;
-          sync();
-        }
-      }
-    }
-    const playerArmyCount = g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length;
-    const enemyArmyCount = g.units.filter((unit) => unit.team === "enemy" && isCombatUnit(unit)).length;
-    g.credits = Math.max(0, g.credits - upkeepPerSecond(playerArmyCount) * dt);
-    g.enemyCredits = Math.max(0, g.enemyCredits - upkeepPerSecond(enemyArmyCount) * dt);
-    for (const building of g.buildings) {
-      if ((building.cooldown || 0) > 0) building.cooldown = Math.max(0, (building.cooldown || 0) - dt);
-    }
-    const hudTick = Math.floor(g.time * 2);
-    if (hudTick !== lastHudTick.current) {
-      lastHudTick.current = hudTick;
-      sync();
-    }
-    const countdown = Math.max(0, Math.ceil(g.waveAt - g.time));
-    if (countdown !== lastCountdown.current) {
-      lastCountdown.current = countdown;
-      sync();
-    }
-    const c = canvas.current!;
-    if (keys.current.has("a") || keys.current.has("arrowleft")) g.camera.x -= 350 * dt;
-    if (keys.current.has("d") || keys.current.has("arrowright")) g.camera.x += 350 * dt;
-    if (keys.current.has("w") || keys.current.has("arrowup")) g.camera.y -= 350 * dt;
-    if (keys.current.has("s") || keys.current.has("arrowdown")) g.camera.y += 350 * dt;
-    const halfW = c.clientWidth / (2 * g.zoom),
-      halfH = c.clientHeight / (2 * g.zoom);
-    g.camera.x = Math.max(halfW, Math.min(W - halfW, g.camera.x));
-    g.camera.y = Math.max(halfH, Math.min(H - halfH, g.camera.y));
-    for (const team of ["player", "enemy"] as const) {
-      const production = team === "player" ? g.fortifyProduction : g.enemyFortifyProduction;
-      if (!production) continue;
-      production.elapsed = Math.min(production.duration, production.elapsed + dt);
-      if (production.elapsed >= production.duration) {
-        for (const structure of g.buildings.filter((x) => x.team === team)) {
-          const oldMax = structure.max;
-          structure.max = Math.round(oldMax * 1.25);
-          structure.hp = Math.min(structure.max, structure.hp + Math.round(oldMax * 0.25));
-        }
-        if (team === "player") {
-          g.fortified = true;
-          g.fortifyProduction = undefined;
-          g.message = "FORTIFY BASE complete â€” all current structures gained 25% integrity.";
-        } else {
-          g.enemyFortified = true;
-          g.enemyFortifyProduction = undefined;
-        }
-        sync();
-      }
-    }
-    for (const team of ["player", "enemy"] as const) {
-      const production = team === "player" ? g.doctrineProduction : g.enemyDoctrineProduction;
-      if (!production) continue;
-      production.elapsed = Math.min(production.duration, production.elapsed + dt);
-      if (production.elapsed >= production.duration) {
-        if (team === "player") {
-          g.doctrine = production.type;
-          g.doctrineProduction = undefined;
-          g.message = `${production.type === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"} active â€” the alternate doctrine is permanently locked.`;
-        } else {
-          g.enemyDoctrine = production.type;
-          g.enemyDoctrineProduction = undefined;
-        }
-        if (production.type === "armor") {
-          for (const tank of g.units.filter((unit) => unit.team === team && unit.type === "tank")) {
-            const bonus = Math.round(tank.max * .18);
-            tank.max += bonus;
-            tank.hp += bonus;
-          }
-        }
-        sync();
-      }
-    }
-    for (const team of ["player", "enemy"] as const) {
-      const production = team === "player" ? g.tradeNetworkProduction : g.enemyTradeNetworkProduction;
-      if (!production) continue;
-      production.elapsed = Math.min(production.duration, production.elapsed + dt);
-      if (production.elapsed >= production.duration) {
-        if (team === "player") {
-          g.tradeNetwork = true;
-          g.tradeNetworkProduction = undefined;
-          g.message = "TRADE NETWORK online â€” Cipher production unlocked at Headquarters.";
-        } else {
-          g.enemyTradeNetwork = true;
-          g.enemyTradeNetworkProduction = undefined;
-        }
-        sync();
-      }
-    }
-    for (const b of g.buildings) {
-      if (b.progress === undefined || b.progress >= 1) continue;
-      const builders = g.units.filter((unit) => {
-        const queueHead = unit.buildQueue?.[0] ?? unit.buildTarget;
-        return unit.type === "worker" && unit.team === b.team && unit.hp > 0 && queueHead === b.id &&
-          Math.hypot(unit.x - b.x, unit.y - b.y) <= buildingStats[b.type].r + 30;
-      });
-      if (!builders.length) continue;
-      b.constructionStarted = true;
-      const oldProgress = b.progress;
-      const duration = b.constructionDuration || (b.type === "turret" ? buildingBuildTime.turret : 6);
-      const buildSpeed = Math.min(1.6, 1 + (builders.length - 1) * .25);
-      b.progress = Math.min(1, b.progress + (dt / duration) * buildSpeed);
-      b.hp = Math.min(b.max, b.hp + b.max * (b.progress - oldProgress));
-      if (b.progress < 1) continue;
-      b.hp = b.max;
-      for (const worker of g.units.filter((unit) => unit.type === "worker" && unit.team === b.team)) {
-        const remaining = (worker.buildQueue || (worker.buildTarget ? [worker.buildTarget] : []))
-          .filter((buildingId) => buildingId !== b.id);
-        worker.buildQueue = remaining;
-        worker.buildTarget = remaining[0];
-        if (!remaining.length && worker.workerMode === "construct") worker.workerMode = "mine";
-        worker.nav = undefined;
-      }
-      if (b.type !== "turret") {
-        if (b.team === "player") g.power += b.type === "refinery" ? 4 : 2;
-        else g.enemyPower = (g.enemyPower ?? 12) + (b.type === "refinery" ? 4 : 2);
-      }
-      if (b.team === "player" || isVisible(g, b, buildingStats[b.type].r)) {
-        g.message = `${b.team === "enemy" ? "Enemy " : ""}${b.type} operational.`;
-        sync();
-      }
-    }
-    for (const b of g.buildings)
-      if (
-        b.production &&
-        buildingOperational(b) &&
-        !(b.type === "hq" && ((b.team === "player" && (g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction)) || (b.team === "enemy" && (g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction))))
-      ) {
-        b.production.elapsed += dt;
-        if (b.production.elapsed >= b.production.duration) {
-          const type = b.production.type,
-            spacing = type === "tank" ? 48 : 34;
-          let spawn = { x: b.x + (b.team === "player" ? 70 : -70), y: b.y };
-          for (let ring = 0; ring < 5; ring++) {
-            const radius = 70 + ring * spacing,
-              spots = 8 + ring * 4;
-            const found = Array.from({ length: spots }, (_, i) => ({
-              x: b.x + Math.cos((i / spots) * Math.PI * 2) * radius,
-              y: b.y + Math.sin((i / spots) * Math.PI * 2) * radius,
-            })).find((p) =>
-              g.units.every((u) => Math.hypot(u.x - p.x, u.y - p.y) > spacing),
-            );
-            if (found) {
-              spawn = found;
-              break;
-            }
-          }
-          const id = g.nextId++;
-          const deployedHealth = Math.round(unitHealth[type] * (type === "tank" && teamDoctrine(g, b.team) === "armor" ? 1.18 : 1));
-          const rallyTarget = b.rally
-            ? {
-                x: b.rally.x + Math.cos(id * 2.399) * 42,
-                y: b.rally.y + Math.sin(id * 2.399) * 42,
-              }
-            : undefined;
-          g.units.push({
-            id,
-            team: b.team,
-            type,
-            ...spawn,
-            target: rallyTarget,
-            hp: deployedHealth,
-            max: deployedHealth,
-            xp: 0,
-            level: 1,
-            supply: SUPPLY_CAPACITY,
-            cipherMode: type === "cipher" ? "mobile" : undefined,
-          });
-          const next = b.production.queue?.shift();
-          if (next)
-            b.production = {
-              type: next,
-              elapsed: -PRODUCTION_COOLDOWN,
-              duration: productionDurationFor(g, b.team, next),
-              queue: b.production.queue || [],
-            };
-          else {
-            b.production = undefined;
-            b.cooldown = PRODUCTION_COOLDOWN;
-          }
-          if (b.team === "player")
-            g.message = next
-              ? `${unitName(type)} deployed Â· ${unitName(next)} production started.`
-              : `${unitName(type)} ready and deployed.`;
-          sync();
-        }
-      }
-    const objs = () => [...g.units, ...g.buildings];
-    for (const u of g.units) {
-      if (u.hp <= 0) continue;
-      if (u.type === "cipher") {
-        const mode = u.cipherMode || "mobile";
-        u.enemy = undefined;
-        if (mode !== "mobile") {
-          u.target = undefined;
-          u.nav = undefined;
-          u.patrol = undefined;
-          u.moveEngage = false;
-          u.formationSpeed = undefined;
-          u.moving = false;
-          if (mode === "deploying" || mode === "packing") {
-            const duration = mode === "deploying" ? CIPHER_DEPLOY_DURATION : CIPHER_PACK_DURATION;
-            u.cipherProgress = Math.min(duration, (u.cipherProgress || 0) + dt);
-            if (u.cipherProgress >= duration) {
-              u.cipherMode = mode === "deploying" ? "deployed" : "mobile";
-              u.cipherProgress = undefined;
-              if (u.team === "player") {
-                g.message = mode === "deploying"
-                  ? "CIPHER ONLINE â€” generating 60 credits per minute while undisturbed."
-                  : "CIPHER MOBILE â€” income link closed.";
-                sync();
-              }
-            }
-          } else if (mode === "deployed" && g.time - (u.lastCombatAt ?? -Infinity) >= CIPHER_COMBAT_LOCKOUT) {
-            if (u.team === "player") g.credits += CIPHER_INCOME_RATE * dt;
-            else g.enemyCredits += CIPHER_INCOME_RATE * dt;
-          }
-          continue;
-        }
-      }
-      if (u.garrisonTarget && !u.garrisonedAt) {
-        const relay = (g.objectives || []).find((objective) => objective.id === u.garrisonTarget);
-        if (!relay || u.type !== "trooper" || !intelRelayOperational(relay)) {
-          u.garrisonTarget = undefined;
-        } else if (
-          Math.hypot(relay.x - u.x, relay.y - u.y) <= 64 &&
-          !relayOccupants(g, relay).some((occupant) => occupant.team !== u.team)
-        ) {
-          enterIntelRelay(g, u, relay);
-        }
-      }
-      if (u.garrisonedAt) {
-        const relay = (g.objectives || []).find((objective) => objective.id === u.garrisonedAt);
-        if (!relay || !intelRelayOperational(relay)) ejectFromIntelRelay(g, u);
-        else {
-          u.target = undefined;
-          u.garrisonTarget = undefined;
-          u.nav = undefined;
-          u.plateauRoute = undefined;
-          u.moving = false;
-        }
-      }
-      let target = objs().find(
-        (o) =>
-          o.id === u.enemy &&
-          o.team !== u.team &&
-          Number.isFinite(o.hp) &&
-          o.hp > 0,
-      );
-      if (!target && u.enemy !== undefined) {
-        u.enemy = undefined;
-        u.nav = undefined;
-      }
-      const aiObjectiveTravel = u.team === "enemy" && isCombatUnit(u) && u.target
-        ? (g.objectives || []).find((objective) => Math.hypot(objective.x - u.target!.x, objective.y - u.target!.y) <= 50)
-        : undefined;
-      const objectiveDefended = Boolean(aiObjectiveTravel && (
-        aiObjectiveTravel.owner === "player" ||
-        g.units.some((unit) =>
-          unit.team === "player" &&
-          unit.hp > 0 &&
-          Math.hypot(unit.x - aiObjectiveTravel.x, unit.y - aiObjectiveTravel.y) <= OBJECTIVE_CAPTURE_RADIUS + 80 &&
-          isVisibleFor(g, "enemy", unit, objectRadius(unit))
-        )
-      ));
-      // Rushing an unguarded neutral uplink is a valid direct-move strategy.
-      // Once the destination is hostile-owned or visibly defended, the same
-      // squad switches to move-and-engage without abandoning its objective.
-      if (aiObjectiveTravel) {
-        u.moveEngage = objectiveDefended;
-        if (objectiveDefended) u.stance = "pursue";
-      }
-      if (target && u.moveEngage && u.target) {
-        const travelSight = u.type === "drone" ? 320 : u.type === "tank" ? 280 : 230;
-        if (Math.hypot(target.x - u.x, target.y - u.y) > travelSight * 1.35) {
-          u.enemy = undefined;
-          u.nav = undefined;
-          target = undefined;
-        }
-      }
-      if (u.type === "worker" && u.autoRepair && (!u.target || u.stance === "patrol")) {
-        let repairRelay = (g.objectives || []).find((relay) =>
-          relay.id === u.repairRelayTarget &&
-          relay.owner === u.team &&
-          intelRelayOperational(relay) &&
-          relay.hp < relay.max,
-        );
-        let repairable = [...g.buildings, ...g.units].find((object) =>
-          object.id === u.repairTarget &&
-          object.id !== u.id &&
-          object.team === u.team &&
-          object.hp > 0 &&
-          object.hp < object.max &&
-          (isUnit(object) || buildingOperational(object)),
-        );
-        if (!repairable && !repairRelay) {
-          u.repairTarget = undefined;
-          u.repairRelayTarget = undefined;
-          const scanRadius = u.stance === "patrol" ? MAINTENANCE_PATROL_SCAN : Infinity;
-          const nearestRepairable = [...g.buildings, ...g.units]
-            .filter((object) =>
-              object.id !== u.id &&
-              object.team === u.team &&
-              object.hp > 0 &&
-              object.hp < object.max &&
-              (isUnit(object) || buildingOperational(object)) &&
-              Math.hypot(object.x - u.x, object.y - u.y) <= scanRadius,
-            )
-            .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
-          const nearestRelay = (g.objectives || [])
-            .filter((relay) =>
-              relay.owner === u.team &&
-              intelRelayOperational(relay) &&
-              relay.hp < relay.max &&
-              Math.hypot(relay.x - u.x, relay.y - u.y) <= scanRadius,
-            )
-            .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
-          if (
-            nearestRelay &&
-            (!nearestRepairable || Math.hypot(nearestRelay.x - u.x, nearestRelay.y - u.y) < Math.hypot(nearestRepairable.x - u.x, nearestRepairable.y - u.y))
-          ) {
-            repairRelay = nearestRelay;
-            u.repairRelayTarget = nearestRelay.id;
-          } else if (nearestRepairable) {
-            repairable = nearestRepairable;
-            u.repairTarget = nearestRepairable.id;
-          }
-        }
-        if (repairable || repairRelay) {
-          u.enemy = undefined;
-          u.target = undefined;
-          u.nav = undefined;
-          target = undefined;
-        }
-      }
-      if (u.stance === "patrol" && u.patrol && !target && !u.target && !u.repairTarget && !u.repairRelayTarget) {
-        const aDistance = Math.hypot(u.patrol.a.x - u.x, u.patrol.a.y - u.y);
-        const bDistance = Math.hypot(u.patrol.b.x - u.x, u.patrol.b.y - u.y);
-        const resumeAt = aDistance <= bDistance ? "a" : "b";
-        u.target = { ...(resumeAt === "a" ? u.patrol.a : u.patrol.b) };
-        u.patrol.next = resumeAt === "a" ? "b" : "a";
-      }
-      // Direct travel never chases: it fires only at targets already inside
-      // weapon range while continuing toward the locked destination. Engage
-      // travel may break course to fight nearby targets, then resumes.
-      const engagingWhileTraveling = Boolean(u.moveEngage && u.target);
-      const firingWhileDirectTravel = Boolean(!u.moveEngage && u.target && u.stance !== "patrol");
-      if (isCombatUnit(u) && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling || firingWhileDirectTravel)) {
-        const sight = firingWhileDirectTravel
-          ? unitCombatRange(u)
-          : u.stance === "hold"
-          ? unitCombatRange(u)
-          : u.type === "drone" ? 320 : u.type === "tank" ? 280 : 230;
-        const nearby = objs()
-          .filter(
-            (o) =>
-              o.team !== u.team &&
-              Number.isFinite(o.hp) &&
-              o.hp > 0 &&
-              Math.hypot(o.x - u.x, o.y - u.y) <= sight,
-          )
-          .sort(
-            (a, b) =>
-              Math.hypot(a.x - u.x, a.y - u.y) -
-              Math.hypot(b.x - u.x, b.y - u.y),
-          )[0];
-        const targetId = target?.id;
-        const targetIsBuilding = targetId !== undefined && g.buildings.some((b) => b.id === targetId);
-        if (nearby && (!target || targetIsBuilding)) {
-          target = nearby;
-          u.enemy = nearby.id;
-          if (!engagingWhileTraveling && !firingWhileDirectTravel) u.target = undefined;
-          if (!firingWhileDirectTravel) u.nav = undefined;
-        }
-      }
-      if (target) {
-        const combatTarget = target;
-        const d = Math.hypot(combatTarget.x - u.x, combatTarget.y - u.y),
-          s = stats[u.type],
-          range = unitCombatRange(u);
-        if (firingWhileDirectTravel && u.target) {
-          const travelDistance = Math.hypot(u.target.x - u.x, u.target.y - u.y);
-          const arrivalDistance = aiObjectiveTravel ? 58 : 4;
-          if (travelDistance < arrivalDistance) {
-            u.target = undefined;
-            u.nav = undefined;
-            u.moveEngage = false;
-            u.formationSpeed = undefined;
-          } else {
-            moveUnitToward(g, u, u.target, dt);
-          }
-        }
-        if (d > range) {
-          if (firingWhileDirectTravel) {
-            u.enemy = undefined;
-            target = undefined;
-          } else if (u.stance === "hold" || u.garrisonedAt) {
-            u.enemy = undefined;
-          } else {
-            const targetBuilding = g.buildings.find((b) => b.id === combatTarget.id);
-            moveUnitToward(g, u, combatTarget, dt, targetBuilding?.id);
-          }
-        } else {
-          u.facing = Math.atan2(combatTarget.y - u.y, combatTarget.x - u.x);
-          attackTimers.current[u.id] =
-            (Number.isFinite(attackTimers.current[u.id])
-              ? attackTimers.current[u.id]
-              : 0) - dt;
-          if (attackTimers.current[u.id] <= 0) {
-            const wasAlive = combatTarget.hp > 0,
-              level = u.level || 1,
-              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * structureMultiplier(u, combatTarget) * terrainMultiplier(g, u, combatTarget));
-            const relayShield = isUnit(combatTarget) && combatTarget.garrisonedAt
-              ? (g.objectives || []).find((objective) => objective.id === combatTarget.garrisonedAt && intelRelayOperational(objective))
-              : undefined;
-            const actualDamage = Math.min(relayShield?.hp ?? combatTarget.hp, damage);
-            const isBuilding = g.buildings.some((b) => b.id === combatTarget.id);
-            const hitX = relayShield?.x ?? combatTarget.x;
-            const hitY = relayShield?.y ?? combatTarget.y;
-            if (relayShield) {
-              relayShield.hp = Math.max(0, relayShield.hp - actualDamage);
-              recordRelayAttackAlert(g, relayShield, combatTarget.team);
-            } else {
-              combatTarget.hp = Math.max(0, combatTarget.hp - actualDamage);
-              recordAttackAlert(g, combatTarget);
-            }
-            u.lastCombatAt = g.time;
-            if (!relayShield && !isBuilding && isUnit(combatTarget)) combatTarget.lastCombatAt = g.time;
-            if (isBuilding && combatTarget.team === "player") {
-              g.matchStats.baseDamage += actualDamage;
-            }
-            g.damageNumbers.push({ x: hitX, y: hitY - 18, amount: Math.round(actualDamage), life: 0.9, team: u.team });
-            g.shots.push({
-              x: u.x,
-              y: u.y,
-              tx: hitX,
-              ty: hitY,
-              team: u.team,
-              kind: u.type === "tank" ? "shell" : "bullet",
-              life: u.type === "tank" ? 0.22 : 0.11,
-              maxLife: u.type === "tank" ? 0.22 : 0.11,
-            });
-            if (u.type === "trooper" || u.type === "tank" || u.type === "drone") {
-              u.attackUntil = g.time + (u.type === "tank" ? 0.30 : 0.18);
-            }
-            if (relayShield && relayShield.hp <= 0) destroyIntelRelay(g, relayShield, combatTarget.team);
-            if (wasAlive && combatTarget.hp <= 0) {
-              if (!isBuilding && isUnit(combatTarget)) {
-                const ownValue = g.units
-                  .filter((unit) => unit.team === u.team && isCombatUnit(unit) && unit.hp > 0)
-                  .reduce((sum, unit) => sum + unitCost[unit.type], 0);
-                const opposingValue = g.units
-                  .filter((unit) => unit.team !== u.team && isCombatUnit(unit) && unit.hp > 0)
-                  .reduce((sum, unit) => sum + unitCost[unit.type], 0);
-                if (ownValue < opposingValue * .8) {
-                  const bounty = Math.max(20, Math.round(unitCost[combatTarget.type] * .22));
-                  if (u.team === "player") g.credits += bounty;
-                  else g.enemyCredits += bounty;
-                  g.message = `${u.team === "player" ? "COMEBACK BOUNTY" : "Enemy comeback bounty"}: +${bounty} credits for eliminating a superior force.`;
-                }
-              }
-              u.xp =
-                (u.xp || 0) +
-                (isBuilding ? 55 : combatTarget.type === "tank" ? 45 : 25);
-              const old = u.level || 1;
-              u.level = (u.xp || 0) >= 180 ? 3 : (u.xp || 0) >= 75 ? 2 : 1;
-              if (u.level > old) {
-                u.max = Math.round(u.max * 1.12);
-                u.hp = Math.min(u.max, u.hp + Math.round(u.max * 0.25));
-                g.message = `${u.team === "enemy" ? "Enemy " : ""}${u.type.toUpperCase()} promoted to rank ${u.level} â€” +18% damage, +12% max HP, ${(veteranRegenRate(u) * 100).toFixed(0)}% HP/s continuous veteran regeneration.`;
-                sync();
-              }
-            }
-            attackTimers.current[u.id] = s.rate;
-          }
-        }
-      } else if (u.target) {
-        const d = Math.hypot(u.target.x - u.x, u.target.y - u.y);
-        // The two objective units already have opposite formation offsets.
-        // Stop them within capture range rather than stacking on one pixel.
-        const arrivalDistance = aiObjectiveTravel ? 58 : 4;
-        if (d < arrivalDistance) {
-          if (u.stance === "patrol" && u.patrol) {
-            const destination = u.patrol.next === "a" ? u.patrol.a : u.patrol.b;
-            u.patrol.next = u.patrol.next === "a" ? "b" : "a";
-            u.target = { ...destination };
-            u.nav = undefined;
-          } else {
-            u.target = undefined;
-            u.nav = undefined;
-            u.moveEngage = false;
-            u.formationSpeed = undefined;
-          }
-        } else moveUnitToward(g, u, u.target, dt);
-      }
-      if (u.type === "worker" && !u.target && !target) {
-        const buildQueue = [...(u.buildQueue || (u.buildTarget ? [u.buildTarget] : []))];
-        let construction: Building | undefined;
-        while (buildQueue.length && !construction) {
-          construction = g.buildings.find(
-            (building) => building.id === buildQueue[0] && building.team === u.team && building.hp > 0 && (building.progress ?? 1) < 1,
-          );
-          if (!construction) buildQueue.shift();
-        }
-        u.buildQueue = buildQueue;
-        u.buildTarget = buildQueue[0];
-        if (!construction && u.workerMode === "construct") {
-          u.workerMode = "mine";
-          u.nav = undefined;
-        }
-        if (construction) {
-          const buildDistance = Math.hypot(construction.x - u.x, construction.y - u.y);
-          if (buildDistance > buildingStats[construction.type].r + 25) {
-            moveUnitToward(g, u, construction, dt, construction.id);
-          } else {
-            u.facing = Math.atan2(construction.y - u.y, construction.x - u.x);
-            u.building = true;
-            construction.constructionStarted = true;
-          }
-          continue;
-        }
-        const relayRepairTarget = (g.objectives || []).find((relay) =>
-          relay.id === u.repairRelayTarget &&
-          relay.owner === u.team &&
-          intelRelayOperational(relay) &&
-          relay.hp < relay.max,
-        );
-        if (!relayRepairTarget) u.repairRelayTarget = undefined;
-        if (relayRepairTarget) {
-          const repairDistance = Math.hypot(relayRepairTarget.x - u.x, relayRepairTarget.y - u.y);
-          if (repairDistance > 80) {
-            moveUnitToward(g, u, relayRepairTarget, dt);
-          } else {
-            const availableAlloy = u.team === "player" ? g.alloy : g.enemyAlloy;
-            const repair = Math.min(
-              relayRepairTarget.max - relayRepairTarget.hp,
-              REPAIR_RATE * dt,
-              availableAlloy / REPAIR_ALLOY_PER_HP,
-            );
-            if (repair > 0) {
-              relayRepairTarget.hp = Math.min(relayRepairTarget.max, relayRepairTarget.hp + repair);
-              if (u.team === "player") g.alloy = Math.max(0, g.alloy - repair * REPAIR_ALLOY_PER_HP);
-              else g.enemyAlloy = Math.max(0, g.enemyAlloy - repair * REPAIR_ALLOY_PER_HP);
-              u.facing = Math.atan2(relayRepairTarget.y - u.y, relayRepairTarget.x - u.x);
-              u.repairing = true;
-            }
-          }
-          continue;
-        }
-        const repairTarget = [...g.buildings, ...g.units].find(
-          (object) =>
-            object.id === u.repairTarget &&
-            object.id !== u.id &&
-            object.team === u.team &&
-            object.hp > 0 &&
-            object.hp < object.max &&
-            (isUnit(object) || buildingOperational(object)),
-        );
-        if (!repairTarget) {
-          u.repairTarget = undefined;
-          if (u.workerMode === "repair" && !u.autoRepair) {
-            u.workerMode = "hold";
-            u.nav = undefined;
-            continue;
-          }
-        }
-        if (repairTarget) {
-          const repairDistance = Math.hypot(repairTarget.x - u.x, repairTarget.y - u.y);
-          if (repairDistance > objectRadius(repairTarget) + 24) {
-            moveUnitToward(g, u, repairTarget, dt, isUnit(repairTarget) ? undefined : repairTarget.id);
-          } else {
-            const availableAlloy = u.team === "player" ? g.alloy : g.enemyAlloy;
-            const repair = Math.min(
-              repairTarget.max - repairTarget.hp,
-              REPAIR_RATE * dt,
-              availableAlloy / REPAIR_ALLOY_PER_HP,
-            );
-            if (repair > 0) {
-              repairTarget.hp = Math.min(repairTarget.max, repairTarget.hp + repair);
-              if (u.team === "player") g.alloy = Math.max(0, g.alloy - repair * REPAIR_ALLOY_PER_HP);
-              else g.enemyAlloy = Math.max(0, g.enemyAlloy - repair * REPAIR_ALLOY_PER_HP);
-              u.facing = Math.atan2(repairTarget.y - u.y, repairTarget.x - u.x);
-              u.repairing = true;
-            }
-          }
-          continue;
-        }
-        if (u.autoRepair) continue;
-        if (u.workerMode === "hold") continue;
-        // Re-evaluate the drop-off every mining tick so Workers use the
-        // closest completed Refinery instead of staying tied to whichever one
-        // happened to be created first. Destroyed and unfinished Refineries
-        // disappear from consideration immediately.
-        const ref = g.buildings
-          .filter((b) => b.team === u.team && b.type === "refinery" && buildingOperational(b))
-          .sort(
-            (a, b) =>
-              Math.hypot(a.x - u.x, a.y - u.y) -
-              Math.hypot(b.x - u.x, b.y - u.y),
-          )[0];
-        if (ref) {
-          const cargoKind = u.carryingType || "credits";
-          const assignedCrystal = Number.isInteger(u.resourceTarget)
-            ? g.crystals[u.resourceTarget!]
-            : undefined;
-          if (Number.isInteger(u.resourceTarget) && (!assignedCrystal || assignedCrystal.amount <= 0)) {
-            u.resourceTarget = undefined;
-          }
-          const activeAssignedCrystal = assignedCrystal && assignedCrystal.amount > 0
-            ? assignedCrystal
-            : undefined;
-          const crystal = activeAssignedCrystal || g.crystals
-            .filter((x) => x.amount > 0 && (!(u.carrying || 0) || (x.kind || "credits") === cargoKind))
-            .sort(
-              (a, b) =>
-                (Math.hypot(a.x - u.x, a.y - u.y) + Math.hypot(a.x - ref.x, a.y - ref.y) * .35) -
-                (Math.hypot(b.x - u.x, b.y - u.y) + Math.hypot(b.x - ref.x, b.y - ref.y) * .35),
-            )[0];
-          const assignedKind = activeAssignedCrystal?.kind || "credits";
-          const unloadBeforeAssignedMining = Boolean(
-            activeAssignedCrystal && (u.carrying || 0) > 0 && cargoKind !== assignedKind,
-          );
-          if ((u.carrying || 0) >= 100 || unloadBeforeAssignedMining) {
-            const d = Math.hypot(ref.x - u.x, ref.y - u.y);
-            if (d < 55) {
-              if (u.team === "player") {
-                if (cargoKind === "alloy") g.alloy += u.carrying!;
-                else g.credits += u.carrying!;
-              } else if (cargoKind === "alloy") g.enemyAlloy += u.carrying!;
-              else g.enemyCredits += u.carrying!;
-              u.carrying = 0;
-              u.carryingType = undefined;
-              sync();
-            } else {
-              moveUnitToward(g, u, ref, dt, ref.id);
-            }
-          } else if (crystal) {
-            const d = Math.hypot(crystal.x - u.x, crystal.y - u.y);
-            if (d < 35) {
-              const take = Math.min(crystal.amount, 32 * dt);
-              crystal.amount -= take;
-              u.carrying = (u.carrying || 0) + take;
-              u.carryingType = crystal.kind || "credits";
-              u.facing = Math.atan2(crystal.y - u.y, crystal.x - u.x);
-              u.mining = true;
-            } else {
-              moveUnitToward(g, u, crystal, dt);
-            }
-          }
-        }
-      }
-    }
-    // Sentries are automatic defenses. They shoot only what they can cover;
-    // they never provide a hidden combat bonus to the player.
-    for (const turret of g.buildings.filter(
-      (b) => b.type === "turret" && (b.progress === undefined || b.progress >= 1) && b.hp > 0,
-    )) {
-      const target = g.units
-        .filter(
-          (u) =>
-            u.team !== turret.team &&
-            u.hp > 0 &&
-            Math.hypot(u.x - turret.x, u.y - turret.y) <= turretStats.range,
-        )
-        .sort(
-          (a, b) =>
-            Math.hypot(a.x - turret.x, a.y - turret.y) -
-            Math.hypot(b.x - turret.x, b.y - turret.y),
-        )[0];
-      if (!target) continue;
-      turret.turretFacing = Math.atan2(target.y - turret.y, target.x - turret.x);
-      attackTimers.current[turret.id] =
-        (Number.isFinite(attackTimers.current[turret.id])
-          ? attackTimers.current[turret.id]
-          : 0) - dt;
-      if (attackTimers.current[turret.id] <= 0) {
-        const relayShield = target.garrisonedAt
-          ? (g.objectives || []).find((objective) => objective.id === target.garrisonedAt && intelRelayOperational(objective))
-          : undefined;
-        const damage = Math.min(relayShield?.hp ?? target.hp, turretStats.damage);
-        const hitX = relayShield?.x ?? target.x;
-        const hitY = relayShield?.y ?? target.y;
-        if (relayShield) {
-          relayShield.hp = Math.max(0, relayShield.hp - damage);
-          recordRelayAttackAlert(g, relayShield, target.team);
-        } else {
-          target.hp = Math.max(0, target.hp - damage);
-          recordAttackAlert(g, target);
-          target.lastCombatAt = g.time;
-        }
-        g.damageNumbers.push({ x: hitX, y: hitY - 18, amount: Math.round(damage), life: 0.9, team: turret.team });
-        g.shots.push({ x: turret.x, y: turret.y, tx: hitX, ty: hitY, team: turret.team, kind: "bullet", life: 0.12, maxLife: 0.12 });
-        turret.turretFireUntil = g.time + 0.16;
-        if (relayShield && relayShield.hp <= 0) destroyIntelRelay(g, relayShield, target.team);
-        attackTimers.current[turret.id] = turretStats.rate;
-      }
-    }
-    for (let i = 0; i < g.units.length; i++)
-      for (let j = i + 1; j < g.units.length; j++) {
-        const a = g.units[i], b = g.units[j];
-        if (a.garrisonedAt || b.garrisonedAt) continue;
-        const d = Math.hypot(b.x - a.x, b.y - a.y);
-        const min = (stats[a.type].r + stats[b.type].r) * 0.8;
-        if (d < min) {
-          const angle = d > 0.01 ? Math.atan2(b.y - a.y, b.x - a.x) : (a.id + b.id) * 2.399;
-          const shift = (min - d) / 2 + 0.15;
-          const dx = Math.cos(angle) * shift, dy = Math.sin(angle) * shift;
-          const aFixed = a.type === "cipher" && (a.cipherMode || "mobile") !== "mobile";
-          const bFixed = b.type === "cipher" && (b.cipherMode || "mobile") !== "mobile";
-          if (!aFixed && !bFixed) {
-            a.x -= dx; a.y -= dy; b.x += dx; b.y += dy;
-          } else if (!aFixed) {
-            a.x -= dx * 2; a.y -= dy * 2;
-          } else if (!bFixed) {
-            b.x += dx * 2; b.y += dy * 2;
-          }
-        }
-      }
-    for (const u of g.units)
-      for (const b of g.buildings) {
-        if (u.type === "drone" || u.garrisonedAt || (u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile")) continue;
-        const d = Math.hypot(u.x - b.x, u.y - b.y);
-        const min = stats[u.type].r + buildingStats[b.type].r * 0.72;
-        if (d < min) {
-          const angle = d > 0.01 ? Math.atan2(u.y - b.y, u.x - b.x) : u.id * 2.399;
-          const shift = min - d + 0.15;
-          u.x += Math.cos(angle) * shift; u.y += Math.sin(angle) * shift;
-        }
-      }
-    for (const u of g.units) {
-      if (u.type === "drone" || u.garrisonedAt || (u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile")) continue;
-      for (const objective of g.objectives || []) {
-        const d = Math.hypot(u.x - objective.x, u.y - objective.y);
-        const min = stats[u.type].r + 36;
-        if (d < min) {
-          const angle = d > .01 ? Math.atan2(u.y - objective.y, u.x - objective.x) : u.id * 2.399;
-          u.x += Math.cos(angle) * (min - d + .15);
-          u.y += Math.sin(angle) * (min - d + .15);
-        }
-      }
-      for (const ridge of TERRAIN_RIDGES) {
-        const d = Math.hypot(u.x - ridge.x, u.y - ridge.y);
-        const min = stats[u.type].r + ridge.r * .82;
-        if (d < min) {
-          const angle = d > .01 ? Math.atan2(u.y - ridge.y, u.x - ridge.x) : u.id * 2.399;
-          u.x += Math.cos(angle) * (min - d + .2);
-          u.y += Math.sin(angle) * (min - d + .2);
-        }
-      }
-      for (const crystal of g.crystals.filter((node) => node.amount > 0)) {
-        // Deposits that generated beside a ramp stay collectible, but they do
-        // not narrow the only legal entrance or pin units against the cliff.
-        if (inPlateauRampLane(crystal, 28)) continue;
-        const d = Math.hypot(u.x - crystal.x, u.y - crystal.y);
-        const min = stats[u.type].r + 18;
-        if (d < min) {
-          const angle = d > .01 ? Math.atan2(u.y - crystal.y, u.x - crystal.x) : u.id * 2.399;
-          u.x += Math.cos(angle) * (min - d + .15);
-          u.y += Math.sin(angle) * (min - d + .15);
-        }
-      }
-    }
-    const deadUnits = g.units.filter((u) => u.hp <= 0);
-    for (const u of deadUnits) {
-      if (u.team === "player") g.matchStats.unitsLost++;
-      else g.matchStats.enemyUnitsDestroyed++;
-    }
-    g.units = g.units.filter((u) => u.hp > 0);
-    g.matchStats.peakArmy = Math.max(g.matchStats.peakArmy, g.units.filter((u) => u.team === "player" && isCombatUnit(u)).length);
-    g.buildings = g.buildings.filter((b) => b.hp > 0);
-    if (multiplayerRole.current === "solo" && g.time >= g.aiThinkAt) {
-      g.aiThinkAt = g.time + 0.2;
-      runAI(g);
-    }
-    if (!g.buildings.some((b) => b.team === "player" && b.type === "hq")) {
-      g.over = "lost";
-      if (multiplayerRole.current === "solo" && !g.resultRecorded) {
-        saveResult("lost", g);
-        setCommandProfile(readCommandProfile());
-        g.resultRecorded = true;
-      }
-      sync();
-    }
-    if (!g.buildings.some((b) => b.team === "enemy" && b.type === "hq")) {
-      g.over = "won";
-      if (multiplayerRole.current === "solo" && !g.resultRecorded) {
-        saveResult("won", g);
-        setCommandProfile(readCommandProfile());
-        g.resultRecorded = true;
-      }
-      sync();
-    }
-    if (multiplayerRole.current === "host" && peer.current?.open && g.time - networkSnapshotAt.current >= 0.1) {
-      networkSnapshotAt.current = g.time;
-      peerSend({ type: "state", game: g });
-    }
-  }
-
-  function runAI(g: Game) {
-    const ai = Math.max(0.82, Math.min(1.18, g.adaptive || 1));
-    const easiest = isEasiest(ai);
-    // The AI can still think continuously, but meaningful decisions are
-    // rate-limited so it cannot instantly chain perfect production and attacks.
-    // Level 1 gets roughly one decision every 4 seconds; Expert gets one/sec.
-    const actionsPerMinute = easiest ? 15 : Math.round(15 + ((ai - 0.82) / 0.36) * 45);
-    if (g.time < (g.aiActionAt ?? 0)) return;
-    const nextAction = () => { g.aiActionAt = g.time + 60 / actionsPerMinute; };
-    const enemyBuildings = g.buildings.filter((b) => b.team === "enemy"),
-      hq = enemyBuildings.find((b) => b.type === "hq"),
-      ref = enemyBuildings.find((b) => b.type === "refinery"),
-      barracks = enemyBuildings.find((b) => b.type === "barracks"),
-      workers = g.units.filter(
-        (u) => u.team === "enemy" && u.type === "worker",
-      ),
-      army = g.units.filter((u) => u.team === "enemy" && isCombatUnit(u));
-    if (!hq) return;
-    if (!g.enemyDoctrine && !g.enemyDoctrineProduction && !g.enemyFortifyProduction && !hq.production && g.enemyIntel >= DOCTRINE_INTEL_COST) {
-      const playerTanks = g.units.filter((unit) => unit.team === "player" && unit.type === "tank").length;
-      const playerTroopers = g.units.filter((unit) => unit.team === "player" && unit.type === "trooper").length;
-      const choice: Doctrine = playerTanks > playerTroopers ? "air" : "armor";
-      g.enemyIntel -= DOCTRINE_INTEL_COST;
-      g.enemyDoctrineProduction = { type: choice, elapsed: 0, duration: DOCTRINE_DURATION };
-      nextAction();
-      return;
-    }
-    if (!ref && g.enemyAlloy >= BUILD_COST.refinery) {
-      g.enemyAlloy -= BUILD_COST.refinery;
-      const building: Building = {
-        id: g.nextId++,
-        team: "enemy",
-        type: "refinery",
-        x: ENEMY_BASE.x - 20,
-        y: ENEMY_BASE.y - 135,
-        hp: 1,
-        max: 440,
-        progress: 0,
-        constructionDuration: buildingBuildTime.refinery,
-        constructionStarted: false,
-      };
-      g.buildings.push(building);
-      const builder = [...workers].sort((a, b) => Math.hypot(a.x - building.x, a.y - building.y) - Math.hypot(b.x - building.x, b.y - building.y))[0];
-      if (builder) queueWorkerConstruction(builder, building.id);
-      if (isVisible(g, building, buildingStats.refinery.r)) g.message = "Enemy refinery construction detected.";
-      nextAction();
-      sync();
-      return;
-    }
-    if (!barracks && g.enemyAlloy >= BUILD_COST.barracks) {
-      g.enemyAlloy -= BUILD_COST.barracks;
-      const building: Building = {
-        id: g.nextId++,
-        team: "enemy",
-        type: "barracks",
-        x: ENEMY_BASE.x - 80,
-        y: ENEMY_BASE.y + 130,
-        hp: 1,
-        max: 520,
-        progress: 0,
-        constructionDuration: buildingBuildTime.barracks,
-        constructionStarted: false,
-      };
-      g.buildings.push(building);
-      const builder = [...workers].sort((a, b) => Math.hypot(a.x - building.x, a.y - building.y) - Math.hypot(b.x - building.x, b.y - building.y))[0];
-      if (builder) queueWorkerConstruction(builder, building.id);
-      if (isVisible(g, building, buildingStats.barracks.r)) g.message = "Enemy barracks construction detected.";
-      nextAction();
-      sync();
-      return;
-    }
-    const workerGoal = Math.round(3 * ai);
-    if (workers.length < workerGoal && g.enemyCredits >= 150 && !hq.production && !(hq.cooldown || 0) && !g.enemyDoctrineProduction && !g.enemyFortifyProduction) {
-      g.enemyCredits -= 150;
-      hq.production = {
-        type: "worker",
-        elapsed: 0,
-        duration: productionDurationFor(g, "enemy", "worker"),
-      };
-      nextAction();
-      return;
-    }
-    if (barracks && buildingOperational(barracks) && !barracks.production && !(barracks.cooldown || 0)) {
-      const tankChance =
-        army.length >= Math.round(5 * ai) && g.enemyCredits >= 400 && g.wave > 0;
-      const playerArmor = g.units.filter((unit) => unit.team === "player" && unit.type === "tank").length;
-      const droneChance = playerArmor >= 2 && g.enemyCredits >= unitCost.drone;
-      if (tankChance) {
-        g.enemyCredits -= 400;
-        barracks.production = {
-          type: "tank",
-          elapsed: 0,
-          duration: productionDurationFor(g, "enemy", "tank"),
-        };
-        nextAction();
-      } else if (droneChance) {
-        g.enemyCredits -= unitCost.drone;
-        barracks.production = {
-          type: "drone",
-          elapsed: 0,
-          duration: productionDurationFor(g, "enemy", "drone"),
-        };
-        nextAction();
-      } else if (g.enemyCredits >= 125) {
-        g.enemyCredits -= 125;
-        barracks.production = {
-          type: "trooper",
-          elapsed: 0,
-          duration: productionDurationFor(g, "enemy", "trooper"),
-        };
-        nextAction();
-      }
-    }
-    const objectiveTarget = (g.objectives || [])
-      .filter((objective) => objective.owner !== "enemy" && intelRelayOperational(objective))
-      .sort((a, b) => Math.hypot(a.x - hq.x, a.y - hq.y) - Math.hypot(b.x - hq.x, b.y - hq.y))[0];
-    const objectiveSquad = army.filter((unit) => !unit.garrisonedAt && !unit.enemy && !unit.target).slice(0, 2);
-    if (g.time >= 30 && objectiveTarget && objectiveSquad.length >= 2) {
-      objectiveSquad.forEach((unit, index) => {
-        unit.target = { x: objectiveTarget.x + (index ? 28 : -28), y: objectiveTarget.y };
-        unit.garrisonTarget = unit.type === "trooper" ? objectiveTarget.id : undefined;
-        unit.moveEngage = objectiveTarget.owner === "player";
-        if (unit.moveEngage) unit.stance = "pursue";
-        unit.nav = undefined;
-      });
-      nextAction();
-      return;
-    }
-    const liveTargets = new Set(
-      [...g.units, ...g.buildings]
-        .filter((o) => o.team === "player" && o.hp > 0)
-        .map((o) => o.id),
-    );
-    const ready = army.filter((u) => !u.garrisonedAt && (!u.enemy || !liveTargets.has(u.enemy)));
-    // Level 1 is meant to teach the game, not demand an immediate all-in.
-    // Give the player a long opening and require a genuinely visible army.
-    const required = easiest
-      ? Math.min(12, Math.max(8, 8 + g.wave * 2))
-      : Math.min(14, Math.max(4, Math.round((6 + g.wave * 2) * ai)));
-    const openingGrace = easiest && g.wave === 0 ? 240 : 0;
-    if (g.time >= Math.max(g.aiAttackAt, openingGrace) && ready.length >= required) {
-      g.wave++;
-      g.aiAttackAt = g.time + (easiest
-        ? Math.max(150, 210 - g.wave * 8)
-        : Math.max(75, (125 - g.wave * 5) / ai));
-      g.waveAt = g.aiAttackAt;
-      const target =
-        g.buildings.find((b) => b.team === "player" && b.type === "hq") ||
-        g.buildings.find((b) => b.team === "player");
-      if (target)
-        ready.forEach((u, i) => {
-          u.enemy = target.id;
-          u.target = {
-            x: target.x + (i % 3) * 24,
-            y: target.y + Math.floor(i / 3) * 24,
-          };
-          u.nav = undefined;
-        });
-      g.message = `INCOMING: Enemy assault ${g.wave} â€” enemy forces are advancing`;
-      nextAction();
-      sync();
-    }
-  }
-
-  function draw() {
-    const c = canvas.current;
-    if (!c) return;
-    const x = c.getContext("2d")!,
-      g = game.current,
-      w = c.clientWidth,
-      h = c.clientHeight;
-    x.clearRect(0, 0, w, h);
-    x.save();
-    x.translate(w / 2, h / 2);
-    x.scale(g.zoom, g.zoom);
-    x.translate(-g.camera.x, -g.camera.y);
-    if (art.current.terrainLayer) {
-      x.drawImage(art.current.terrainLayer, 0, 0);
-    } else {
-      x.fillStyle = "#101b1b";
-      x.fillRect(0, 0, W, H);
-    }
-    // A very faint sector grid keeps long-distance navigation readable without
-    // competing with the painted ground texture.
-    x.strokeStyle = "rgba(142, 188, 172, .055)";
-    x.lineWidth = 1;
-    for (let i = 0; i < W; i += 200) {
-      x.beginPath();
-      x.moveTo(i, 0);
-      x.lineTo(i, H);
-      x.stroke();
-    }
-    for (let i = 0; i < H; i += 200) {
-      x.beginPath();
-      x.moveTo(0, i);
-      x.lineTo(W, i);
-      x.stroke();
-    }
-    for (const objective of g.objectives || []) {
-      const intel = objectiveIntel(g, objective);
-      if (!intel.discovered) continue;
-      x.save();
-      x.fillStyle = intel.visible ? "rgba(172, 137, 74, .07)" : "rgba(106, 126, 121, .04)";
-      x.strokeStyle = intel.visible ? "rgba(246, 211, 102, .2)" : "rgba(142, 168, 161, .12)";
-      x.lineWidth = 2;
-      x.beginPath(); x.arc(objective.x, objective.y, 62, 0, Math.PI * 2); x.fill(); x.stroke();
-      x.restore();
-    }
-    for (const plateau of TACTICAL_PLATEAUS) {
-      x.save();
-      x.translate(plateau.x, plateau.y);
-      x.rotate(plateau.rotation);
-      if (art.current.tacticalPlateau) {
-        x.drawImage(art.current.tacticalPlateau, -230, -230, 460, 460);
-      } else {
-        x.fillStyle = "rgba(0,0,0,.42)";
-        x.beginPath(); x.ellipse(0, 16, plateau.rx + 15, plateau.ry + 20, 0, 0, Math.PI * 2); x.fill();
-        const gradient = x.createRadialGradient(-55, -55, 12, 0, 0, plateau.rx);
-        gradient.addColorStop(0, "#746957");
-        gradient.addColorStop(.68, "#48443b");
-        gradient.addColorStop(1, "#1b2422");
-        x.fillStyle = gradient;
-        x.strokeStyle = "rgba(176, 160, 126, .5)";
-        x.lineWidth = 8;
-        x.beginPath(); x.ellipse(0, 0, plateau.rx, plateau.ry, 0, .25, Math.PI * 2 - .25); x.stroke(); x.fill();
-        x.strokeStyle = "rgba(14, 19, 18, .9)";
-        x.lineWidth = 15;
-        x.beginPath(); x.moveTo(-plateau.rx - 12, 0); x.lineTo(-plateau.rx + 54, 0); x.stroke();
-        x.beginPath(); x.moveTo(plateau.rx - 54, 0); x.lineTo(plateau.rx + 12, 0); x.stroke();
-      }
-      x.restore();
-      if (tutorialsEnabled) {
-        x.save();
-        x.textAlign = "center";
-        x.font = "800 9px system-ui";
-        x.fillStyle = "rgba(246, 211, 102, .82)";
-        x.fillText("ELEVATED Â· +10% DMG", plateau.x, plateau.y - 8);
-        x.font = "700 7px system-ui";
-        x.fillStyle = "rgba(227, 241, 234, .62)";
-        x.fillText("2 RAMP ACCESS", plateau.x, plateau.y + 5);
-        for (const ramp of plateau.ramps) {
-          const localX = Math.cos(ramp) * plateau.rx * .86;
-          const localY = Math.sin(ramp) * plateau.ry * .86;
-          const c = Math.cos(plateau.rotation), s = Math.sin(plateau.rotation);
-          const rx = plateau.x + localX * c - localY * s;
-          const ry = plateau.y + localX * s + localY * c;
-          x.strokeStyle = "rgba(246, 211, 102, .78)";
-          x.lineWidth = 3;
-          x.beginPath(); x.arc(rx, ry, 13, 0, Math.PI * 2); x.stroke();
-        }
-        x.restore();
-      }
-    }
-    // Friendly supply sources project a quiet ground boundary instead of a
-    // text label. Overlapping rings show how deployed structures extend the
-    // supported base network.
-    x.save();
-    x.strokeStyle = "rgba(85, 214, 181, .36)";
-    x.fillStyle = "rgba(85, 214, 181, .025)";
-    x.lineWidth = 2;
-    x.setLineDash([18, 13]);
-    x.lineDashOffset = -(g.time * 7) % 31;
-    x.shadowColor = "rgba(85, 214, 181, .4)";
-    x.shadowBlur = 5;
-    for (const source of g.buildings.filter(
-      (building) => building.team === "player" && building.type !== "turret" && buildingOperational(building),
-    )) {
-      x.beginPath();
-      x.arc(source.x, source.y, SUPPLY_RADIUS, 0, Math.PI * 2);
-      x.fill();
-      x.stroke();
-    }
-    x.restore();
-    const selectedResourceWorker = g.units.find((unit) =>
-      unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
-    const assignedResourceIndex = selectedResourceWorker && Number.isInteger(selectedResourceWorker.resourceTarget) &&
-      g.crystals[selectedResourceWorker.resourceTarget!]?.amount > 0
-      ? selectedResourceWorker.resourceTarget!
-      : -1;
-    const closestResourceIndex = selectedResourceWorker
-      ? assignedResourceIndex >= 0 ? assignedResourceIndex : g.crystals.reduce((best, node, index) => {
-          if (node.amount <= 0) return best;
-          if (best < 0) return index;
-          const currentDistance = Math.hypot(node.x - selectedResourceWorker.x, node.y - selectedResourceWorker.y);
-          const bestNode = g.crystals[best];
-          return currentDistance < Math.hypot(bestNode.x - selectedResourceWorker.x, bestNode.y - selectedResourceWorker.y) ? index : best;
-        }, -1)
-      : -1;
-    for (const [resourceIndex, q] of g.crystals.entries()) {
-      const kind = q.kind || "credits";
-      const crystalSprite = kind === "alloy" ? art.current.alloyCrystal : art.current.crystal;
-      if (q.amount > 0 && crystalSprite) {
-        x.save();
-        x.drawImage(crystalSprite, q.x - 34, q.y - 38, 68, 68);
-        x.restore();
-      } else if (q.amount > 0) {
-        x.shadowColor = "#74f6dc";
-        x.shadowBlur = 14;
-        x.fillStyle = kind === "alloy" ? "#e6a94f" : "#41d8c0";
-        for (let i = 0; i < 5; i++) {
-          x.beginPath();
-          x.moveTo(q.x - 18 + i * 8, q.y + 15);
-          x.lineTo(q.x - 12 + i * 8, q.y - 12 - (i % 2) * 12);
-          x.lineTo(q.x - 4 + i * 8, q.y + 15);
-          x.fill();
-        }
-        x.shadowBlur = 0;
-      }
-      if (resourceIndex === closestResourceIndex && q.amount > 0) {
-        x.save();
-        const label = `${kind === "alloy" ? "ALLOY" : "CREDITS"} Â· ${Math.ceil(q.amount)}`;
-        const labelY = q.y + 39 + (resourceIndex % 2) * 11;
-        x.textAlign = "center";
-        x.font = "800 8px system-ui";
-        const labelWidth = x.measureText(label).width + 12;
-        x.fillStyle = "rgba(3, 13, 15, .82)";
-        x.fillRect(q.x - labelWidth / 2, labelY - 10, labelWidth, 14);
-        x.fillStyle = kind === "alloy" ? "#ffd58a" : "#9cf8ea";
-        x.fillText(label, q.x, labelY);
-        x.restore();
-      }
-    }
-    const constructionQueueBadges = new Map<number, { order: number; color: string }[]>();
-    const selectedBuildWorkers = g.units.filter((unit) =>
-      unit.team === "player" &&
-      unit.type === "worker" &&
-      g.selected.includes(unit.id) &&
-      (unit.buildQueue?.length || unit.buildTarget),
-    );
-    const groupedBuildRoutes = new Map<string, { workers: Unit[]; sites: Building[] }>();
-    for (const worker of selectedBuildWorkers) {
-      const queue = worker.buildQueue || (worker.buildTarget ? [worker.buildTarget] : []);
-      const sites = queue
-        .map((buildingId) => g.buildings.find((building) =>
-          building.id === buildingId && building.team === worker.team && building.hp > 0 && (building.progress ?? 1) < 1,
-        ))
-        .filter((building): building is Building => Boolean(building));
-      if (!sites.length) continue;
-      const signature = sites.map((site) => site.id).join("-");
-      const route = groupedBuildRoutes.get(signature);
-      if (route) route.workers.push(worker);
-      else groupedBuildRoutes.set(signature, { workers: [worker], sites });
-    }
-    const routeColors = ["#6ae1cd", "#f6d366", "#78c9ff"];
-    [...groupedBuildRoutes.values()].forEach((route, routeIndex) => {
-      const color = routeColors[routeIndex % routeColors.length];
-      route.sites.forEach((site, siteIndex) => {
-        const badges = constructionQueueBadges.get(site.id) || [];
-        badges.push({ order: siteIndex + 1, color });
-        constructionQueueBadges.set(site.id, badges);
-      });
-      x.save();
-      x.strokeStyle = color;
-      x.fillStyle = color;
-      x.globalAlpha = .72;
-      x.lineWidth = 2;
-      x.setLineDash([9, 7]);
-      x.lineDashOffset = -(g.time * 18) % 16;
-      for (const worker of route.workers) {
-        x.beginPath();
-        x.moveTo(worker.x, worker.y);
-        x.lineTo(route.sites[0].x, route.sites[0].y);
-        x.stroke();
-      }
-      if (route.sites.length > 1) {
-        x.beginPath();
-        x.moveTo(route.sites[0].x, route.sites[0].y);
-        route.sites.slice(1).forEach((site) => x.lineTo(site.x, site.y));
-        x.stroke();
-      }
-      x.setLineDash([]);
-      route.sites.forEach((site) => {
-        x.beginPath();
-        x.arc(site.x, site.y, 6, 0, Math.PI * 2);
-        x.fill();
-      });
-      x.restore();
-    });
-    for (const objective of g.objectives || []) {
-      const intel = objectiveIntel(g, objective);
-      if (!intel.discovered) continue;
-      const operational = intelRelayOperational(objective);
-      const coolingDown = !operational && objective.rebuildAt !== undefined && g.time < objective.rebuildAt;
-      const color = !intel.visible ? "#78918c" : !operational ? coolingDown ? "#ef715c" : "#f5b85f" : objective.owner === "player" ? "#57d7c0" : objective.owner === "enemy" ? "#ef526f" : "#f5d77a";
-      const progress = Math.min(1, Math.abs(objective.capture) / OBJECTIVE_CAPTURE_TIME);
-      const occupants = relayOccupants(g, objective);
-      const selectedGarrison = occupants.some((unit) => g.selected.includes(unit.id));
-      x.save();
-      x.translate(objective.x, objective.y);
-      x.fillStyle = "rgba(0,0,0,.3)";
-      x.beginPath(); x.ellipse(0, 31, 46, 13, 0, 0, Math.PI * 2); x.fill();
-      x.globalAlpha = operational ? 1 : coolingDown ? .28 : .42 + (objective.rebuildProgress || 0) * .5;
-      if (art.current.intelRelay) {
-        const relaySize = INTEL_RELAY_RENDER_SIZE;
-        x.drawImage(art.current.intelRelay, -relaySize / 2, -relaySize * .54, relaySize, relaySize);
-      }
-      else {
-        x.fillStyle = "#172529";
-        x.strokeStyle = color;
-        x.lineWidth = 3;
-        x.beginPath(); x.ellipse(0, 6, 44, 32, 0, 0, Math.PI * 2); x.fill(); x.stroke();
-      }
-      x.globalAlpha = 1;
-      if (selectedGarrison) {
-        x.strokeStyle = "#ffe17d";
-        x.lineWidth = 3;
-        x.setLineDash([7, 5]);
-        x.beginPath(); x.ellipse(0, 16, 49, 35, 0, 0, Math.PI * 2); x.stroke();
-        x.setLineDash([]);
-      }
-      if (selectedGarrison && intel.visible && operational) {
-        x.strokeStyle = color;
-        x.lineWidth = 4;
-        x.beginPath(); x.arc(0, 10, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); x.stroke();
-      }
-      if (intel.visible && operational && objective.hp < objective.max) {
-        x.fillStyle = "rgba(3, 10, 12, .9)";
-        x.fillRect(-42, -67, 84, 7);
-        x.fillStyle = objective.hp / objective.max > .35 ? "#f5b85f" : "#ef526f";
-        x.fillRect(-41, -66, 82 * (objective.hp / objective.max), 5);
-      }
-      if (selectedGarrison && intel.visible && !operational) {
-        x.strokeStyle = color;
-        x.lineWidth = 4;
-        x.beginPath();
-        x.arc(0, 10, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (objective.rebuildProgress || 0));
-        x.stroke();
-        if (coolingDown) {
-          x.lineWidth = 5;
-          x.beginPath(); x.moveTo(-13, -3); x.lineTo(13, 23); x.moveTo(13, -3); x.lineTo(-13, 23); x.stroke();
-        }
-      }
-      if (selectedGarrison) {
-        for (let slot = 0; slot < RELAY_GARRISON_CAPACITY; slot++) {
-          x.fillStyle = intel.visible && operational && slot < occupants.length ? color : "rgba(4, 14, 17, .86)";
-          x.strokeStyle = color;
-          x.lineWidth = 1.5;
-          x.fillRect(-22 + slot * 12, 54, 8, 8);
-          x.strokeRect(-22 + slot * 12, 54, 8, 8);
-        }
-      }
-      x.restore();
-    }
-    for (const b of g.buildings) {
-      if (b.team === "enemy" && !isVisible(g, b, buildingStats[b.type].r)) continue;
-      const r = buildingStats[b.type].r,
-        sel = g.selected.includes(b.id),
-        player = b.team === "player",
-        accent = player ? "#57d7c0" : "#ef526f",
-        underConstruction = b.progress !== undefined && b.progress < 1;
-      x.save();
-      if (sel && b.type !== "turret" && buildingOperational(b)) {
-        x.strokeStyle = "rgba(87, 215, 192, .22)";
-        x.lineWidth = 2;
-        x.setLineDash([12, 10]);
-        x.beginPath();
-        x.arc(b.x, b.y, SUPPLY_RADIUS, 0, Math.PI * 2);
-        x.stroke();
-        x.setLineDash([]);
-      }
-      x.translate(b.x, b.y);
-      x.fillStyle = underConstruction ? "rgba(0,0,0,.08)" : "rgba(0,0,0,.22)";
-      x.shadowBlur = 0;
-      x.beginPath(); x.ellipse(0, r * .42, r * .86, r * .16, 0, 0, Math.PI * 2); x.fill();
-      x.shadowColor = "rgba(0,0,0,.45)";
-      x.shadowBlur = sel ? 8 : 0;
-      x.fillStyle = player ? "#12383b" : "#3a1d2b";
-      x.strokeStyle = sel ? "#f5d77a" : "#251b1b";
-      x.lineWidth = sel ? 4 : 2;
-      const buildingAtlas = art.current.buildings;
-      const crawlerAtlas = b.type === "hq" && b.packed ? art.current.commandCrawler : undefined;
-      const turretAtlas = b.type === "turret" ? art.current.turretDirections : undefined;
-      if (underConstruction) {
-        x.globalAlpha = b.constructionStarted ? Math.max(.2, b.progress * .78) : .14;
-        x.filter = "grayscale(.55) brightness(1.25)";
-      }
-      if (buildingAtlas || turretAtlas || crawlerAtlas) {
-        if (sel) {
-          x.shadowBlur = 0;
-          x.strokeStyle = "#f5d77a";
-          x.lineWidth = 3;
-          x.beginPath();
-          x.ellipse(0, r * .45, r * 1.12, r * .52, 0, 0, Math.PI * 2);
-          x.stroke();
-        }
-        const size = crawlerAtlas ? { w: 174, h: 145 } : buildingRenderSize[b.type];
-        x.shadowBlur = 0;
-        if (crawlerAtlas) {
-          x.drawImage(crawlerAtlas, -size.w / 2, -size.h / 2, size.w, size.h);
-        } else if (turretAtlas) {
-          const sw = turretAtlas.naturalWidth / 4;
-          const sh = turretAtlas.naturalHeight / 2;
-          const angle = Number.isFinite(b.turretFacing) ? b.turretFacing! : -Math.PI / 2;
-          const direction = ((Math.round((angle + Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
-          x.drawImage(
-            turretAtlas,
-            (direction % 4) * sw,
-            Math.floor(direction / 4) * sh,
-            sw,
-            sh,
-            -size.w / 2,
-            -size.h / 2,
-            size.w,
-            size.h,
-          );
-          if ((b.turretFireUntil || 0) > g.time && !underConstruction) {
-            drawWeaponFireCue(x, angle, .9, true);
-          }
-        } else if (buildingAtlas) {
-          const frame = { hq: 0, refinery: 1, barracks: 2, turret: 3 }[b.type];
-          const sw = buildingAtlas.naturalWidth / 2;
-          const sh = buildingAtlas.naturalHeight / 2;
-          x.drawImage(
-            buildingAtlas,
-            (frame % 2) * sw,
-            Math.floor(frame / 2) * sh,
-            sw,
-            sh,
-            -size.w / 2,
-            -size.h / 2,
-            size.w,
-            size.h,
-          );
-        }
-        // Team colors stay crisp and consistent even though both factions use
-        // the same painted base sprite.
-        x.fillStyle = accent;
-        x.shadowColor = accent;
-        x.shadowBlur = 4;
-        x.fillRect(-r * .34, r * .42, r * .68, 4);
-        x.beginPath();
-        x.arc(0, -r * .44, 3, 0, Math.PI * 2);
-        x.fill();
-        x.shadowBlur = 0;
-      } else if (b.type === "hq") {
-        x.beginPath();
-        x.moveTo(0, -r);
-        x.lineTo(r * 0.82, -r * 0.45);
-        x.lineTo(r * 0.82, r * 0.55);
-        x.lineTo(0, r);
-        x.lineTo(-r * 0.82, r * 0.55);
-        x.lineTo(-r * 0.82, -r * 0.45);
-        x.closePath();
-        x.fill();
-        x.stroke();
-        x.fillStyle = accent;
-        x.fillRect(-8, -r * 0.52, 16, r * 1.04);
-        x.fillRect(-r * 0.45, -8, r * 0.9, 16);
-        x.fillStyle = "rgba(225,246,236,.72)";
-        x.fillRect(-3, -r * .7, 6, r * .25);
-        x.fillRect(-r * .7, -3, r * .25, 6);
-      } else if (b.type === "barracks") {
-        x.fillRect(-r * 0.8, -r * 0.58, r * 1.6, r * 1.16);
-        x.strokeRect(-r * 0.8, -r * 0.58, r * 1.6, r * 1.16);
-        x.fillStyle = accent;
-        x.fillRect(-r * 0.55, -r * 0.3, r * 1.1, 7);
-        x.fillRect(-r * 0.55, r * 0.1, r * 1.1, 7);
-        x.fillStyle = "#0a1b1c";
-        x.fillRect(-r * 0.2, r * 0.32, r * 0.4, r * 0.28);
-      } else if (b.type === "turret") {
-        x.fillRect(-r * .58, -r * .32, r * 1.16, r * .86);
-        x.strokeRect(-r * .58, -r * .32, r * 1.16, r * .86);
-        x.fillStyle = "#081b1d";
-        x.beginPath(); x.arc(0, -r * .33, r * .42, 0, Math.PI * 2); x.fill(); x.stroke();
-        x.fillStyle = accent;
-        x.fillRect(-3, -r * 1.12, 6, r * .85);
-        x.fillRect(0, -r * 1.02, r * .8, 5);
-        x.fillStyle = "#dff8f0";
-        x.fillRect(r * .72, -r * 1.05, 6, 7);
-      } else {
-        x.beginPath();
-        x.arc(0, 0, r * 0.72, 0, 7);
-        x.fill();
-        x.stroke();
-        x.strokeStyle = accent;
-        x.lineWidth = 5;
-        x.beginPath();
-        x.arc(0, 0, r * 0.43, 0, 7);
-        x.stroke();
-        x.fillStyle = accent;
-        x.fillRect(-5, -r * 0.75, 10, r * 0.35);
-      }
-      if (underConstruction) {
-        x.globalAlpha = 1;
-        x.filter = "none";
-        x.shadowBlur = 0;
-        x.strokeStyle = b.constructionStarted ? "rgba(246, 211, 102, .9)" : "rgba(106, 225, 205, .82)";
-        x.lineWidth = 2;
-        x.setLineDash([6, 5]);
-        x.strokeRect(-r * .95, -r * .78, r * 1.9, r * 1.56);
-        x.beginPath();
-        x.moveTo(-r * .95, -r * .78); x.lineTo(r * .95, r * .78);
-        x.moveTo(r * .95, -r * .78); x.lineTo(-r * .95, r * .78);
-        x.moveTo(0, -r * .98); x.lineTo(0, r * .98);
-        x.stroke();
-        x.setLineDash([]);
-      }
-      if (b.type === "hq" && b.relocation) {
-        const progress = Math.max(0, Math.min(1, b.relocation.elapsed / b.relocation.duration));
-        x.globalAlpha = 1;
-        x.filter = "none";
-        x.strokeStyle = "rgba(246, 211, 102, .22)";
-        x.lineWidth = 7;
-        x.beginPath(); x.arc(0, 0, r + 20, 0, Math.PI * 2); x.stroke();
-        x.strokeStyle = "#f6d366";
-        x.beginPath(); x.arc(0, 0, r + 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); x.stroke();
-        x.fillStyle = "rgba(2, 10, 12, .88)";
-        x.fillRect(-52, r + 28, 104, 18);
-        x.fillStyle = "#f6d366";
-        x.textAlign = "center";
-        x.font = "800 9px system-ui";
-        x.fillText(b.relocation.mode === "pack" ? "PACKING HQ" : "DEPLOYING HQ", 0, r + 40);
-      } else if (b.type === "hq" && b.packed) {
-        x.fillStyle = "rgba(2, 10, 12, .88)";
-        x.fillRect(-58, r + 24, 116, 18);
-        x.fillStyle = accent;
-        x.textAlign = "center";
-        x.font = "800 9px system-ui";
-        x.fillText(b.mobileTarget ? "CRAWLER MOVING Â· 12" : "COMMAND CRAWLER", 0, r + 36);
-      }
-      x.restore();
-      bar(x, b.x - r, b.y - r - 13, r * 2, b.hp / b.max, accent);
-      if (b.rally) {
-        x.save();
-        x.strokeStyle = player ? "#f6d366" : "#f05b76";
-        x.setLineDash([5, 5]);
-        x.lineWidth = 2;
-        x.beginPath();
-        x.moveTo(b.x, b.y);
-        x.lineTo(b.rally.x, b.rally.y);
-        x.stroke();
-        x.setLineDash([]);
-        x.beginPath();
-        x.arc(b.rally.x, b.rally.y, 11, 0, Math.PI * 2);
-        x.stroke();
-        x.restore();
-      }
-      if (b.production) {
-        const p = Math.min(1, b.production.elapsed / b.production.duration);
-        bar(x, b.x - r, b.y - r - 23, r * 2, p, "#f6d366");
-        x.fillStyle = "#f6d366";
-        x.font = "800 8px system-ui";
-        x.fillText(
-          `${unitName(b.production.type)} ${Math.max(0, Math.ceil(b.production.duration - b.production.elapsed))}s${b.production.queue?.length ? ` Â· +${b.production.queue.length}` : ""}`,
-          b.x,
-          b.y - r - 28,
-        );
-      }
-      if (b.progress !== undefined && b.progress < 1) {
-        x.strokeStyle = b.constructionStarted ? "#f6d366" : "#6ae1cd";
-        x.lineWidth = 2;
-        x.setLineDash(b.constructionStarted ? [] : [5, 4]);
-        x.beginPath();
-        x.arc(
-          b.x,
-          b.y,
-          r + 8,
-          -Math.PI / 2,
-          -Math.PI / 2 + Math.PI * 2 * b.progress,
-        );
-        x.stroke();
-        x.setLineDash([]);
-        const seconds = Math.max(
-          0,
-          Math.ceil((b.constructionDuration || 6) * (1 - b.progress)),
-        );
-        x.fillStyle = b.constructionStarted ? "#f6d366" : "#8cf5e2";
-        x.font = "800 8px system-ui";
-        x.fillText(b.constructionStarted ? `BUILDING Â· ${seconds}s` : "WIREFRAME Â· WAITING FOR WORKER", b.x, b.y + r + 17);
-      }
-      const queueBadges = constructionQueueBadges.get(b.id) || [];
-      queueBadges.forEach((badge, badgeIndex) => {
-        const badgeX = b.x + r + 9 + badgeIndex * 23;
-        const badgeY = b.y - r - 8;
-        x.save();
-        x.shadowColor = badge.color;
-        x.shadowBlur = 8;
-        x.fillStyle = "rgba(3, 13, 15, .94)";
-        x.strokeStyle = badge.color;
-        x.lineWidth = 2;
-        x.beginPath();
-        x.arc(badgeX, badgeY, 10, 0, Math.PI * 2);
-        x.fill();
-        x.stroke();
-        x.shadowBlur = 0;
-        x.fillStyle = "#f4fffb";
-        x.font = "900 10px system-ui";
-        x.textAlign = "center";
-        x.textBaseline = "middle";
-        x.fillText(String(badge.order), badgeX, badgeY + .5);
-        x.restore();
-      });
-      if (b.type === "hq" && b.team === "player" && g.fortifyProduction) {
-        const p = Math.min(1, g.fortifyProduction.elapsed / g.fortifyProduction.duration);
-        x.strokeStyle = "#f6d366";
-        x.lineWidth = 3;
-        x.beginPath();
-        x.arc(b.x, b.y, r + 13, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p);
-        x.stroke();
-        x.fillStyle = "#f6d366";
-        x.font = "800 8px system-ui";
-        x.fillText(`FORTIFY Â· ${Math.max(0, Math.ceil(g.fortifyProduction.duration - g.fortifyProduction.elapsed))}s`, b.x, b.y + r + 28);
-      }
-      if (b.type === "hq" && b.team === "player" && g.doctrineProduction) {
-        const p = Math.min(1, g.doctrineProduction.elapsed / g.doctrineProduction.duration);
-        x.strokeStyle = "#78c9ff";
-        x.lineWidth = 3;
-        x.beginPath();
-        x.arc(b.x, b.y, r + 13, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p);
-        x.stroke();
-        x.fillStyle = "#9ed9ff";
-        x.font = "800 8px system-ui";
-        x.fillText(`${g.doctrineProduction.type === "air" ? "AIR" : "ARMOR"} DOCTRINE Â· ${Math.max(0, Math.ceil(g.doctrineProduction.duration - g.doctrineProduction.elapsed))}s`, b.x, b.y + r + 28);
-      }
-    }
-    const selectedTravelers = g.units.filter((unit) =>
-      unit.team === "player" &&
-      unit.type !== "worker" &&
-      !unit.garrisonedAt &&
-      g.selected.includes(unit.id) &&
-      unit.target &&
-      !unit.retreating &&
-      !unit.patrol,
-    );
-    for (const engage of [false, true]) {
-      const travelers = selectedTravelers.filter((unit) => Boolean(unit.moveEngage) === engage);
-      if (!travelers.length) continue;
-      const color = engage ? "#55d6b5" : "#f6d366";
-      const goal = travelers.reduce(
-        (sum, unit) => ({ x: sum.x + unit.target!.x, y: sum.y + unit.target!.y }),
-        { x: 0, y: 0 },
-      );
-      goal.x /= travelers.length;
-      goal.y /= travelers.length;
-      const pulse = 1 + Math.sin(g.time * 5) * .08;
-      x.save();
-      x.strokeStyle = color;
-      x.fillStyle = color;
-      x.lineWidth = 2;
-      x.globalAlpha = .66;
-      x.setLineDash([8, 7]);
-      x.lineDashOffset = -(g.time * 16) % 15;
-      for (const unit of travelers) {
-        x.beginPath();
-        x.moveTo(unit.x, unit.y);
-        x.lineTo(unit.target!.x, unit.target!.y);
-        x.stroke();
-      }
-      x.setLineDash([]);
-      x.globalAlpha = .96;
-      x.shadowColor = color;
-      x.shadowBlur = 12;
-      x.beginPath();
-      x.arc(goal.x, goal.y, 18 * pulse, 0, Math.PI * 2);
-      x.stroke();
-      x.shadowBlur = 0;
-      x.beginPath();
-      x.moveTo(goal.x - 25, goal.y); x.lineTo(goal.x - 8, goal.y);
-      x.moveTo(goal.x + 8, goal.y); x.lineTo(goal.x + 25, goal.y);
-      x.moveTo(goal.x, goal.y - 25); x.lineTo(goal.x, goal.y - 8);
-      x.moveTo(goal.x, goal.y + 8); x.lineTo(goal.x, goal.y + 25);
-      x.stroke();
-      const label = engage ? "MOVE + ENGAGE" : "DIRECT MOVE";
-      x.font = "900 8px system-ui";
-      x.textAlign = "center";
-      const labelWidth = x.measureText(label).width + 14;
-      x.fillStyle = "rgba(3, 15, 17, .9)";
-      x.fillRect(goal.x - labelWidth / 2, goal.y + 30, labelWidth, 16);
-      x.fillStyle = color;
-      x.fillText(label, goal.x, goal.y + 41);
-      x.restore();
-    }
-    for (const u of g.units) {
-      if (u.garrisonedAt) continue;
-      if (u.team === "enemy" && !isVisible(g, u, stats[u.type].r)) continue;
-      const s = stats[u.type],
-        sel = g.selected.includes(u.id),
-        player = u.team === "player",
-        accent = player ? "#70e2ce" : "#f05b76",
-        sentryMode = u.type === "trooper" && u.stance === "hold",
-        deployedCipher = u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile";
-      if (sel && unitCombatRange(u) > 0) {
-        x.save();
-        x.strokeStyle = "rgba(246, 211, 102, .78)";
-        x.fillStyle = "rgba(246, 211, 102, .025)";
-        x.lineWidth = 2;
-        x.setLineDash([7, 6]);
-        x.shadowColor = "rgba(246, 211, 102, .45)";
-        x.shadowBlur = 5;
-        x.beginPath();
-        x.arc(u.x, u.y, unitCombatRange(u), 0, Math.PI * 2);
-        x.fill();
-        x.stroke();
-        x.restore();
-      }
-      x.save();
-      x.translate(u.x, u.y + (u.type === "drone" && !sentryMode ? Math.sin(g.time * 5 + u.id) * 2 - 7 : 0));
-      x.fillStyle = "rgba(0,0,0,.26)";
-      x.shadowBlur = 0;
-      x.beginPath(); x.ellipse(0, s.r * .5, s.r * 1.08, s.r * .22, 0, 0, Math.PI * 2); x.fill();
-      x.shadowColor = "rgba(0,0,0,.55)";
-      x.shadowBlur = sel ? 7 : 0;
-      x.fillStyle = accent;
-      x.strokeStyle = sel ? "#ffe17d" : "#081314";
-      x.lineWidth = sel ? 3 : 2;
-      const restingAtlas = {
-        worker: art.current.workerDirections,
-        trooper: art.current.trooperDirections,
-        tank: art.current.tankDirections,
-        drone: art.current.droneDirections,
-        cipher: art.current.cipherDirections,
-      }[u.type];
-      const movementAtlases = {
-        worker: [restingAtlas, art.current.workerWalk, art.current.workerWalkC],
-        trooper: [restingAtlas, art.current.trooperWalk, art.current.trooperWalkC],
-        // Tank hulls stay visually rigid. Track movement is animated as a
-        // scrolling tread overlay instead of swapping whole-body poses.
-        tank: [restingAtlas],
-        drone: [restingAtlas, art.current.droneMove],
-        cipher: [restingAtlas],
-      }[u.type].filter((atlas): atlas is HTMLImageElement => Boolean(atlas));
-      const firing = (u.attackUntil || 0) > g.time;
-      const miningFrame = Boolean(u.mining) && Math.floor((g.time + u.id * .041) * 8) % 2 === 1;
-      const movementFrame = Math.floor((g.time + u.id * .037) * 8) % Math.max(1, movementAtlases.length);
-      const directionalAtlas = sentryMode
-        ? art.current.turretDirections || restingAtlas
-        : miningFrame
-          ? art.current.workerMine || restingAtlas
-          : u.moving
-            ? movementAtlases[movementFrame] || restingAtlas
-            : restingAtlas;
-      const unitAtlas = deployedCipher ? art.current.cipherDeployed : directionalAtlas || art.current.units;
-      if (unitAtlas) {
-        if (sel) {
-          x.shadowBlur = 0;
-          x.strokeStyle = "#ffe17d";
-          x.lineWidth = 2.5;
-          x.beginPath();
-          x.ellipse(0, s.r * .48, s.r * 1.18, s.r * .52, 0, 0, Math.PI * 2);
-          x.stroke();
-        }
-        let source: { x: number; y: number; w: number; h: number };
-        const facingAngle = Number.isFinite(u.facing)
-          ? u.facing!
-          : u.team === "player" ? 0 : Math.PI;
-        if (deployedCipher) {
-          source = { x: 0, y: 0, w: unitAtlas.naturalWidth, h: unitAtlas.naturalHeight };
-        } else if (directionalAtlas) {
-          const cellWidth = unitAtlas.naturalWidth / 4;
-          const cellHeight = unitAtlas.naturalHeight / 2;
-          // Sheet order: N, NE, E, SE / S, SW, W, NW.
-          const direction = ((Math.round((facingAngle + Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
-          source = {
-            x: (direction % 4) * cellWidth,
-            y: Math.floor(direction / 4) * cellHeight,
-            w: cellWidth,
-            h: cellHeight,
-          };
-        } else {
-          const heading = u.target
-            ? Math.atan2(u.target.y - u.y, u.target.x - u.x) + Math.PI / 2
-            : 0;
-          x.rotate(heading);
-          const cellWidth = unitAtlas.naturalWidth / 3;
-          source = {
-            worker: { x: 0, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
-            trooper: { x: cellWidth, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
-            tank: { x: cellWidth * 2, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
-            drone: { x: cellWidth * 2, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
-            cipher: { x: 0, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
-          }[u.type];
-        }
-        const size = deployedCipher
-          ? { w: 76, h: 58 }
-          : sentryMode
-            ? { w: 64, h: 64 }
-            : unitRenderSize[u.type];
-        x.shadowBlur = 0;
-        if (deployedCipher && u.cipherMode !== "deployed") x.globalAlpha = .68;
-        if (sentryMode) {
-          x.save();
-          x.strokeStyle = player ? "rgba(112, 226, 206, .88)" : "rgba(240, 91, 118, .86)";
-          x.fillStyle = "rgba(5, 18, 20, .78)";
-          x.lineWidth = 2;
-          x.shadowColor = accent;
-          x.shadowBlur = 8;
-          x.beginPath();
-          x.ellipse(0, 14, 25, 10, 0, 0, Math.PI * 2);
-          x.fill();
-          x.stroke();
-          for (const braceAngle of [-Math.PI / 6, Math.PI / 2, Math.PI * 7 / 6]) {
-            x.beginPath();
-            x.moveTo(Math.cos(braceAngle) * 15, 13 + Math.sin(braceAngle) * 5);
-            x.lineTo(Math.cos(braceAngle) * 31, 16 + Math.sin(braceAngle) * 12);
-            x.stroke();
-          }
-          x.restore();
-        }
-        if (u.type === "tank" && u.moving) {
-          // Keep the painted hull completely rigid. Movement is communicated
-          // behind the tank with paired tread impressions and a restrained
-          // dust wake instead of drawing animated bars across the sprite.
-          const heading = Number.isFinite(u.facing) ? u.facing! : u.team === "player" ? 0 : Math.PI;
-          const forwardX = Math.cos(heading);
-          const forwardY = Math.sin(heading);
-          const sideX = -forwardY;
-          const sideY = forwardX;
-          const treadPulse = (g.time * 22 + u.id * 1.7) % 9;
-          x.save();
-          x.lineCap = "round";
-          x.lineWidth = 3;
-          for (let mark = 0; mark < 3; mark += 1) {
-            const rear = 25 + mark * 9 + treadPulse;
-            const fade = .34 - mark * .075;
-            x.strokeStyle = `rgba(7, 12, 12, ${fade})`;
-            for (const side of [-1, 1]) {
-              const centerX = -forwardX * rear + sideX * 13.5 * side;
-              const centerY = -forwardY * rear + sideY * 13.5 * side;
-              x.beginPath();
-              x.moveTo(centerX - forwardX * 2.8, centerY - forwardY * 2.8);
-              x.lineTo(centerX + forwardX * 2.8, centerY + forwardY * 2.8);
-              x.stroke();
-            }
-          }
-          x.fillStyle = "rgba(130, 116, 92, .12)";
-          for (const side of [-1, 1]) {
-            const dustX = -forwardX * 30 + sideX * 13 * side;
-            const dustY = -forwardY * 30 + sideY * 13 * side;
-            x.beginPath();
-            x.arc(dustX, dustY, 4 + Math.sin(g.time * 8 + u.id + side) * .7, 0, Math.PI * 2);
-            x.fill();
-          }
-          x.restore();
-        }
-        x.drawImage(
-          unitAtlas,
-          source.x,
-          source.y,
-          source.w,
-          source.h,
-          -size.w / 2,
-          -size.h / 2,
-          size.w,
-          size.h,
-        );
-        if (firing) {
-          if (sentryMode) drawWeaponFireCue(x, facingAngle, .68, true);
-          else if (u.type === "tank") drawWeaponFireCue(x, facingAngle, 1.12, true);
-          else if (u.type === "trooper") drawWeaponFireCue(x, facingAngle, .62, false);
-        }
-        x.fillStyle = accent;
-        x.shadowColor = accent;
-        x.shadowBlur = 3;
-        x.fillRect(-s.r * .42, s.r * .43, s.r * .84, 3);
-        x.shadowBlur = 0;
-        if (u.type === "worker" && (u.building || u.repairing)) {
-          const phase = g.time * 15 + u.id;
-          const effectColor = u.building ? "#f6d366" : "#70e2ce";
-          const toolX = Math.cos(u.facing || 0) * 22;
-          const toolY = Math.sin(u.facing || 0) * 22;
-          x.save();
-          x.strokeStyle = effectColor;
-          x.fillStyle = effectColor;
-          x.lineWidth = 2.4;
-          x.shadowColor = effectColor;
-          x.shadowBlur = 8;
-          x.beginPath();
-          x.moveTo(Math.cos(u.facing || 0) * 7, Math.sin(u.facing || 0) * 7);
-          x.lineTo(toolX, toolY);
-          x.stroke();
-          for (let spark = 0; spark < 4; spark++) {
-            const angle = phase + spark * Math.PI / 2;
-            const radius = 4 + ((spark + Math.floor(g.time * 12)) % 3) * 2;
-            x.beginPath();
-            x.arc(toolX + Math.cos(angle) * radius, toolY + Math.sin(angle) * radius, 1.5, 0, Math.PI * 2);
-            x.fill();
-          }
-          x.restore();
-        }
-      } else if (u.type === "tank") {
-        x.fillRect(-s.r, -s.r * .62, s.r * 2, s.r * 1.24);
-        x.strokeRect(-s.r, -s.r * .62, s.r * 2, s.r * 1.24);
-        x.fillStyle = "#102629";
-        x.fillRect(-s.r * .72, -s.r * .8, 7, s.r * 1.6);
-        x.fillRect(s.r * .55, -s.r * .8, 7, s.r * 1.6);
-        x.fillStyle = "#d5f4e9"; x.fillRect(0, -3, s.r + 13, 6);
-        x.fillStyle = accent; x.beginPath(); x.arc(-s.r * .55, 0, 3, 0, 7); x.arc(s.r * .55, 0, 3, 0, 7); x.fill();
-      } else if (u.type === "trooper") {
-        x.beginPath(); x.moveTo(0, -s.r); x.lineTo(s.r * .8, s.r * .55); x.lineTo(0, s.r); x.lineTo(-s.r * .8, s.r * .55); x.closePath(); x.fill(); x.stroke();
-        x.fillStyle = "#d5f4e9"; x.fillRect(-3, -s.r * .38, 6, 7);
-      } else {
-        x.beginPath();
-        x.arc(0, 0, s.r * 0.82, 0, 7);
-        x.fill();
-        x.stroke();
-        x.fillStyle = "#d5f4e9";
-        x.fillRect(3, -3, 10, 6);
-      }
-      x.restore();
-      bar(
-        x,
-        u.x - s.r,
-        u.y - s.r - 9,
-        s.r * 2,
-        u.hp / u.max,
-        player ? "#55d6b5" : "#ed526d",
-      );
-      if (u.type === "cipher" && (u.cipherMode === "deploying" || u.cipherMode === "packing")) {
-        const duration = u.cipherMode === "deploying" ? CIPHER_DEPLOY_DURATION : CIPHER_PACK_DURATION;
-        bar(x, u.x - s.r, u.y - s.r - 15, s.r * 2, (u.cipherProgress || 0) / duration, "#f6d366");
-      }
-      if ((u.level || 1) > 1) {
-        x.fillStyle = "#f6d366";
-        x.font = "900 9px system-ui";
-        x.textAlign = "center";
-        x.fillText((u.level || 1) === 3 ? "â—†â—†" : "â—†", u.x, u.y - s.r - 14);
-      }
-      if (isIdleWorker(g, u)) {
-        const pulse = 1 + Math.sin(g.time * 5 + u.id) * .12;
-        x.save();
-        x.translate(u.x, u.y - s.r - 25);
-        x.rotate(Math.PI / 4);
-        x.fillStyle = "rgba(4, 27, 28, .9)";
-        x.strokeStyle = "#70e2ce";
-        x.lineWidth = 2;
-        x.shadowColor = "#55d6b5";
-        x.shadowBlur = 9;
-        x.fillRect(-6 * pulse, -6 * pulse, 12 * pulse, 12 * pulse);
-        x.strokeRect(-6 * pulse, -6 * pulse, 12 * pulse, 12 * pulse);
-        x.restore();
-      }
-      if (unitInSupplyRange(g, u)) {
-        const shieldX = u.x + s.r + 4;
-        const shieldY = u.y - s.r - 4;
-        x.save();
-        x.translate(shieldX, shieldY);
-        x.fillStyle = player ? "rgba(85, 214, 181, .74)" : "rgba(237, 82, 109, .72)";
-        x.strokeStyle = player ? "#b8fff0" : "#ffc1cc";
-        x.lineWidth = 1.3;
-        x.shadowColor = player ? "#55d6b5" : "#ed526d";
-        x.shadowBlur = 6;
-        x.beginPath();
-        x.moveTo(0, -7);
-        x.lineTo(6, -4);
-        x.lineTo(5, 3);
-        x.quadraticCurveTo(3, 7, 0, 9);
-        x.quadraticCurveTo(-3, 7, -5, 3);
-        x.lineTo(-6, -4);
-        x.closePath();
-        x.fill();
-        x.stroke();
-        x.restore();
-      }
-    }
-    for (const s of g.shots || []) {
-      const p = 1 - s.life / s.maxLife,
-        px = s.x + (s.tx - s.x) * p,
-        py = s.y + (s.ty - s.y) * p;
-      if (!isVisible(g, { x: px, y: py }, 12)) continue;
-      x.save();
-      x.strokeStyle = s.team === "player" ? "#ffe17d" : "#ff7690";
-      x.fillStyle = x.strokeStyle;
-      x.shadowColor = x.strokeStyle;
-      x.shadowBlur = s.kind === "shell" ? 10 : 5;
-      if (s.kind === "shell") {
-        x.beginPath();
-        x.arc(px, py, 4, 0, Math.PI * 2);
-        x.fill();
-      } else {
-        x.lineWidth = 2;
-        x.beginPath();
-        x.moveTo(px - (s.tx - s.x) * 0.035, py - (s.ty - s.y) * 0.035);
-        x.lineTo(px, py);
-        x.stroke();
-      }
-      x.restore();
-    }
-    for (const n of g.damageNumbers || []) {
-      if (!isVisible(g, n, 18)) continue;
-      x.save();
-      x.globalAlpha = Math.min(1, n.life * 2);
-      x.fillStyle = n.team === "player" ? "#ffe17d" : "#ff8496";
-      x.strokeStyle = "#071719";
-      x.lineWidth = 3;
-      x.font = "900 13px system-ui";
-      x.textAlign = "center";
-      x.strokeText(`-${n.amount}`, n.x, n.y);
-      x.fillText(`-${n.amount}`, n.x, n.y);
-      x.restore();
-    }
-    // Real RTS fog: black is unexplored, grey is explored but currently out
-    // of sight, and enemies are only drawn while a player source can see them.
-    // Paint only the shroud cells.  Do not erase holes from the canvas here:
-    // destination-out would also erase the terrain and friendly units drawn
-    // underneath, leaving the page background visible instead of the game.
-    if (g.fogEnabled) {
-      const vision = playerVision(g);
-      x.save();
-      for (let row = 0; row < FOG_ROWS; row++)
-        for (let col = 0; col < FOG_COLS; col++) {
-          const index = row * FOG_COLS + col;
-          const cx = col * FOG_CELL + FOG_CELL / 2;
-          const cy = row * FOG_CELL + FOG_CELL / 2;
-          const currentlyVisible = vision.some(
-            (v) => Math.hypot(v.x - cx, v.y - cy) <= v.r + FOG_CELL * 0.9,
-          );
-          if (currentlyVisible) continue;
-          x.fillStyle = g.fogSeen[index]
-            ? "rgba(2, 8, 12, .72)"
-            : "rgba(2, 6, 9, .98)";
-          x.fillRect(col * FOG_CELL, row * FOG_CELL, FOG_CELL + 1, FOG_CELL + 1);
-        }
-      x.restore();
-    }
-    if (pointer.current?.drag) {
-      const p = pointer.current,
-        now = screenToWorld(p.x, p.y);
-      x.fillStyle = "rgba(85,214,181,.12)";
-      x.strokeStyle = "#55d6b5";
-      x.fillRect(p.wx, p.wy, now.x - p.wx, now.y - p.wy);
-      x.strokeRect(p.wx, p.wy, now.x - p.wx, now.y - p.wy);
-    }
-    x.restore();
-    // minimap
-    const mw = 132,
-      mh = 82,
-      mx = w - mw - 12,
-      my = 12;
-    x.fillStyle = "rgba(2,6,8,.98)";
-    x.fillRect(mx, my, mw, mh);
-    x.strokeStyle = "#335a59";
-    x.strokeRect(mx, my, mw, mh);
-    for (let row = 0; row < FOG_ROWS; row++)
-      for (let col = 0; col < FOG_COLS; col++) {
-        if (!g.fogSeen[row * FOG_COLS + col]) continue;
-        x.fillStyle = "rgba(58, 112, 106, .38)";
-        x.fillRect(mx + (col / FOG_COLS) * mw, my + (row / FOG_ROWS) * mh, mw / FOG_COLS + 1, mh / FOG_ROWS + 1);
-      }
-    x.fillStyle = "rgba(118, 126, 120, .72)";
-    for (const ridge of TACTICAL_PLATEAUS) {
-      x.beginPath();
-      x.ellipse(mx + (ridge.x / W) * mw, my + (ridge.y / H) * mh, (ridge.rx / W) * mw, (ridge.ry / H) * mh, ridge.rotation, 0, Math.PI * 2);
-      x.fill();
-    }
-    for (const o of [...g.buildings, ...g.units]) {
-      if (isUnit(o) && o.garrisonedAt) continue;
-      if (o.team === "enemy" && !isVisible(g, o, 0)) continue;
-      x.fillStyle = o.team === "player" ? "#55d6b5" : "#ed526d";
-      x.fillRect(mx + (o.x / W) * mw - 2, my + (o.y / H) * mh - 2, 4, 4);
-    }
-    for (const objective of g.objectives || []) {
-      const intel = objectiveIntel(g, objective);
-      if (!intel.discovered) continue;
-      x.fillStyle = !intel.visible ? "#78918c" : !intelRelayOperational(objective) ? "#f08a5d" : objective.owner === "player" ? "#55d6b5" : objective.owner === "enemy" ? "#ed526d" : "#f6d366";
-      x.beginPath();
-      x.arc(mx + (objective.x / W) * mw, my + (objective.y / H) * mh, 3, 0, Math.PI * 2);
-      x.fill();
-    }
-    const activeAlerts = (g.attackAlerts || []).filter((alert) => alert.team === "player" && alert.expiresAt > g.time);
-    for (const alert of activeAlerts) {
-      const object = [...g.units, ...g.buildings].find((candidate) => candidate.id === alert.targetId && candidate.team === "player");
-      const ax = mx + (((object?.x ?? alert.x) / W) * mw);
-      const ay = my + (((object?.y ?? alert.y) / H) * mh);
-      const pulse = 7 + (Math.sin((g.time - alert.startedAt) * 10) + 1) * 2.5;
-      x.save();
-      x.strokeStyle = "#ff3657";
-      x.lineWidth = 2;
-      x.shadowColor = "#ff183f";
-      x.shadowBlur = 8;
-      x.globalAlpha = .7 + Math.sin((g.time - alert.startedAt) * 12) * .25;
-      x.strokeRect(ax - pulse / 2, ay - pulse / 2, pulse, pulse);
-      x.restore();
-    }
-    x.strokeStyle = "#f6d366";
-    x.strokeRect(
-      mx + ((g.camera.x - w / (2 * g.zoom)) / W) * mw,
-      my + ((g.camera.y - h / (2 * g.zoom)) / H) * mh,
-      (w / g.zoom / W) * mw,
-      (h / g.zoom / H) * mh,
-    );
-  }
-  function bar(
-    x: CanvasRenderingContext2D,
-    bx: number,
-    by: number,
-    w: number,
-    p: number,
-    color: string,
-  ) {
-    x.fillStyle = "#061011";
-    x.fillRect(bx, by, w, 4);
-    x.fillStyle = color;
-    x.fillRect(bx, by, w * Math.max(0, p), 4);
-  }
-  const commitTravelChoice = (world: P, choice: "engage" | "direct") => {
-    const g = game.current;
-    const combat = g.units.filter((unit) =>
-      unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
-    setMoveChooser(null);
-    if (!combat.length) {
-      g.message = "Select Soldiers, Tanks, or Drones before issuing a travel order.";
-      sync();
-      return;
-    }
-    g.mode = choice === "engage" ? "move-engage" : "move";
-    command(world.x, world.y);
-  };
-  const pd = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    setMoveChooser(null);
-    const r = canvas.current!.getBoundingClientRect(),
-      sx = e.clientX - r.left,
-      sy = e.clientY - r.top,
-      wp = screenToWorld(sx, sy);
-    if (e.pointerType === "touch") {
-      touchPoints.current.set(e.pointerId, { x: sx, y: sy });
-      if (touchPoints.current.size >= 2) {
-        if (moveGesture.current?.timer) clearTimeout(moveGesture.current.timer);
-        moveGesture.current = null;
-        const [a, b] = [...touchPoints.current.values()];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        pinch.current = {
-          distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
-          zoom: game.current.zoom,
-          worldMid: screenToWorld(mid.x, mid.y),
-        };
-        pinchConsumed.current = true;
-        pointer.current = null;
-        canvas.current!.setPointerCapture(e.pointerId);
-        return;
-      }
-    }
-    pointer.current = {
-      x: sx,
-      y: sy,
-      wx: wp.x,
-      wy: wp.y,
-      drag: false,
-      start: { x: sx, y: sy },
-    };
-    canvas.current!.setPointerCapture(e.pointerId);
-    const g = game.current;
-    const hasSelectedCombat = g.units.some((unit) =>
-      unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
-    const hitFriendly = [...g.units, ...g.buildings].some((object) =>
-      object.team === "player" && Math.hypot(object.x - wp.x, object.y - wp.y) < 55);
-    const mw = 132, mh = 82, mx = canvas.current!.clientWidth - mw - 12, my = 12;
-    const overMinimap = sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh;
-    if (g.mode === "select" && hasSelectedCombat && !hitFriendly && !overMinimap) {
-      const gesture = {
-        opened: false,
-        start: { x: sx, y: sy },
-        world: wp,
-        choice: null as "engage" | "direct" | null,
-        timer: undefined as ReturnType<typeof setTimeout> | undefined,
-      };
-      gesture.timer = setTimeout(() => {
-        if (moveGesture.current !== gesture || pointer.current?.drag) return;
-        gesture.opened = true;
-        setMoveChooser({
-          x: Math.max(112, Math.min(canvas.current!.clientWidth - 112, sx)),
-          y: Math.max(112, Math.min(canvas.current!.clientHeight - 112, sy)),
-          world: wp,
-          choice: null,
-        });
-      }, 420);
-      moveGesture.current = gesture;
-    }
-  };
-  const pm = (e: React.PointerEvent) => {
-    const r = canvas.current!.getBoundingClientRect(),
-      sx = e.clientX - r.left,
-      sy = e.clientY - r.top;
-    if (e.pointerType === "touch" && touchPoints.current.has(e.pointerId)) {
-      touchPoints.current.set(e.pointerId, { x: sx, y: sy });
-      if (pinch.current && touchPoints.current.size >= 2) {
-        const [a, b] = [...touchPoints.current.values()];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
-        const nextZoom = Math.max(0.55, Math.min(1.7, pinch.current.zoom * (distance / pinch.current.distance)));
-        const g = game.current;
-        g.zoom = nextZoom;
-        moveCameraTo(
-          pinch.current.worldMid.x - (mid.x - canvas.current!.clientWidth / 2) / nextZoom,
-          pinch.current.worldMid.y - (mid.y - canvas.current!.clientHeight / 2) / nextZoom,
-        );
-        return;
-      }
-    }
-    if (!pointer.current) return;
-    const p = pointer.current;
-    const gesture = moveGesture.current;
-    if (gesture?.opened) {
-      const dy = sy - gesture.start.y;
-      const choice = dy < -34 ? "engage" : dy > 34 ? "direct" : null;
-      if (choice !== gesture.choice) {
-        gesture.choice = choice;
-        setMoveChooser({
-          x: Math.max(112, Math.min(canvas.current!.clientWidth - 112, gesture.start.x)),
-          y: Math.max(112, Math.min(canvas.current!.clientHeight - 112, gesture.start.y)),
-          world: gesture.world,
-          choice,
-        });
-      }
-      p.x = sx;
-      p.y = sy;
-      return;
-    }
-    if (Math.hypot(sx - p.start.x, sy - p.start.y) > 12) {
-      if (gesture?.timer) clearTimeout(gesture.timer);
-      moveGesture.current = null;
-      p.drag = true;
-    }
-    if (p.drag) {
-      const dx = sx - p.x,
-        dy = sy - p.y;
-      if (matchMedia("(pointer: coarse)").matches) {
-        game.current.camera.x -= dx / game.current.zoom;
-        game.current.camera.y -= dy / game.current.zoom;
-        p.wx = screenToWorld(sx, sy).x;
-        p.wy = screenToWorld(sx, sy).y;
-      }
-      p.x = sx;
-      p.y = sy;
-    }
-  };
-  const pu = (e: React.PointerEvent) => {
-    if (e.pointerType === "touch") {
-      touchPoints.current.delete(e.pointerId);
-      if (pinchConsumed.current) {
-        if (touchPoints.current.size < 2) pinch.current = null;
-        if (touchPoints.current.size === 0) pinchConsumed.current = false;
-        pointer.current = null;
-        return;
-      }
-    }
-    const gesture = moveGesture.current;
-    if (gesture?.timer) clearTimeout(gesture.timer);
-    moveGesture.current = null;
-    if (gesture?.opened) {
-      pointer.current = null;
-      if (gesture.choice) commitTravelChoice(gesture.world, gesture.choice);
-      return;
-    }
-    const p = pointer.current;
-    if (!p) return;
-    const r = canvas.current!.getBoundingClientRect(),
-      sx = e.clientX - r.left,
-      sy = e.clientY - r.top,
-      wp = screenToWorld(sx, sy),
-      g = game.current;
-    if (!p.drag) g.matchStats.playerActions++;
-    // The minimap is an interactive navigation control, not part of the world.
-    const mw = 132, mh = 82, mx = canvas.current!.clientWidth - mw - 12, my = 12;
-    if (!p.drag && sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh) {
-      const alerts = (g.attackAlerts || [])
-        .filter((alert) => alert.team === "player" && alert.expiresAt > g.time)
-        .sort((a, b) => b.startedAt - a.startedAt);
-      const tappedAlert = alerts.find((alert) => {
-        const object = [...g.units, ...g.buildings].find((candidate) => candidate.id === alert.targetId && candidate.team === "player");
-        const ax = mx + (((object?.x ?? alert.x) / W) * mw);
-        const ay = my + (((object?.y ?? alert.y) / H) * mh);
-        return Math.hypot(sx - ax, sy - ay) <= 16;
-      });
-      const focus = tappedAlert
-        ? [...g.units, ...g.buildings].find((candidate) => candidate.id === tappedAlert.targetId && candidate.team === "player") || tappedAlert
-        : { x: ((sx - mx) / mw) * W, y: ((sy - my) / mh) * H };
-      moveCameraTo(focus.x, focus.y);
-      g.message = tappedAlert ? "Camera jumped to the latest attack alert." : "Viewport moved to minimap location.";
-      pointer.current = null;
-      sync();
-      return;
-    }
-    if (p.drag && !matchMedia("(pointer: coarse)").matches) {
-      const x1 = Math.min(p.wx, wp.x),
-        x2 = Math.max(p.wx, wp.x),
-        y1 = Math.min(p.wy, wp.y),
-        y2 = Math.max(p.wy, wp.y);
-      const boxed = g.units
-        .filter(
-          (u) =>
-            u.team === "player" && !u.garrisonedAt && u.x > x1 && u.x < x2 && u.y > y1 && u.y < y2,
-        )
-        .map((u) => u.id);
-      g.selected = e.shiftKey
-        ? [...new Set([...g.selected, ...boxed])]
-        : boxed;
-      g.message = g.selected.length
-        ? `${g.selected.length} units selected.`
-        : "No units in selection box.";
-    } else if (!p.drag) {
-      const selectedUnits = g.units.filter(
-        (u) => u.team === "player" && g.selected.includes(u.id),
-      );
-      const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
-      const resourceTap = g.crystals
-        .map((resource, index) => ({ resource, index }))
-        .filter(({ resource }) => resource.amount > 0 && isVisible(g, resource, 24))
-        .sort((a, b) => Math.hypot(a.resource.x - wp.x, a.resource.y - wp.y) - Math.hypot(b.resource.x - wp.x, b.resource.y - wp.y))[0];
-      const friendlyUnitTap = g.units
-        .filter((unit) => unit.team === "player" && !unit.garrisonedAt)
-        .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))
-        .find((unit) => Math.hypot(unit.x - wp.x, unit.y - wp.y) < Math.max(42, stats[unit.type].r + 28));
-      const relayTap = (g.objectives || [])
-        .filter((objective) => objectiveIntel(g, objective).visible)
-        .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))[0];
-      if (
-        g.mode === "select" &&
-        selectedWorkers.length &&
-        resourceTap &&
-        Math.hypot(resourceTap.resource.x - wp.x, resourceTap.resource.y - wp.y) < 48
-      ) {
-        command(resourceTap.resource.x, resourceTap.resource.y);
-        lastTap.current = null;
-        pointer.current = null;
-        return;
-      }
-      if (g.mode === "select" && !friendlyUnitTap && relayTap && Math.hypot(relayTap.x - wp.x, relayTap.y - wp.y) < 72) {
-        if (selectedUnits.length) {
-          command(wp.x, wp.y);
-        } else {
-          const occupants = relayOccupants(g, relayTap, "player");
-          g.selected = occupants.map((unit) => unit.id);
-          g.message = !intelRelayOperational(relayTap)
-            ? relayTap.rebuildAt !== undefined && g.time < relayTap.rebuildAt
-              ? `INTEL RELAY OFFLINE Â· reconstruction begins in ${Math.max(1, Math.ceil(relayTap.rebuildAt - g.time))}s.`
-              : `INTEL RELAY REBUILDING Â· ${Math.round((relayTap.rebuildProgress || 0) * 100)}% complete.`
-            : occupants.length
-            ? `${occupants.length}/${RELAY_GARRISON_CAPACITY} relay Troopers selected Â· tap ground to deploy them.`
-            : `INTEL RELAY Â· ${relayOccupants(g, relayTap).length}/${RELAY_GARRISON_CAPACITY} occupied.`;
-        }
-        lastTap.current = null;
-        pointer.current = null;
-        sync();
-        return;
-      }
-      const nearestBuilding = g.buildings
-        .filter((building) => building.team === "player")
-        .sort(
-          (a, b) =>
-            Math.hypot(a.x - wp.x, a.y - wp.y) -
-            Math.hypot(b.x - wp.x, b.y - wp.y),
-        )[0];
-      const buildingTap = nearestBuilding &&
-        Math.hypot(nearestBuilding.x - wp.x, nearestBuilding.y - wp.y) <
-          buildingStats[nearestBuilding.type].r + 18
-          ? nearestBuilding
-          : undefined;
-      const hit = buildingTap || friendlyUnitTap || [...g.units, ...g.buildings]
-        .filter((o) => o.team === "player" && (!isUnit(o) || !o.garrisonedAt))
-        .sort(
-          (a, b) =>
-            Math.hypot(a.x - wp.x, a.y - wp.y) -
-            Math.hypot(b.x - wp.x, b.y - wp.y),
-        )[0];
-      const hitDistance = hit
-        ? Math.hypot(hit.x - wp.x, hit.y - wp.y)
-        : Infinity;
-      const hitWireframe = hit && g.buildings.find((building) =>
-        building.id === hit.id && (building.progress ?? 1) < 1,
-      );
-      if (hitWireframe && hitDistance < 55) {
-        const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
-        if (g.mode === "select" && selectedWorkers.length) {
-          selectedWorkers.forEach((worker) => assignWorkerToPendingConstruction(worker, hitWireframe.id));
-          g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to the ${hitWireframe.type} wireframe.`;
-          lastTap.current = null;
-          pointer.current = null;
-          sync();
-          return;
-        }
-        g.selected = [hitWireframe.id];
-        g.mode = "select";
-        g.message = `${hitWireframe.type.toUpperCase()} wireframe selected Â· cancel it below or leave it in the Worker queue.`;
-        lastTap.current = { id: hitWireframe.id, time: performance.now() };
-        pointer.current = null;
-        sync();
-        return;
-      }
-      // Friendly structures take tap priority over movement. A single tap on a
-      // building clears the current unit group and opens that building's
-      // commands instead of silently ordering the units toward it.
-      if (g.mode === "select" && buildingTap && selectedUnits.length) {
-        g.selected = [buildingTap.id];
-        g.message = `${buildingTap.type === "turret" ? "SENTRY TURRET" : buildingTap.type.toUpperCase()} selected.`;
-        lastTap.current = { id: buildingTap.id, time: performance.now() };
-        pointer.current = null;
-        sync();
-        return;
-      }
-      if (hit && hitDistance < 55 && g.mode === "select") {
-        const now = performance.now(),
-          unit = g.units.find((u) => u.id === hit.id),
-          building = g.buildings.find((b) => b.id === hit.id),
-          repeat =
-            lastTap.current?.id === hit.id && now - lastTap.current.time < 350;
-        if (unit && repeat) {
-          const halfW = canvas.current!.clientWidth / (2 * g.zoom),
-            halfH = canvas.current!.clientHeight / (2 * g.zoom);
-          g.selected = g.units
-            .filter(
-              (u) =>
-                u.team === "player" &&
-                !u.garrisonedAt &&
-                u.type === unit.type &&
-                u.x >= g.camera.x - halfW &&
-                u.x <= g.camera.x + halfW &&
-                u.y >= g.camera.y - halfH &&
-                u.y <= g.camera.y + halfH,
-            )
-            .map((u) => u.id);
-          g.message = `Selected ${g.selected.length} visible ${unitName(unit.type).toLowerCase()}${g.selected.length === 1 ? "" : "s"}.`;
-          lastTap.current = null;
-        } else if (
-          building &&
-          repeat &&
-          ["hq", "barracks"].includes(building.type)
-        ) {
-          g.selected = [building.id];
-          g.mode = "set-rally";
-          g.message = `RALLY POINT: tap where new ${building.type === "hq" ? "HQ units" : "combat units"} should go.`;
-          lastTap.current = null;
-        } else {
-          if (e.shiftKey) {
-            g.selected = g.selected.includes(hit.id)
-              ? g.selected.filter((id) => id !== hit.id)
-              : [...g.selected, hit.id];
-          } else if (unit && isCombatUnit(unit)) {
-            const currentCombatSelection = g.units.filter((candidate) =>
-              candidate.team === "player" && isCombatUnit(candidate) && g.selected.includes(candidate.id));
-            const selectionContainsOnlyCombat = currentCombatSelection.length === g.selected.length;
-            g.selected = selectionContainsOnlyCombat
-              ? [...new Set([...g.selected, unit.id])]
-              : [unit.id];
-          } else {
-            g.selected = [hit.id];
-          }
-          g.message =
-            building && ["hq", "barracks"].includes(building.type)
-              ? `${building.type.toUpperCase()} selected Â· choose Set Waypoint in the command bar.`
-              : "";
-          lastTap.current = { id: hit.id, time: now };
-        }
-      } else {
-        lastTap.current = null;
-        command(wp.x, wp.y);
-      }
-    }
-    pointer.current = null;
-    sync();
-  };
-  const pointerCancel = (e: React.PointerEvent) => {
-    if (moveGesture.current?.timer) clearTimeout(moveGesture.current.timer);
-    moveGesture.current = null;
-    setMoveChooser(null);
-    touchPoints.current.delete(e.pointerId);
-    if (touchPoints.current.size < 2) pinch.current = null;
-    if (touchPoints.current.size === 0) pinchConsumed.current = false;
-    pointer.current = null;
-  };
-  const contextCommand = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    if (pausedRef.current || game.current.over) return;
-    if (cancelCommandMode()) return;
-    const r = canvas.current!.getBoundingClientRect(),
-      sx = e.clientX - r.left,
-      sy = e.clientY - r.top;
-    const mw = 132, mh = 82, mx = canvas.current!.clientWidth - mw - 12, my = 12;
-    if (sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh) return;
-    game.current.matchStats.playerActions++;
-    const wp = screenToWorld(sx, sy);
-    command(wp.x, wp.y);
-  };
-  const wheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    game.current.zoom = Math.max(
-      0.55,
-      Math.min(1.7, game.current.zoom * (e.deltaY > 0 ? 0.9 : 1.1)),
-    );
-  };
-  const activeTip = ui.selectedBuilding === "hq" && (ui.hqPacked || ui.hqRelocation)
-    ? { key: "command-crawler", title: "MOBILE HEADQUARTERS", text: "The crawler moves at only 12 map units per second. Production, supply, research, and reinforcement stay offline until it finishes deploying on clear terrain." }
-    : ui.selectedBuilding === "barracks" && ui.productionBuilding === "barracks"
-    ? { key: "barracks-rally", title: "BARRACKS WAYPOINT", text: "Select a completed Barracks, choose Set Waypoint, then tap the battlefield. New combat units will deploy toward it." }
-    : ui.selectedBuilding === "barracks"
-      ? { key: "barracks-building", title: "BARRACKS CONSTRUCTION", text: "The wireframe waits for an assigned Worker to arrive. Construction time starts only when the Worker is on site." }
-    : ui.selectedWorkers > 0
-      ? { key: "worker-orders", title: "WORKER ORDERS", text: "Place several construction wireframes before pressing Cancel; assigned Workers visit and build them in order. A Move order still leaves the Worker on guard instead of resuming mining." }
-      : ui.selectedCombat > 0
-        ? { key: "combat-orders", title: "TRAVEL ORDERS", text: "Long-press open ground: slide up for Move + Engage or down for Direct Move. Direct Move fires only in weapon range without chasing; Move + Engage breaks course to fight, then resumes." }
-        : { key: "select-units", title: "FIELD TUTORIAL", text: "Select a Worker to construct, your HQ to train or research, or a completed Barracks to train combat units." };
-  const showActiveTip = tutorialsEnabled && !homeOpen && !paused && !dismissedTips.includes(activeTip.key);
-  const commandProgress = commandProfileProgress(commandProfile);
-  const fireControlRank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, commandProfile.fireControlRank || 0));
-  const saveCommandProfile = (next: CommandProfile) => {
-    localStorage.setItem(COMMAND_PROFILE_KEY, JSON.stringify(next));
-    return next;
-  };
-  const purchaseFireControl = () => {
-    setCommandProfile((current) => {
-      const rank = Math.max(0, Math.min(FIRE_CONTROL_MAX_RANK, current.fireControlRank || 0));
-      if (rank >= FIRE_CONTROL_MAX_RANK || commandProfileProgress(current).points < 1) return current;
-      return saveCommandProfile({ ...current, fireControlRank: rank + 1, spentPoints: current.spentPoints + 1 });
-    });
-  };
-  const productionButton = (type: Unit["type"]) => {
-    const active = ui.production?.type === type;
-    const coolingDown = !ui.production && ui.productionCooldown > 0;
-    const cost = unitCost[type];
-    const shortfall = Math.max(0, cost - ui.credits);
-    const unaffordable = shortfall > 0;
-    const cipherLocked = type === "cipher" && (!ui.tradeNetwork || ui.cipherCount >= CIPHER_MAX);
-    const locked =
-      type === "worker" || type === "cipher"
-        ? ui.productionBuilding !== "hq" || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) || coolingDown || cipherLocked
-        : ui.productionBuilding !== "barracks" || coolingDown;
-    const idle =
-      type === "worker"
-        ? `150 CREDITS Â· 8s Â· ${unitHealth.worker} HP`
-        : type === "cipher"
-          ? `${unitCost.cipher} CREDITS Â· ${unitBuildTime.cipher}s Â· ${unitHealth.cipher} HP Â· ${ui.cipherCount}/${CIPHER_MAX}`
-        : type === "trooper"
-          ? `125 CREDITS Â· 6s Â· COUNTERS AIR`
-          : type === "tank"
-            ? `400 CREDITS Â· 15s Â· COUNTERS INFANTRY`
-            : `300 CREDITS Â· 12s Â· COUNTERS ARMOR`;
-    const lockText = coolingDown
-      ? `COOLDOWN ${Math.ceil(ui.productionCooldown)}s`
-      : type === "cipher" && !ui.tradeNetwork
-        ? "RESEARCH TRADE NETWORK"
-        : type === "cipher" && ui.cipherCount >= CIPHER_MAX
-          ? `LIMIT ${CIPHER_MAX} REACHED`
-      : type === "worker" || type === "cipher"
-        ? "HQ BUSY"
-        : "BARRACKS UNAVAILABLE";
-    return (
-      <button
-        key={type}
-        disabled={locked || unaffordable}
-        className={`${active ? "producing " : ""}${locked ? "locked " : ""}${unaffordable ? "unaffordable" : ""}`}
-        onClick={() => action(type)}
-        title={unaffordable ? `${shortfall} more credits required` : undefined}
-      >
-        <kbd>{type === "worker" ? "V" : type === "cipher" ? "Îž" : type === "trooper" ? "I" : type === "tank" ? "K" : "N"}</kbd>
-        <span className={`command-art unit-${type}`} aria-hidden="true">
-          {(locked || unaffordable) && <b className="command-art-badge">{unaffordable ? "âˆ’" : "ðŸ”’"}</b>}
-        </span>
-        <span>
-          {unitName(type)}
-          <small>{unaffordable ? `NEED ${shortfall} MORE CREDITS` : locked ? lockText : active ? `${Math.max(0, Math.ceil(ui.production!.duration - ui.production!.elapsed))}s` : idle}</small>
-          {active && (
-            <em style={{ "--progress": `${(ui.production!.elapsed / ui.production!.duration) * 100}%` } as React.CSSProperties} />
-          )}
-        </span>
-      </button>
-    );
-  };
-  return (
-    <main className="game-shell">
-      {homeOpen && (
-        <section className="home-screen" aria-label="Frontier Command home screen">
-          <div className="home-grid" />
-          <div className="home-panel">
-            <span className="home-sigil">FC</span>
-            <small>TACTICAL NETWORK // ALPHA</small>
-            <h1>FRONTIER<br />COMMAND</h1>
-            <p>Balance credits, alloy, and intel. Control the map. Destroy the enemy command core.</p>
-            <section className="command-profile" aria-label={`Command level ${commandProgress.level}`}>
-              <div className="command-profile-heading">
-                <span><small>COMMAND DEVELOPMENT</small><b>LEVEL {commandProgress.level}</b></span>
-                <span><strong>{commandProgress.points}</strong><small>COMMAND POINT{commandProgress.points === 1 ? "" : "S"}</small></span>
-              </div>
-              <div className="command-xp-track" aria-label={`${commandProgress.current} of ${commandProgress.needed} Command XP toward the next level`}>
-                <i style={{ width: `${commandProgress.progress * 100}%` }} />
-              </div>
-              <div className="command-xp-readout">
-                <span>{commandProgress.current} / {commandProgress.needed} COMMAND XP</span>
-                {commandProfile.lastAward > 0 && <small>LAST MATCH +{commandProfile.lastAward}</small>}
-              </div>
-              <div className="command-research-preview" aria-label="Command research paths">
-                <section className={`command-path fire-control ${fireControlRank ? "unlocked" : ""}`} aria-label={`Fire Control rank ${fireControlRank} of ${FIRE_CONTROL_MAX_RANK}`}>
-                  <b>âŒ FIRE CONTROL</b>
-                  <small>RANK {fireControlRank}/{FIRE_CONTROL_MAX_RANK} Â· 2% RATE/RANK</small>
-                  <div>
-                    <button type="button" onClick={purchaseFireControl} disabled={commandProgress.points < 1 || fireControlRank >= FIRE_CONTROL_MAX_RANK}>SPEND 1 POINT</button>
-                  </div>
-                  <small className="command-path-refund">REFUND PROTOCOL UNLOCKS LATER</small>
-                  <em>EFFECT PENDING</em>
-                </section>
-                <span>â¬¡ REINFORCED FRAMES<small>COMING NEXT</small></span>
-                <span>â—Ž TACTICAL INTELLIGENCE<small>COMING NEXT</small></span>
-              </div>
-            </section>
-            {hasAutosave && (
-              <button className="continue-match" onClick={continueMatch}>
-                <b>CONTINUE MATCH</b>
-                <small>{game.current.fogEnabled ? "TACTICAL FOG" : "OPEN INTEL"} Â· WAVE {game.current.wave}</small>
-              </button>
-            )}
-            <div className="mode-heading">
-              <span>NEW MATCH MODE</span>
-              <small>RESOURCES RANDOMIZE EACH MATCH</small>
-            </div>
-            <div className="mode-options" role="radiogroup" aria-label="Fog of war mode">
-              <button
-                role="radio"
-                aria-checked={!newMatchFog}
-                className={!newMatchFog ? "selected" : ""}
-                disabled={network.role !== "solo"}
-                onClick={() => chooseNewMatchFog(false)}
-              >
-                <i>â—Ž</i><b>OPEN INTEL</b><small>No fog of war. Full battlefield visible.</small>
-              </button>
-              <button
-                role="radio"
-                aria-checked={newMatchFog}
-                className={newMatchFog ? "selected" : ""}
-                disabled={network.role !== "solo"}
-                onClick={() => chooseNewMatchFog(true)}
-              >
-                <i>â—</i><b>TACTICAL FOG</b><small>Scout to reveal terrain and enemy forces.</small>
-              </button>
-            </div>
-            <button className="launch-match" onClick={() => startNewMatch()}>
-              LAUNCH SINGLE-PLAYER MATCH
-            </button>
-            <div className="multiplayer-divider"><span>PRIVATE ONLINE 1V1</span></div>
-            {network.role !== "solo" && ["creating", "waiting", "joining", "connecting"].includes(network.status) ? (
-              <div className="room-waiting">
-                <small>{network.status === "waiting" ? "ROOM READY â€” SEND THIS CODE" : network.role === "guest" ? "JOINING PRIVATE ROOM" : "ESTABLISHING TACTICAL LINK"}</small>
-                <strong>{network.code || "Â·Â·Â·Â·Â·Â·"}</strong>
-                <p>{network.status === "waiting" ? `${newMatchFog ? "Tactical Fog" : "Open Intel"} is locked for this room. The second player opens Frontier Command, enters this code, and joins.` : network.role === "guest" ? "Connecting directly to the host commanderâ€¦" : "Preparing the private connectionâ€¦"}</p>
-                <button onClick={() => { leaveMultiplayer(); setNetwork({ role: "solo", status: "idle", code: "", detail: "" }); }}>CANCEL ROOM</button>
-              </div>
-            ) : (
-              <div className="private-match-actions">
-                <button
-                  className="create-room"
-                  onClick={createPrivateMatch}
-                  disabled={["creating", "joining", "connecting"].includes(network.status)}
-                >
-                  <b>CREATE PRIVATE MATCH</b>
-                  <small>{newMatchFog ? "TACTICAL FOG" : "OPEN INTEL"} Â· GET A ROOM CODE</small>
-                </button>
-                <div className="join-room">
-                  <input
-                    value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 6))}
-                    onKeyDown={(event) => { if (event.key === "Enter") void joinPrivateMatch(); }}
-                    placeholder="ROOM CODE"
-                    aria-label="Private multiplayer room code"
-                    maxLength={6}
-                  />
-                  <button onClick={joinPrivateMatch} disabled={network.status === "joining"}>
-                    {network.status === "joining" ? "JOININGâ€¦" : "JOIN MATCH"}
-                  </button>
-                </div>
-              </div>
-            )}
-            {network.status === "error" && <p className="network-error">{network.detail}</p>}
-          </div>
-        </section>
-      )}
-      <header>
-        <div className="brand">
-          <span className="sigil">FC</span>
-          <div>
-            <b>FRONTIER COMMAND</b>
-            <small>TACTICAL NETWORK // ALPHA</small>
-          </div>
-        </div>
-        <div className="resources">
-          <span>
-            â—† <b>{ui.credits}</b> CREDITS
-          </span>
-          <span>
-            â¬¢ <b>{ui.alloy}</b> ALLOY
-          </span>
-          <span>
-            â—‰ <b>{ui.intel}</b> INTEL
-          </span>
-          <span className="power-state">
-            ÏŸ <b>{ui.power}</b> POWER
-          </span>
-          <span className={`uplink-state ${ui.objectives ? "prep" : "danger"}`}>
-            RELAYS <b>{ui.objectives}/2</b>
-          </span>
-          <span className="save-state">
-            {network.role === "solo" ? saveStatus : network.status === "connected" ? `ROOM ${network.code}` : "LINKING"}
-          </span>
-          <span className={network.role === "solo" ? (ui.wave === 0 ? "prep" : "danger") : "prep"}>
-            {network.role !== "solo"
-              ? "PRIVATE 1V1"
-              : ui.wave === 0
-                ? `PREP ${ui.nextWave}s`
-                : `WAVE ${ui.wave} Â· ${ui.nextWave}s`}
-          </span>
-          <button
-            className="menu-button"
-            onClick={() => setPause(true)}
-            aria-label="Pause and open game menu"
-          >
-            â˜°
-          </button>
-        </div>
-      </header>
-      <section className="viewport">
-        <canvas
-          ref={canvas}
-          onPointerDown={pd}
-          onPointerMove={pm}
-          onPointerUp={pu}
-          onPointerCancel={pointerCancel}
-          onWheel={wheel}
-          onContextMenu={contextCommand}
-          aria-label="Frontier Command battlefield"
-        />
-        {moveChooser && (
-          <div
-            className="move-gesture"
-            style={{ left: moveChooser.x, top: moveChooser.y }}
-            role="menu"
-            aria-label="Choose travel engagement behavior"
-          >
-            <button
-              className={`engage ${moveChooser.choice === "engage" ? "chosen" : ""}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => commitTravelChoice(moveChooser.world, "engage")}
-              role="menuitem"
-            >
-              <i>â†‘</i><b>MOVE + ENGAGE</b><small>FIGHT, THEN RESUME</small>
-            </button>
-            <div className="move-gesture-anchor"><span>HOLD</span><i>â—†</i><small>SLIDE</small></div>
-            <button
-              className={`direct ${moveChooser.choice === "direct" ? "chosen" : ""}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => commitTravelChoice(moveChooser.world, "direct")}
-              role="menuitem"
-            >
-              <i>â†“</i><b>DIRECT MOVE</b><small>FIRE IN RANGE Â· NO CHASE</small>
-            </button>
-          </div>
-        )}
-        <div className="objective">
-          <small>PRIMARY OBJECTIVE</small>
-          <b>DESTROY THE ENEMY COMMAND CORE</b>
-          <span>SECURE INTEL RELAYS Â· 4 TROOPER SLOTS Â· +5% DAMAGE EACH</span>
-          <span className="economy-readout">ARMY {ui.army} Â· UPKEEP {Math.ceil(ui.upkeep)} CREDITS/MIN AFTER {UPKEEP_SOFT_CAP}</span>
-        </div>
-        {network.role !== "solo" && ["disconnected", "error"].includes(network.status) && (
-          <div className="connection-lost">
-            <small>TACTICAL LINK LOST</small>
-            <b>OTHER COMMANDER DISCONNECTED</b>
-            <p>{network.detail || "The private connection ended."}</p>
-            <button onClick={openHome}>RETURN HOME</button>
-          </div>
-        )}
-        <div className="zoom">
-          <button
-            onClick={() =>
-              (game.current.zoom = Math.min(1.7, game.current.zoom + 0.15))
-            }
-          >
-            ï¼‹
-          </button>
-          <button
-            onClick={() =>
-              (game.current.zoom = Math.max(0.55, game.current.zoom - 0.15))
-            }
-          >
-            âˆ’
-          </button>
-        </div>
-        {ui.idleWorkers > 0 && (
-          <button
-            className="idle-worker-button"
-            onClick={selectNextIdleWorker}
-            aria-label={`${ui.idleWorkers} idle Worker${ui.idleWorkers === 1 ? "" : "s"}. Select and center on the next one.`}
-            title="Select next idle Worker"
-          >
-            <span className="command-art unit-worker" aria-hidden="true" />
-            <b>{ui.idleWorkers}</b>
-          </button>
-        )}
-        {paused && (
-          <div className="pause-menu">
-            <div className="menu-panel">
-              <small>TACTICAL NETWORK</small>
-              <h1>{network.role === "solo" ? "GAME PAUSED" : "TACTICAL LINK"}</h1>
-              {network.role === "solo" && <div className="difficulty-readout">
-                <div className="difficulty-heading">
-                  <span>AI DIFFICULTY</span>
-                  <b>{difficultyInfo(game.current.adaptive).label}</b>
-                </div>
-                <div className="difficulty-bar" aria-label={`AI difficulty level ${difficultyInfo(game.current.adaptive).level} of 5`}>
-                  {Array.from({ length: 5 }, (_, index) => (
-                    <i key={index} className={index < difficultyInfo(game.current.adaptive).level ? "filled" : ""} />
-                  ))}
-                </div>
-                <small>LEVEL {difficultyInfo(game.current.adaptive).level} / 5</small>
-              </div>}
-              <p>{network.role === "solo" ? saveStatus : `PRIVATE ROOM ${network.code} Â· MATCH CONTINUES WHILE THIS MENU IS OPEN`}</p>
-              <button className="primary" onClick={() => setPause(false)}>
-                {network.role === "solo" ? "RESUME" : "RETURN TO BATTLE"}
-              </button>
-              <div className="pc-controls">
-                <b>DESKTOP CONTROLS</b>
-                <span>RIGHT-CLICK MOVE / ATTACK Â· SHIFT ADD SELECT</span>
-                <span>WASD / ARROWS PAN Â· WHEEL ZOOM Â· SPACE CENTER</span>
-                <span>CTRL+1â€“9 SAVE GROUP Â· 1â€“9 RECALL Â· DOUBLE-PRESS CENTER</span>
-                <span>WORKER SELECTED: R REFINERY Â· B BARRACKS Â· T TURRET</span>
-                <span>HQ SELECTED: V WORKER Â· Q RESEARCH Â· G WAYPOINT Â· J PACK/DEPLOY Â· L MOVE CRAWLER</span>
-                <span>BARRACKS SELECTED: I TROOPER Â· K TANK Â· N DRONE Â· G WAYPOINT</span>
-                <span>Z MOVE Â· C PURSUE Â· H HOLD Â· P PATROL Â· Y REPAIR Â· O AUTO REPAIR</span>
-                <span>F FORTIFY Â· U AIR DOCTRINE Â· M ARMOR DOCTRINE</span>
-              </div>
-              <button
-                className={tutorialsEnabled ? "tips-toggle active" : "tips-toggle"}
-                onClick={toggleTutorials}
-                aria-pressed={tutorialsEnabled}
-              >
-                TUTORIAL & TOOLTIPS: {tutorialsEnabled ? "ON" : "OFF"}
-              </button>
-              {network.role === "solo" && <button onClick={saveManual}>SAVE GAME</button>}
-              {network.role === "solo" && <button onClick={loadManual}>LOAD GAME</button>}
-              <button
-                className="warning"
-                onClick={openHome}
-              >
-                HOME / NEW GAME
-              </button>
-            </div>
-          </div>
-        )}
-        {ui.over && (
-          <div className="end">
-            <small>OPERATION COMPLETE</small>
-            <h1>{ui.over === "won" ? "VICTORY" : "BASE LOST"}</h1>
-            {network.role === "solo" && (() => {
-              const review = readDifficulty().reviews.at(-1);
-              return review ? <p className="match-review"><b>{review.summary}</b><br />Match performance: {Math.round(review.score)}/100{review.commandXp ? <><br /><strong>+{review.commandXp} COMMAND XP</strong></> : null}<br /><small>Next opponent: {difficultyInfo(adaptiveDifficulty()).label}</small></p> : null;
-            })()}
-            {network.role === "solo" && <button onClick={() => action("reset")}>PLAY AGAIN</button>}
-            <button onClick={openHome}>HOME</button>
-          </div>
-        )}
-        {showActiveTip && (
-          <aside className="tactical-tip" aria-live="polite">
-            <button className="tip-close" onClick={() => dismissTip(activeTip.key)} aria-label="Dismiss this tip">Ã—</button>
-            <small>{activeTip.title}</small>
-            <p>{activeTip.text}</p>
-            <button className="tip-disable" onClick={toggleTutorials}>TURN ALL TIPS OFF</button>
-          </aside>
-        )}
-      </section>
-      <section className="command">
-        <div className="status">
-          <small>FIELD COMMS</small>
-          <p>{ui.message}</p>
-        </div>
-        <div className="selection">
-          <span
-            className={`portrait ${ui.selectedUnitType && ui.selectedUnitType !== "mixed" ? `command-art unit-${ui.selectedUnitType}` : ui.selectedBuilding ? `command-art building-${ui.selectedBuilding}` : ""}`}
-            aria-hidden="true"
-          >{!ui.selectedUnitType && !ui.selectedBuilding ? "â—ˆ" : ""}</span>
-          <div>
-            <small>SELECTION</small>
-            <b>{ui.selected}</b>
-          </div>
-          <button
-            className="deselect"
-            onClick={() => action("deselect")}
-            disabled={!ui.canClear}
-          >
-            CLEAR
-          </button>
-        </div>
-        <div className="combat-legend">
-          <small>COMBAT READOUT</small>
-          <span><b>HP</b> health Â· <b>DMG</b> damage per shot</span>
-          <span>Trooper â†’ Drone â†’ Tank â†’ Trooper Â· favored matchup +55% DMG</span>
-          <span>Secured Intel Relays grant +5% DMG each Â· stacks to +10%</span>
-        </div>
-        <div className="command-center">
-          {ui.selectedCombat > 1 && ui.selectedWorkers === 0 ? (
-            <div className="formation-panel">
-              <div className="formation-header">
-                <div><small>FORMATION</small><b>{ui.selectedCombat} UNITS</b></div>
-                <button onClick={() => action("deselect")}>CLEAR</button>
-              </div>
-              <div className="formation-grid" aria-label="Selected formation units">
-                {ui.selectedUnitCards.map((unit) => (
-                  <button
-                    key={unit.id}
-                    className={`formation-unit-card unit-${unit.type}`}
-                    onClick={() => removeSelectedUnit(unit.id)}
-                    aria-label={`Remove ${unitName(unit.type)} from formation`}
-                  >
-                    <span className={`command-art unit-${unit.type}`} aria-hidden="true" />
-                    <span className="formation-unit-info">
-                      <b>{unitName(unit.type)}</b>
-                      <small>R{unit.level}</small>
-                      <i><em style={{ width: `${Math.max(0, unit.hp / unit.max * 100)}%` }} /></i>
-                    </span>
-                    <span className="formation-remove" aria-hidden="true">âˆ’</span>
-                  </button>
-                ))}
-              </div>
-              <div className="formation-orders" aria-label="Formation orders">
-                <button onClick={() => action("move")} aria-label="Direct move" title="Direct move">âž¤</button>
-                <button onClick={() => action("pursue")} aria-label="Pursue" title="Pursue">âŒ–</button>
-                <button onClick={() => action("patrol")} aria-label="Patrol" title="Patrol">â‡„</button>
-                <button className="retreat" onClick={() => action("retreat")} aria-label="Retreat" title="Retreat">â†©</button>
-              </div>
-            </div>
-          ) : (<>
-          <div className="command-context" aria-label="Current command menu">
-            {(commandTab === "buildings" || commandTab === "tech") ? (
-              <button className="context-back" onClick={() => setCommandTab("units")}>
-                <i>â€¹</i>
-                <span>{commandTab === "buildings" ? "CONSTRUCTION" : "HQ RESEARCH"}<small>BACK TO ORDERS</small></span>
-              </button>
-            ) : ui.selectedUnits > 0 ? (
-              <div className="selection-command-header">
-                <span className={`command-tab-art ${ui.selectedUnitType && ui.selectedUnitType !== "mixed" ? `unit-${ui.selectedUnitType}` : ""}`} aria-hidden="true">{ui.selectedUnitType === "mixed" ? "â—ˆ" : ""}</span>
-                <b>{ui.selectedUnits === 1 ? unitName(ui.selectedUnitType as Unit["type"]) : `${ui.selectedUnits} UNITS`}</b>
-                <small>FIELD ORDERS</small>
-              </div>
-            ) : ui.selectedBuilding ? (
-              <div className="selection-command-header">
-                <span className={`command-tab-art building-${ui.selectedBuilding}`} aria-hidden="true" />
-                <b>{ui.selectedBuilding === "hq" && ui.hqPacked ? "COMMAND CRAWLER" : ui.selectedBuilding === "hq" ? "HEADQUARTERS" : ui.selectedBuilding === "turret" ? "SENTRY TURRET" : ui.selectedBuilding.toUpperCase()}</b>
-                <small>{ui.selectedConstruction ? "CONSTRUCTION WIREFRAME" : ui.selectedBuilding === "hq" && ui.hqRelocation ? `${ui.hqRelocation.mode === "pack" ? "PACKING" : "DEPLOYING"} Â· ${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s` : ui.selectedBuilding === "hq" && ui.hqPacked ? "MOBILE Â· COMMAND SYSTEMS OFFLINE" : ui.selectedBuilding === "hq" ? "COMMAND & RESEARCH" : ui.selectedBuilding === "barracks" ? "UNIT PRODUCTION" : "STRUCTURE ORDERS"}</small>
-              </div>
-            ) : (
-              <div className="selection-command-header no-command">
-                <span className="command-tab-tech" aria-hidden="true">âŒ</span>
-                <b>COMMAND READY</b>
-                <small>SELECT A UNIT OR BUILDING</small>
-              </div>
-            )}
-          </div>
-          <div className="actions" role="tabpanel">
-            {ui.selectedWorkers > 0 && commandTab === "buildings" ? (
-              <>
-                <button disabled={ui.alloy < BUILD_COST.refinery} className={`${ui.buildMode === "build-refinery" ? "placing " : ""}${ui.alloy < BUILD_COST.refinery ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-refinery"} onClick={() => action("build-refinery")} title={ui.alloy < BUILD_COST.refinery ? `${BUILD_COST.refinery - ui.alloy} more alloy required` : undefined}>
-                  <kbd>R</kbd><span className="command-art building-refinery" aria-hidden="true" /><span>REFINERY<small>{ui.alloy < BUILD_COST.refinery ? `NEED ${BUILD_COST.refinery - ui.alloy} MORE ALLOY` : `${BUILD_COST.refinery} ALLOY Â· TAP MULTIPLE SITES`}</small></span>
-                </button>
-                <button disabled={ui.alloy < BUILD_COST.barracks} className={`${ui.buildMode === "build-barracks" ? "placing " : ""}${ui.alloy < BUILD_COST.barracks ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-barracks"} onClick={() => action("build-barracks")} title={ui.alloy < BUILD_COST.barracks ? `${BUILD_COST.barracks - ui.alloy} more alloy required` : undefined}>
-                  <kbd>B</kbd><span className="command-art building-barracks" aria-hidden="true" /><span>BARRACKS<small>{ui.alloy < BUILD_COST.barracks ? `NEED ${BUILD_COST.barracks - ui.alloy} MORE ALLOY` : `${BUILD_COST.barracks} ALLOY Â· TAP MULTIPLE SITES`}</small></span>
-                </button>
-                <button disabled={ui.alloy < BUILD_COST.turret} className={`${ui.buildMode === "build-turret" ? "placing " : ""}${ui.alloy < BUILD_COST.turret ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-turret"} onClick={() => action("build-turret")} title={ui.alloy < BUILD_COST.turret ? `${BUILD_COST.turret - ui.alloy} more alloy required` : undefined}>
-                  <kbd>T</kbd><span className="command-art building-turret" aria-hidden="true" /><span>SENTRY TURRET<small>{ui.alloy < BUILD_COST.turret ? `NEED ${BUILD_COST.turret - ui.alloy} MORE ALLOY` : `${BUILD_COST.turret} ALLOY Â· QUEUE Â· 15s DEPLOY`}</small></span>
-                </button>
-              </>
-            ) : ui.selectedUnits > 0 ? (
-              <>
-                <button disabled={ui.selectedUnitType === "cipher" && ui.selectedCipherMode !== "mobile"} onClick={() => action("move")} title={tutorialsEnabled ? "Keep the destination locked and fire at enemies already within weapon range without chasing them." : undefined}>
-                  <kbd>Z</kbd><i>âž¤</i><span>DIRECT MOVE<small>{ui.selectedUnitType === "cipher" ? "MOBILE TRAVEL" : "FIRE IN RANGE Â· NO CHASE"}</small></span>
-                </button>
-                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "mobile" || ui.selectedCipherMode === "mixed") && (
-                  <button onClick={() => action("deploy-cipher")} title={tutorialsEnabled ? "Deploy for eight seconds. Once online and out of combat, this Cipher generates one credit each second." : undefined}>
-                    <i>âŒ</i><span>DEPLOY CIPHER<small>{CIPHER_DEPLOY_DURATION}s Â· +60 CREDITS/MIN</small></span>
-                  </button>
-                )}
-                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "deployed" || ui.selectedCipherMode === "mixed") && (
-                  <button onClick={() => action("pack-cipher")} title={tutorialsEnabled ? "Shut down the income link and return the Cipher to its mobile form." : undefined}>
-                    <i>â–£</i><span>PACK CIPHER<small>{CIPHER_PACK_DURATION}s Â· STOPS INCOME</small></span>
-                  </button>
-                )}
-                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "deploying" || ui.selectedCipherMode === "packing") && (
-                  <button disabled className="placing">
-                    <i>âŒ</i><span>{ui.selectedCipherMode === "deploying" ? "DEPLOYING" : "PACKING"}<small>TRANSITION IN PROGRESS</small></span>
-                  </button>
-                )}
-                {ui.selectedCombat > 0 && (<>
-                  <button className={ui.selectedStance === "pursue" ? "active-order" : ""} aria-pressed={ui.selectedStance === "pursue"} onClick={() => action("pursue")} title={tutorialsEnabled ? "Chase visible enemies within sight range." : undefined}>
-                    <kbd>C</kbd><i>âŒ–</i><span>PURSUE<small>CHASE VISIBLE TARGETS</small></span>
-                  </button>
-                  {ui.selectedUnitType === "trooper" && (
-                    <button className={ui.selectedStance === "hold" ? "active-order" : ""} aria-pressed={ui.selectedStance === "hold"} onClick={() => action("hold")} title={tutorialsEnabled ? "Troopers deploy into a stationary turret form with 35% greater weapon range." : undefined}>
-                      <kbd>H</kbd><i>âŒ¾</i><span>SENTRY MODE<small>TROOPERS Â· +35% RANGE</small></span>
-                    </button>
-                  )}
-                  <button className={ui.selectedStance === "patrol" ? "active-order" : ""} aria-pressed={ui.selectedStance === "patrol"} onClick={() => action("patrol")} title={tutorialsEnabled ? "Choose two points. Units travel between them and engage threats en route." : undefined}>
-                    <kbd>P</kbd><i>â‡„</i><span>PATROL<small>SET TWO ROUTE POINTS</small></span>
-                  </button>
-                  <button className="retreat" onClick={() => action("retreat")} title={tutorialsEnabled ? "Return to HQ 20% faster, avoid combat, and heal on arrival." : undefined}>
-                    <kbd>E</kbd><i>â†©</i><span>RETREAT<small>DISENGAGE Â· HEAL AT HQ</small></span>
-                  </button>
-                </>)}
-                {ui.selectedWorkers > 0 && (<>
-                  <button onClick={() => setCommandTab("buildings")} title={tutorialsEnabled ? "Open the Worker construction menu." : undefined}>
-                    <i>â–¦</i><span>CONSTRUCTION<small>OPEN BUILD MENU</small></span>
-                  </button>
-                  <button onClick={() => action("repair")} title={tutorialsEnabled ? "Choose one damaged friendly unit or structure to repair. Repairs consume alloy." : undefined}>
-                    <kbd>Y</kbd><i>ðŸ”§</i><span>REPAIR TARGET<small>UNITS + STRUCTURES Â· {REPAIR_RATE} HP/s</small></span>
-                  </button>
-                  <button className={ui.autoRepair ? "active-order repair-toggle" : "repair-toggle"} aria-pressed={ui.autoRepair} onClick={() => action("auto-repair")} title={tutorialsEnabled ? "When enabled, these Workers stop mining and automatically repair nearby friendly units and structures. Default is off." : undefined}>
-                    <kbd>O</kbd><i>{ui.autoRepair ? "âœ“" : "â—‹"}</i><span>AUTO REPAIR {ui.autoRepair ? "ON" : "OFF"}<small>{ui.repairingWorkers ? `${ui.repairingWorkers} REPAIRING` : "STOPS MINING Â· REPAIRS ALLIES"}</small></span>
-                  </button>
-                  {ui.autoRepair && ui.selectedCombat === 0 && (
-                    <button className={ui.selectedStance === "patrol" ? "active-order" : ""} aria-pressed={ui.selectedStance === "patrol"} onClick={() => action("patrol")} title={tutorialsEnabled ? "Set two patrol points. Workers repair nearby allies, then resume the route." : undefined}>
-                      <kbd>P</kbd><i>â‡„</i><span>MAINTENANCE PATROL<small>REPAIR NEAR ROUTE Â· RESUME</small></span>
-                    </button>
-                  )}
-                </>)}
-              </>
-            ) : ui.selectedConstruction && ui.selectedBuilding ? (
-              <button className="sell" onClick={() => action("cancel-construction")}>
-                <i>âœ•</i><span>CANCEL {ui.selectedBuilding === "turret" ? "SENTRY" : ui.selectedBuilding.toUpperCase()}<small>FULL REFUND BEFORE WORK Â· 50% AFTER START</small></span>
-              </button>
-            ) : ui.selectedBuilding === "hq" && !ui.hqPacked && !ui.hqRelocation && commandTab === "tech" ? (
-              <>
-                <button disabled={ui.fortified || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) || ui.intel < FORTIFY_INTEL_COST} className={ui.fortified || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) ? "locked" : ui.fortifyProduction ? "placing" : ui.intel < FORTIFY_INTEL_COST ? "unaffordable" : ""} onClick={() => action("fortify")} title={ui.intel < FORTIFY_INTEL_COST ? `${FORTIFY_INTEL_COST - ui.intel} more intel required` : undefined}>
-                  <kbd>F</kbd><span className="command-art building-hq" aria-hidden="true">{ui.fortified && <b className="command-art-badge">âœ“</b>}</span>
-                  <span>{ui.fortified ? "BASE FORTIFIED" : ui.fortifyProduction ? "FORTIFYING BASE" : "FORTIFY BASE"}<small>{ui.fortified ? "+25% STRUCTURE HP ACTIVE" : ui.fortifyProduction ? `${Math.max(0, Math.ceil(ui.fortifyProduction.duration - ui.fortifyProduction.elapsed))}s REMAINING` : ui.intel < FORTIFY_INTEL_COST ? `NEED ${FORTIFY_INTEL_COST - ui.intel} MORE INTEL` : `${FORTIFY_INTEL_COST} INTEL Â· 40s Â· +25% STRUCTURE HP`}</small></span>
-                </button>
-                {(["air", "armor"] as Doctrine[]).map((doctrine) => {
-                  const chosen = ui.doctrine === doctrine;
-                  const researching = ui.doctrineProduction?.type === doctrine;
-                  const locked = Boolean(ui.doctrine && !chosen) || Boolean(ui.doctrineProduction && !researching);
-                  return (
-                    <button key={doctrine} disabled={Boolean(ui.doctrine) || Boolean(ui.doctrineProduction) || Boolean(ui.fortifyProduction) || Boolean(ui.tradeNetworkProduction) || ui.intel < DOCTRINE_INTEL_COST} className={chosen || locked || Boolean(ui.fortifyProduction) || Boolean(ui.tradeNetworkProduction) ? "locked" : researching ? "placing" : ui.intel < DOCTRINE_INTEL_COST ? "unaffordable" : ""} onClick={() => action(`doctrine-${doctrine}`)} title={ui.intel < DOCTRINE_INTEL_COST ? `${DOCTRINE_INTEL_COST - ui.intel} more intel required` : undefined}>
-                      <kbd>{doctrine === "air" ? "U" : "M"}</kbd><i>{doctrine === "air" ? "âœ¦" : "â¬¢"}</i>
-                      <span>{doctrine === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"}<small>{chosen ? doctrine === "air" ? "LOCKED Â· +18% DRONE DMG Â· +15% SPEED" : "LOCKED Â· +18% TANK HP & DMG" : locked ? "LOCKED BY OTHER DOCTRINE" : researching ? `${Math.max(0, Math.ceil(ui.doctrineProduction!.duration - ui.doctrineProduction!.elapsed))}s REMAINING` : ui.intel < DOCTRINE_INTEL_COST ? `NEED ${DOCTRINE_INTEL_COST - ui.intel} MORE INTEL` : `${DOCTRINE_INTEL_COST} INTEL Â· ${DOCTRINE_DURATION}s Â· PERMANENT CHOICE`}</small></span>
-                    </button>
-                  );
-                })}
-                <button disabled={ui.tradeNetwork || Boolean(ui.tradeNetworkProduction) || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || ui.intel < TRADE_NETWORK_INTEL_COST} className={ui.tradeNetwork || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) ? "locked" : ui.tradeNetworkProduction ? "placing" : ui.intel < TRADE_NETWORK_INTEL_COST ? "unaffordable" : ""} onClick={() => action("trade-network")} title={ui.intel < TRADE_NETWORK_INTEL_COST ? `${TRADE_NETWORK_INTEL_COST - ui.intel} more intel required` : undefined}>
-                  <i>âŒ</i><span>{ui.tradeNetwork ? "TRADE NETWORK ONLINE" : ui.tradeNetworkProduction ? "OPENING TRADE NETWORK" : "TRADE NETWORK"}<small>{ui.tradeNetwork ? "CIPHER PRODUCTION UNLOCKED" : ui.tradeNetworkProduction ? `${Math.max(0, Math.ceil(ui.tradeNetworkProduction.duration - ui.tradeNetworkProduction.elapsed))}s REMAINING` : ui.intel < TRADE_NETWORK_INTEL_COST ? `NEED ${TRADE_NETWORK_INTEL_COST - ui.intel} MORE INTEL` : `${TRADE_NETWORK_INTEL_COST} INTEL Â· ${TRADE_NETWORK_DURATION}s Â· UNLOCK CIPHER`}</small></span>
-                </button>
-                <div className="tech-report">
-                  <strong>ENEMY TECH Â· LAST SCOUTED</strong>
-                  <small>{ui.enemyDoctrineKnown
-                    ? ui.enemyDoctrine === "air" ? "AIR SUPERIORITY DETECTED"
-                      : ui.enemyDoctrine === "armor" ? "ARMORED COMMAND DETECTED"
-                        : "NO COMPLETED DOCTRINE DETECTED"
-                    : "UNKNOWN Â· SCOUT THE ENEMY HQ"}</small>
-                </div>
-              </>
-            ) : ui.selectedBuilding === "hq" ? (
-              ui.hqPacked ? <>
-                <button disabled={Boolean(ui.hqRelocation)} onClick={() => action("move-hq")}><kbd>L</kbd><i>âž¤</i><span>MOVE CRAWLER<small>12 SPEED Â· EXTREMELY SLOW</small></span></button>
-                <button disabled={Boolean(ui.hqRelocation)} className={ui.hqRelocation?.mode === "deploy" ? "placing" : ""} onClick={() => action("deploy-hq")}><kbd>J</kbd><i>âŒ‚</i><span>{ui.hqRelocation?.mode === "deploy" ? "DEPLOYING HQ" : "DEPLOY HQ"}<small>{ui.hqRelocation ? `${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s REMAINING` : "6s Â· REQUIRES CLEAR TERRAIN"}</small></span></button>
-              </> : <>
-                {productionButton("worker")}
-                {productionButton("cipher")}
-                <button disabled={Boolean(ui.hqRelocation)} onClick={() => action("rally")}><kbd>G</kbd><i>âŒ–</i><span>SET WAYPOINT<small>HQ UNIT DEPLOYMENT</small></span></button>
-                <button disabled={Boolean(ui.hqRelocation)} onClick={() => setCommandTab("tech")}><kbd>Q</kbd><i>âŒ¬</i><span>RESEARCH<small>SPEND INTEL ON UPGRADES</small></span></button>
-                <button disabled={Boolean(ui.hqRelocation)} className={ui.hqRelocation?.mode === "pack" ? "placing" : ""} onClick={() => action("pack-hq")}><kbd>J</kbd><i>â–£</i><span>{ui.hqRelocation?.mode === "pack" ? "PACKING HQ" : "PACK HQ"}<small>{ui.hqRelocation ? `${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s REMAINING` : "5s Â· BECOMES COMMAND CRAWLER"}</small></span></button>
-              </>
-            ) : ui.selectedBuilding === "barracks" ? (
-              ui.productionBuilding === "barracks" ? <>
-                {productionButton("trooper")}{productionButton("tank")}{productionButton("drone")}
-                <button onClick={() => action("rally")}><kbd>G</kbd><i>âŒ–</i><span>SET WAYPOINT<small>COMBAT UNIT DEPLOYMENT</small></span></button>
-                <button className="sell" onClick={() => action("sell")}><i>âœ•</i><span>SELL BARRACKS<small>50% Â· {Math.floor(BUILD_COST.barracks / 2)} CREDITS</small></span></button>
-              </> : <div className="production-empty"><strong>BARRACKS UNDER CONSTRUCTION</strong><small>Combat units appear here when construction is complete.</small></div>
-            ) : ui.selectedBuilding ? (
-              <button className="sell" onClick={() => action("sell")}><i>âœ•</i><span>SELL {ui.selectedBuilding === "turret" ? "SENTRY" : ui.selectedBuilding.toUpperCase()}<small>50% REFUND</small></span></button>
-            ) : (
-              <div className="production-empty">
-                <strong>SELECT A COMMAND SOURCE</strong>
-                <small>Worker: construction and repair Â· HQ: economy units and research Â· completed Barracks: combat units.</small>
-              </div>
-            )}
-          </div>
-          </>)}
-        </div>
-      </section>
-      <footer>
-        TOUCH: TAP SELECT Â· DOUBLE-TAP SELECT TYPE Â· LONG-PRESS GROUND + SLIDE â†‘ ENGAGE / â†“ DIRECT Â· TAP ENEMY ATTACK Â· DRAG PAN{" "}
-        <span>DESKTOP: LEFT DRAG SELECT Â· RIGHT-CLICK COMMAND Â· SHIFT ADD Â· CTRL+1â€“9 GROUPS Â· ESC PAUSE</span>
-      </footer>
-    </main>
-  );
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×MüÓtèµ©hºÚn¶X§zÍH\ÙHÛY[ŽÂ‚š[\ÜÈ\ÙPØ[˜XÚË\ÙQY™™XÝ\ÙT™Y‹\ÙTÝ]HHœ›ÛHœ™XXÝŽÂš[\ÜÂˆÜÝ›ÛÛKˆ›Ú[”›ÛÛKˆ\H][\^Y\”›ÛKˆ\HY\”Ù\ÜÚ[Û‹ˆ\HY\”Ý]\ËŸHœ›ÛH‹‹Û][\^Y\ˆŽÂ‚\HHÈˆ[X™\ŽÈNˆ[X™\ˆNÂ\HØÝš[™HH˜Z\ˆˆ˜\›[ÜˆŽÂ\H[š]HÂˆYˆ[X™\ŽÂˆX[Nˆœ^Y\ˆˆ™[™[^HŽÂˆ\NˆÛÜšÙ\ˆˆ›ÛÜ\ˆˆ[šÈˆ™›Û™Hˆ˜Ú\\ˆŽÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆˆ[X™\ŽÂˆX^ˆ[X™\ŽÂˆ\™Ù]ÎˆÂˆÊŠˆ[\Ü˜\žHØœÝXÛKX]›ÚY[˜ÙHØ^\Ú[ˆ
+‹Âˆ˜]ÎˆÂˆÊŠˆ˜[œÚY[]™XÛÝ™\žH]H\ÙYÈ\ØØ\H›ØÚÙYØœÝXÛH›Ý]\Ëˆ
+‹Âˆ˜]ÚXÚÐ]Îˆ[X™\ŽÂˆ˜]ÚXÚÖÎˆ[X™\ŽÂˆ˜]ÚXÚÖOÎˆ[X™\ŽÂˆ˜]”ÚYOÎˆHLNÂˆÊŠˆ˜[\ÜˆÝ]ÚYKXž\\ÜÈ›Ý]H\ÙYÈÙY\Ü›Ý[™[š]ÈÙ™ˆÛÜÙYÛY™ˆ˜XÙ\Ëˆ
+‹Âˆ]X]T›Ý]OÎˆÂˆ]X]RYˆ[X™\ŽÂˆ˜[\[™^ˆ[X™\ŽÂˆ\ÙNˆ˜\›ØXÚˆ™[\ˆˆ™^]ˆ˜ÛX\ˆˆ˜ž\\ÜÈŽÂˆž\\ÜÏÎˆÂˆNÂˆ[™[^OÎˆ[X™\ŽÂˆØ\œžZ[™ÏÎˆ[X™\ŽÂˆÊŠˆH™\ÛÝ\˜ÙHÝ\œ™[H[ˆHÛÜšÙ\‰ÜÈØ\™ÛÈÛˆ
+‹ÂˆØ\œžZ[™Õ\OÎˆ™\ÛÝ\˜ÙRÚ[™ÂˆÊŠˆÜž\Ý[X\œ˜^H[™^^XÚ]H\ÜÚYÛ™YžHH^Y\‹ˆ
+‹Âˆ™\ÛÝ\˜ÙU\™Ù]Îˆ[X™\ŽÂˆÎˆ[X™\ŽÂˆ]™[Îˆ[X™\ŽÂˆÊŠˆXÝ]™K[X]Ú[Y\Ý[\ÙˆH[š]	ÜÈ[ÜÝ™XÙ[X[Üˆ™XÙZ]™Y[XYÙKˆ
+‹Âˆ\ÝÛÛX˜]]Îˆ[X™\ŽÂˆÊŠˆ\Ý˜]™[ØZ[H[™ÛH[ˆØ[˜\È˜YX[œËˆ™\Ù\™YÚ[HH[š]\ÈYKˆ
+‹Âˆ˜XÚ[™ÏÎˆ[X™\ŽÂˆÊŠˆ˜[œÚY[™[™\ˆ›YËˆYHÛ›HÛˆœ˜[Y\ÈÚ\™HH[š]XÝX[HY˜[˜Ù\Ëˆ
+‹Âˆ[Ýš[™ÏÎˆ›ÛÛX[ŽÂˆÊŠˆÚ[ˆYKH[š]šYÚÈ™X\˜žH™X]È]ÙY\È]È˜]™[\Ý[˜][Û‹ˆ
+‹Âˆ[Ý™Q[™ØYÙOÎˆ›ÛÛX[ŽÂˆÊŠˆ[\Ü˜\žHÜYYØ\Ú\™YžHH][K][š]›Ü›X][Ûˆ\š[™È˜]™[ˆ
+‹Âˆ›Ü›X][Û”ÜYYÎˆ[X™\ŽÂˆÊŠˆœšYYˆš\š[™ÈÜÙHÚ[™ÝË^™\ÜÙY[ˆXÝ]™HX]Ú[YKˆ
+‹Âˆ]XÚÕ[[Îˆ[X™\ŽÂˆÊŠˆ[[™[^HØØÝ\YYžH\È›ÛÜ\‹ˆØ\œš\ÛÛ™Y[š]ÈÝ^H[ˆÛÛX˜]]Ø[››Ý[Ý™Kˆ
+‹ÂˆØ\œš\ÛÛ™Y]Îˆ[X™\ŽÂˆÊŠˆ[[™[^H\È›ÛÜ\ˆ\ÈÝ\œ™[HžZ[™ÈÈ[\‹ˆ
+‹ÂˆØ\œš\ÛÛ•\™Ù]Îˆ[X™\ŽÂˆÊŠˆ˜[œÚY[™[™\ˆ›YÈÚ[HHÛÜšÙ\ˆ\ÈXÝ]™[H^˜XÝ[™ÈÜž\Ý[ˆ
+‹ÂˆZ[š[™ÏÎˆ›ÛÛX[ŽÂˆÊŠˆ˜[œÚY[™[™\ˆ›YÈÚ[HHÛÜšÙ\ˆÙ[È[ˆ[™š[š\ÚYÝXÝ\™Kˆ
+‹ÂˆZ[[™ÏÎˆ›ÛÛX[ŽÂˆÊŠˆÙXÛÛ™ÈÙˆšY[Ý\H™[XZ[š[™È™Y›Ü™HH[š]ÝY™™\œÈ[˜[Y\Ëˆ
+‹ÂˆÝ\OÎˆ[X™\ŽÂˆ™]™X][™ÏÎˆ›ÛÛX[ŽÂˆÊŠˆÛÜšÙ\œÈÚ]\È[˜X›Y™\Z\ˆœšY[™H[š]È[™ÝXÝ\™\È[œÝXYÙˆZ[š[™Ëˆ
+‹Âˆ]]Ô™\Z\Îˆ›ÛÛX[ŽÂˆ™\Z\•\™Ù]Îˆ[X™\ŽÂˆÊŠˆ[[™[^H™Z[™È™\Z\™YˆÙ\\˜]H™XØ]\ÙH™[^HQÈÝ™\›\[š]ØZ[[™ÈQËˆ
+‹Âˆ™\Z\”™[^U\™Ù]Îˆ[X™\ŽÂˆÊŠˆ\œÚ\Ý[ÛÜšÙ\ˆ]Kˆ[Ý™HÜ™\œÈ™XÛÛYHÛ]H[œÝXYÙˆ™\Ý[Z[™ÈZ[š[™Ëˆ
+‹ÂˆÛÜšÙ\“[ÙOÎˆ›Z[™HˆšÛˆ˜ÛÛœÝXÝˆœ™\Z\ˆŽÂˆZ[\™Ù]Îˆ[X™\ŽÂˆÊŠˆÜ™\™YÛÛœÝXÝ[ÛˆÚ]\È\ÜÚYÛ™YÈ\ÈÛÜšÙ\‹ˆ
+‹ÂˆZ[]Y]YOÎˆ[X™\–×NÂˆÊŠˆÛÛX˜]™Z]š[ÜˆÙ[XÝYœ›ÛHHÛÛ^X[ÛÛ[X[™˜\‹ˆ
+‹ÂˆÝ[˜ÙOÎˆœ\œÝYHˆšÛˆœ]›ÛŽÂˆ]›ÛÎˆÈNˆÈŽˆÈ™^ˆ˜Hˆ˜ˆˆNÂˆ™\Z\š[™ÏÎˆ›ÛÛX[ŽÂˆÊŠˆÚ\\ˆXÛÛ›Û^HÝ]KˆÛ›HH[H\ÞYY[™\Ý\˜™YÚ\\ˆX\›œÈÜ™Y]Ëˆ
+‹ÂˆÚ\\“[ÙOÎˆ›[Øš[Hˆ™\ÞZ[™Èˆ™\ÞYYˆœXÚÚ[™ÈŽÂˆÊŠˆÙXÛÛ™ÈÛÛ\]Y[ˆHÝ\œ™[Ú\\ˆ\Þ[Y[ÜˆXÚÚ[™È˜[œÚ][Û‹ˆ
+‹ÂˆÚ\\”›ÙÜ™\ÜÏÎˆ[X™\ŽÂŸNÂ\H›ÙXÝ[ÛˆHÂˆ\Nˆ[š]È\H—NÂˆ[\ÙYˆ[X™\ŽÂˆ\˜][ÛŽˆ[X™\ŽÂˆ]Y]YOÎˆ[š]È\H—V×NÂŸNÂ\HZ[[™ÈHÂˆYˆ[X™\ŽÂˆX[Nˆœ^Y\ˆˆ™[™[^HŽÂˆ\NˆšHˆœ™Yš[™\žHˆ˜˜\œ˜XÚÜÈˆ\œ™]ŽÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆˆ[X™\ŽÂˆX^ˆ[X™\ŽÂˆ›ÙÜ™\ÜÏÎˆ[X™\ŽÂˆÊŠˆÛÛœÝXÝ[Ûˆ[YH[ˆÙXÛÛ™ËˆÛ\ˆØ]™\ÈÚ]Ý]]ÙY\Z\ˆÜšYÚ[˜[[Z[™Ëˆ
+‹ÂˆÛÛœÝXÝ[Û‘\˜][ÛÎˆ[X™\ŽÂˆÊŠˆHÝXÝ\™H™[XZ[œÈHÚ\™Yœ˜[YH[[[ˆ\ÜÚYÛ™YÛÜšÙ\ˆ™XXÚ\È]ˆ
+‹ÂˆÛÛœÝXÝ[Û”Ý\YÎˆ›ÛÛX[ŽÂˆ›ÙXÝ[ÛÎˆ›ÙXÝ[ÛŽÂˆ˜[OÎˆÂˆÊŠˆ\Ý˜XÚÙYÙ[žHZ[H[™ÛH[™œšYYˆš\š[™Ë\ÜÙHÚ[™ÝËˆ
+‹Âˆ\œ™]˜XÚ[™ÏÎˆ[X™\ŽÂˆ\œ™]š\™U[[Îˆ[X™\ŽÂˆÊŠˆÚÜ™XÛÝ™\žHÚ[™ÝÈY\ˆH›ÙXÝ[Ûˆ\œÝˆ
+‹ÂˆÛÛÛÝÛÎˆ[X™\ŽÂˆÊŠˆHXÚÙYH™XÛÛY\ÈH™\žHÛÝÈ˜XÚÙYÛÛ[X[™Ü˜]Û\‹ˆ
+‹ÂˆXÚÙYÎˆ›ÛÛX[ŽÂˆ[Øš[U\™Ù]ÎˆÂˆ[Øš[Q˜XÚ[™ÏÎˆ[X™\ŽÂˆ™[ØØ][ÛÎˆÈ[ÙNˆœXÚÈˆ™\ÞHŽÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂŸNÂ\H™\ÛÝ\˜ÙRÚ[™H˜Ü™Y]Èˆ˜[ÞHŽÂ\HÜž\Ý[HÈˆ[X™\ŽÈNˆ[X™\ŽÈ[[Ý[ˆ[X™\ŽÈÚ[™Îˆ™\ÛÝ\˜ÙRÚ[™NÂ\HØš™XÝ]™HHÂˆYˆ[X™\ŽÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆÝÛ™\Žˆœ^Y\ˆˆ™[™[^Hˆ›™]]˜[ŽÂˆØ\\™Nˆ[X™\ŽÂˆÊŠˆ›ÜYšYYÚ[]]\Ý˜[™Y›Ü™HØ\œš\ÛÛ™Y›ÛÜ\œÈØ[ˆ™H]ˆ
+‹Âˆˆ[X™\ŽÂˆX^ˆ[X™\ŽÂˆÊŠˆX]Ú[YHÚ[ˆ]]ÛX]XÈ™XÛÛœÝXÝ[ÛˆX^H™YÚ[‹ˆ
+‹Âˆ™XZ[]Îˆ[X™\ŽÂˆÊŠˆ™\›Ë]Ë[Û™H™XÛÛœÝXÝ[Ûˆ›ÙÜ™\ÜËˆH™[^HÝ^\È[\ØX›H[[ÛÛ\]Kˆ
+‹Âˆ™XZ[›ÙÜ™\ÜÏÎˆ[X™\ŽÂŸNÂ\HÚÝHÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆX[Nˆœ^Y\ˆˆ™[™[^HŽÂˆÚ[™ˆ˜[]ˆœÚ[ŽÂˆY™Nˆ[X™\ŽÂˆX^Y™Nˆ[X™\ŽÂŸNÂ\H[XYÙS[X™\ˆHÈˆ[X™\ŽÈNˆ[X™\ŽÈ[[Ý[ˆ[X™\ŽÈY™Nˆ[X™\ŽÈX[Nˆœ^Y\ˆˆ™[™[^HˆNÂ\H]XÚÐ[\HÂˆ\™Ù]Yˆ[X™\ŽÂˆX[Nˆœ^Y\ˆˆ™[™[^HŽÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆÝ\Y]ˆ[X™\ŽÂˆ^\™\Ð]ˆ[X™\ŽÂŸNÂ\HØ[YHHÂˆ[š]Îˆ[š]×NÂˆZ[[™ÜÎˆZ[[™Ö×NÂˆÜž\Ý[ÎˆÜž\Ý[×NÂˆØš™XÝ]™\ÎˆØš™XÝ]™V×NÂˆÚÝÎˆÚÝ×NÂˆ[XYÙS[X™\œÎˆ[XYÙS[X™\–×NÂˆ]XÚÐ[\Îˆ]XÚÐ[\×NÂˆÜ™Y]Îˆ[X™\ŽÂˆ[™[^PÜ™Y]Îˆ[X™\ŽÂˆ[ÞNˆ[X™\ŽÂˆ[™[^P[ÞNˆ[X™\ŽÂˆ[[ˆ[X™\ŽÂˆ[™[^R[[ˆ[X™\ŽÂˆÝÙ\Žˆ[X™\ŽÂˆ[™[^TÝÙ\Îˆ[X™\ŽÂˆØ]™Nˆ[X™\ŽÂˆ[YNˆ[X™\ŽÂˆÙ[XÝYˆ[X™\–×NÂˆØ[Y\˜NˆÂˆ›ÛÛNˆ[X™\ŽÂˆ[ÙNˆœÙ[XÝˆ›[Ý™Hˆ›[Ý™KY[™ØYÙHˆ›[Ý™KZHˆœ™\Z\ˆˆœÙ]\]›ÛXHˆœÙ]\]›ÛXˆˆ˜Z[\™Yš[™\žHˆ˜Z[X˜\œ˜XÚÜÈˆ˜Z[]\œ™]ˆœÙ]\˜[HŽÂˆY\ÜØYÙNˆÝš[™ÎÂˆÝ™\ŽˆˆˆÛÛˆˆ›ÜÝŽÂˆ™^Yˆ[X™\ŽÂˆØ]™P]ˆ[X™\ŽÂˆZU[šÐ]ˆ[X™\ŽÂˆZPXÝ[Û]ˆ[X™\ŽÂˆZP]XÚÐ]ˆ[X™\ŽÂˆY\]™Nˆ[X™\ŽÂˆ™\Ý[™XÛÜ™YÎˆ›ÛÛX[ŽÂˆX]ÚÝ]ÎˆX]ÚÝ]ÎÂˆÊŠˆÛ™Hš]\ˆX\Ù[ˆHÙ[Ý^\È™]™X[YY\ˆH^Y\ˆ\ÈÙY[ˆ]ˆ
+‹Âˆ›ÙÔÙY[Žˆ[X™\–×NÂˆÊŠˆ^Y\‹\Ù[XÝYX]Ú[KˆÛ\ˆØ]™\ÈY˜][ÈXÝXØ[›ÙËˆ
+‹Âˆ›ÙÑ[˜X›Yˆ›ÛÛX[ŽÂˆ›ÜYšYYÎˆ›ÛÛX[ŽÂˆ›ÜYžT›ÙXÝ[ÛÎˆÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆ[™[^Q›ÜYšYYÎˆ›ÛÛX[ŽÂˆ[™[^Q›ÜYžT›ÙXÝ[ÛÎˆÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆØÝš[™OÎˆØÝš[™NÂˆØÝš[™T›ÙXÝ[ÛÎˆÈ\NˆØÝš[™NÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆ[™[^QØÝš[™OÎˆØÝš[™NÂˆ[™[^QØÝš[™T›ÙXÝ[ÛÎˆÈ\NˆØÝš[™NÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆ˜YS™]ÛÜšÏÎˆ›ÛÛX[ŽÂˆ˜YS™]ÛÜšÔ›ÙXÝ[ÛÎˆÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆ[™[^U˜YS™]ÛÜšÏÎˆ›ÛÛX[ŽÂˆ[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛÎˆÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆNÂˆ[™[^QØÝš[™RÛ›ÝÛÎˆ›ÛÛX[ŽÂˆØÛÝ]Y[™[^QØÝš[™OÎˆØÝš[™H››Û™HŽÂˆX\™\œÚ[ÛÎˆ[X™\ŽÂŸNÂ‚˜ÛÛœÝÐU‘WÒÑVHH™œ›ÛY\‹XÛÛ[X[™\Ø]™K]ŒHŽÂ˜ÛÛœÝPS•PSÔÐU‘WÒÑVHH™œ›ÛY\‹XÛÛ[X[™[X[X[\Ø]™K]ŒHŽÂ˜ÛÛœÝ“Ñ’SWÒÑVHH™œ›ÛY\‹XÛÛ[X[™YY™šXÝ[K]ŒHŽÂ˜ÛÛœÝÓÓSPS‘Ô“Ñ’SWÒÑVHH™œ›ÛY\‹XÛÛ[X[™XÛÛ[X[™\›Ùš[K]ŒHŽÂ˜ÛÛœÝÓÓSPS‘T—ÒÑVHH™œ›ÛY\‹XÛÛ[X[™XXÝ]™KXÛÛ[X[™\‹]ŒHŽÂ˜ÛÛœÝÒS‘ÓWÔÐU‘WÓRQÔUSÓ—ÒÑVHH™œ›ÛY\‹XÛÛ[X[™\Ú[™ÛK\Ø]™K[ZYÜ˜]Y]ŒHŽÂ‚™[˜Ý[ÛˆZYÜ˜]PÛÛ[X[™\”ÝÜ˜YÙJ
+HÂˆYˆ
+\[ÙˆÚ[™ÝÈOOH[™Yš[™YˆØØ[ÝÜ˜YÙK™Ù]][JÒS‘ÓWÔÐU‘WÓRQÔUSÓ—ÒÑVJJH™]\›ŽÂˆÛÛœÝÙ[XÝYHØØ[ÝÜ˜YÙK™Ù]][JÓÓSPS‘T—ÒÑVJHOOH‘ØXœšY[ˆÈ™ØXœšY[ˆˆ[\ˆŽÂˆÛÛœÝZYÜ˜]HH
+\™Ù]ˆÝš[™ËÝY™š^ˆÝš[™ÊHOˆÂˆÛÛœÝÙ[XÝY˜[YHHØØ[ÝÜ˜YÙK™Ù]][Jœ›ÛY\‹XÛÛ[X[™IÜÙ[XÝYKIÜÝY™š^K]ŒX
+NÂˆÛÛœÝ˜[˜XÚÕ˜[YHHØØ[ÝÜ˜YÙK™Ù]][Jœ›ÛY\‹XÛÛ[X[™IÜÙ[XÝYOOH[\ˆˆÈ™ØXœšY[ˆˆ[\ˆŸKIÜÝY™š^K]ŒX
+NÂˆÛÛœÝ˜[YHHÙ[XÝY˜[YHØØ[ÝÜ˜YÙK™Ù]][J\™Ù]
+H˜[˜XÚÕ˜[YNÂˆYˆ
+˜[YJHØØ[ÝÜ˜YÙKœÙ]][J\™Ù]˜[YJNÂˆNÂˆZYÜ˜]JÐU‘WÒÑVKœØ]™HŠNÂˆZYÜ˜]JPS•PSÔÐU‘WÒÑVK›X[X[\Ø]™HŠNÂˆZYÜ˜]J“Ñ’SWÒÑVK™Y™šXÝ[HŠNÂˆØØ[ÝÜ˜YÙKœ™[[Ý™R][JÓÓSPS‘T—ÒÑVJNÂˆØØ[ÝÜ˜YÙKœÙ]][JÒS‘ÓWÔÐU‘WÓRQÔUSÓ—ÒÑVKŒHŠNÂŸB‚\HX]ÚÝ]ÈHÂˆ^Y\XÝ[ÛœÎˆ[X™\ŽÂˆYX[š[™Ù[XÝ[ÛœÎˆ[X™\ŽÂˆÜ™\œÎˆ[X™\ŽÂˆ[š]ÐZ[ˆ[X™\ŽÂˆÛÛX˜][š]ÐZ[ˆ[X™\ŽÂˆ[š]ÓÜÝˆ[X™\ŽÂˆ[™[^U[š]Ñ\Ý›ÞYYˆ[X™\ŽÂˆ˜\ÙQ[XYÙNˆ[X™\ŽÂˆXZÐ\›^Nˆ[X™\ŽÂˆÝ[Ü™Y]ÔÜ[ˆ[X™\ŽÂˆÝ\Y]ˆ[X™\ŽÂŸNÂ\HX]Ú™]šY]ÈHX]ÚÝ]È	ˆÈ™\Ý[ˆÛÛˆˆ›ÜÝŽÈ\˜][ÛŽˆ[X™\ŽÈØÛÜ™Nˆ[X™\ŽÈÝ[[X\žNˆÝš[™ÎÈÛÛ[X[™Îˆ[X™\ˆNÂ\HY™šXÝ[T›Ùš[HHÈÚ[œÎˆ[X™\ŽÈÜÜÙ\Îˆ[X™\ŽÈ™XÙ[ˆ
+ÛÛˆˆ›ÜÝŠV×NÈÚÚ[ˆ[X™\ŽÈ™]šY]ÜÎˆX]Ú™]šY]Ö×HNÂ\HÛÛ[X[™›Ùš[HHÈˆ[X™\ŽÈÜ[Ú[Îˆ[X™\ŽÈ\Ý]Ø\™ˆ[X™\ŽÈš\™PÛÛ›Û˜[šÏÎˆ[X™\ˆNÂ˜ÛÛœÝ’T‘WÐÓÓ•“ÓÓPVÔS’ÈHNÂ˜ÛÛœÝ[\TÝ]ÈH
+
+NˆX]ÚÝ]ÈOˆ
+È^Y\XÝ[ÛœÎˆYX[š[™Ù[XÝ[ÛœÎˆÜ™\œÎˆ[š]ÐZ[ˆÛÛX˜][š]ÐZ[ˆ[š]ÓÜÝˆ[™[^U[š]Ñ\Ý›ÞYYˆ˜\ÙQ[XYÙNˆXZÐ\›^NˆÝ[Ü™Y]ÔÜ[ˆÝ\Y]ˆJNÂ™[˜Ý[Ûˆ™XYY™šXÝ[J
+NˆY™šXÝ[T›Ùš[HÂˆYˆ
+\[ÙˆÚ[™ÝÈOOH[™Yš[™YŠH™]\›ˆÈÚ[œÎˆÜÜÙ\Îˆ™XÙ[ˆ×KÚÚ[ˆ™]šY]ÜÎˆ×HNÂˆžHÂˆZYÜ˜]PÛÛ[X[™\”ÝÜ˜YÙJ
+NÂˆÛÛœÝH”ÓÓ‹œ\œÙJØØ[ÝÜ˜YÙK™Ù]][J“Ñ’SWÒÑVJH›[ŠH\È\X[Y™šXÝ[T›Ùš[Oˆ[Âˆ™]\›ˆÂˆÚ[œÎˆX]›X^
+[X™\ŠËÚ[œÊH
+KˆÜÜÙ\ÎˆX]›X^
+[X™\ŠË›ÜÜÙ\ÊH
+Kˆ™XÙ[ˆ\œ˜^Kš\Ð\œ˜^JËœ™XÙ[
+HÈKœ™XÙ[™š[\Š
+
+HOˆOOHÛÛˆˆOOH›ÜÝŠKœÛXÙJMJH\È
+ÛÛˆˆ›ÜÝŠV×Hˆ×KˆÚÚ[ˆX]›X^
+X]›Z[ŠL[X™\ŠËœÚÚ[
+H
+JKˆ™]šY]ÜÎˆ\œ˜^Kš\Ð\œ˜^JËœ™]šY]ÜÊHÈKœ™]šY]ÜËœÛXÙJMJH\ÈX]Ú™]šY]Ö×Hˆ×KˆNÂˆHØ]ÚÈ™]\›ˆÈÚ[œÎˆÜÜÙ\Îˆ™XÙ[ˆ×KÚÚ[ˆ™]šY]ÜÎˆ×HNÈBŸB™[˜Ý[ÛˆÛÛ[X[™›Ü“]™[
+]™[ˆ[X™\ŠHÂˆÛÛœÝ›Ý[™YHX]›X^
+KX]™›ÛÜŠ]™[
+JNÂˆ™]\›ˆL
+ˆ
+›Ý[™YHJH
+ˆ›Ý[™YÂŸB™[˜Ý[ÛˆÛÛ[X[™]™[›Ü–
+ˆ[X™\ŠHÂˆ]]™[HNÂˆÚ[H
+HÛÛ[X[™›Ü“]™[
+]™[
+ÈJJH]™[
+ÊÎÂˆ™]\›ˆ]™[ÂŸB™[˜Ý[Ûˆ™XYÛÛ[X[™›Ùš[J
+NˆÛÛ[X[™›Ùš[HÂˆYˆ
+\[ÙˆÚ[™ÝÈOOH[™Yš[™YŠH™]\›ˆÈˆÜ[Ú[Îˆ\Ý]Ø\™ˆš\™PÛÛ›Û˜[šÎˆNÂˆžHÂˆÛÛœÝÝÜ™YH”ÓÓ‹œ\œÙJØØ[ÝÜ˜YÙK™Ù]][JÓÓSPS‘Ô“Ñ’SWÒÑVJH›[ŠH\È\X[ÛÛ[X[™›Ùš[Oˆ[ÂˆYˆ
+ÝÜ™Y
+HÂˆÛÛœÝš\™PÛÛ›Û˜[šÈHX]›X^
+X]›Z[Š’T‘WÐÓÓ•“ÓÓPVÔS’ËX]™›ÛÜŠ[X™\ŠÝÜ™Y™š\™PÛÛ›Û˜[šÊH
+JJNÂˆ™]\›ˆÂˆˆX]›X^
+X]™›ÛÜŠ[X™\ŠÝÜ™Yž
+H
+JKˆÜ[Ú[ÎˆX]›X^
+š\™PÛÛ›Û˜[šËX]™›ÛÜŠ[X™\ŠÝÜ™YœÜ[Ú[ÊH
+JKˆ\Ý]Ø\™ˆX]›X^
+X]™›ÛÜŠ[X™\ŠÝÜ™Y›\Ý]Ø\™
+H
+JKˆš\™PÛÛ›Û˜[šËˆNÂˆBˆËÈ^\Ý[™ÈÛÛ[X[™\œÈÙY\Ü™Y]›ÜˆX]Ú\ÈÛÛ\]Y™Y›Ü™HBˆËÈ›ÙÜ™\ÜÚ[ÛˆÞ\Ý[HØ\È[›ÙXÙY‚ˆÛÛœÝ\ÝÜžHH™XYY™šXÝ[J
+NÂˆ™]\›ˆÈˆ\ÝÜžKÚ[œÈ
+ˆL
+È\ÝÜžK›ÜÜÙ\È
+ˆÜ[Ú[Îˆ\Ý]Ø\™ˆš\™PÛÛ›Û˜[šÎˆNÂˆHØ]ÚÂˆ™]\›ˆÈˆÜ[Ú[Îˆ\Ý]Ø\™ˆš\™PÛÛ›Û˜[šÎˆNÂˆBŸB™[˜Ý[ÛˆÛÛ[X[™›Ùš[T›ÙÜ™\ÜÊ›Ùš[NˆÛÛ[X[™›Ùš[JHÂˆÛÛœÝ]™[HÛÛ[X[™]™[›Ü–
+›Ùš[Kž
+NÂˆÛÛœÝ›ÛÜˆHÛÛ[X[™›Ü“]™[
+]™[
+NÂˆÛÛœÝÙZ[[™ÈHÛÛ[X[™›Ü“]™[
+]™[
+ÈJNÂˆ™]\›ˆÂˆ]™[ˆÚ[ÎˆX]›X^
+]™[HHH›Ùš[KœÜ[Ú[ÊKˆÝ\œ™[ˆ›Ùš[KžH›ÛÜ‹ˆ™YYYˆÙZ[[™ÈH›ÛÜ‹ˆ›ÙÜ™\ÜÎˆX]›X^
+X]›Z[ŠK
+›Ùš[KžH›ÛÜŠHÈX]›X^
+KÙZ[[™ÈH›ÛÜŠJJKˆNÂŸB™[˜Ý[ÛˆY\]™QY™šXÝ[J
+Nˆ[X™\ˆÂˆÛÛœÝH™XYY™šXÝ[J
+NÂˆYˆ
+Ú[œÈOOH	‰ˆ›ÜÜÙ\ÈOOH	‰ˆœ™XÙ[›[™ÝOOH
+H™]\›ˆŽŽÂˆ™]\›ˆX]›X^
+Ž‹X]›Z[ŠKŒNŽˆ
+È
+œÚÚ[ÈL
+H
+ˆŒÍŠJNÂŸB™[˜Ý[ÛˆY™šXÝ[R[™›Ê˜[YNˆ[X™\ŠHÂˆÛÛœÝ]™[HX]›X^
+KX]›Z[ŠKX]œ›Ý[™
+
+
+˜[YHHŽŠHÈŒÍŠH
+ˆ
+H
+ÈJJNÂˆÛÛœÝX™[ÈHÈ‘PTÒQTÕ‹‘PTÖH‹”ÕS‘T‘‹’T‘‹‘VT•—NÂˆ™]\›ˆÈ]™[X™[ˆX™[ÖÛ]™[HWHNÂŸB™[˜Ý[Ûˆ\ÑX\ÚY\Ý
+˜[YNˆ[X™\ŠHÂˆ™]\›ˆ˜[YHHŽÎÂŸB™[˜Ý[ÛˆØ]™T™\Ý[
+™\Ý[ˆÛÛˆˆ›ÜÝ‹ÎˆØ[YJHÂˆÛÛœÝÛÛ[X[™›Ùš[HH™XYÛÛ[X[™›Ùš[J
+NÂˆÛÛœÝH™XYY™šXÝ[J
+NÂˆÜ™\Ý[OOHÛÛˆˆÈÚ[œÈˆˆ›ÜÜÙ\È—JÊÎÂˆœ™XÙ[HË‹‹œœ™XÙ[™\Ý[KœÛXÙJMJNÂˆÛÛœÝÈHË›X]ÚÝ]ÎÂˆÛÛœÝ\›^HHË[š]Ë™š[\Š
+JHOˆKX[HOOHœ^Y\ˆˆ	‰ˆ\ÐÛÛX˜][š]
+JJK›[™ÝÂˆÛÛœÝY™šXÚY[˜ÞHHX]›Z[ŠKË˜ÛÛX˜][š]ÐZ[
+ˆKH
+ÈË™[™[^U[š]Ñ\Ý›ÞYY
+ˆˆHË[š]ÓÜÝ
+ˆKŒJNÂˆÛÛœÝXÛÛ›Û^HHX]›Z[ŠŒË[š]ÐZ[
+ˆKŒˆ
+ÈX]›Z[ŠËÝ[Ü™Y]ÔÜ[ÈŒ
+JNÂˆÛÛœÝ\ØÚ\[™HHX]›X^
+LŒX]›Z[ŠŒLˆHË˜˜\ÙQ[XYÙHÈÍHHË[š]ÓÜÝ
+ˆŽ
+JNÂˆÛÛœÝZ[]\ÈHX]›X^
+KË[YHÈŒ
+NÂˆÛÛœÝY™™XÝ]™P\HHË›YX[š[™Ù[XÝ[ÛœÈÈZ[]\ÎÂˆÛÛœÝÜ™\\HHË›Ü™\œÈÈZ[]\ÎÂˆÛÛœÝÛXÚÑY™šXÚY[˜ÞHHËœ^Y\XÝ[ÛœÈˆˆÈË›YX[š[™Ù[XÝ[ÛœÈÈËœ^Y\XÝ[ÛœÂˆˆÂˆÛÛœÝXÝ]š]HHX]›Z[ŠL‹Y™™XÝ]™P\H
+ˆŽJNÂˆÛÛœÝÛÛ›ÛHX]›Z[Š‹Ü™\\H
+ˆKJH
+ÈX]›Z[ŠÛXÚÑY™šXÚY[˜ÞH
+ˆ
+NÂˆÛÛœÝØÛÜ™HHX]›X^
+X]›Z[ŠL
+™\Ý[OOHÛÛˆˆÈˆJH
+ÈY™šXÚY[˜ÞH
+ÈXÛÛ›Û^H
+È\ØÚ\[™H
+ÈXÝ]š]H
+ÈÛÛ›Û
+ÈX]›Z[ŠL‹\›^H
+ˆKŒŠJJNÂˆÛÛœÝÝ[[X\žHH™\Ý[OOHÛÛˆ‚ˆÈØÛÜ™HHÍHÈ‘ÛZ[˜[Ú[ˆˆˆØÛÜ™HHNÈ”Ý›Û™ÈÚ[ˆˆˆÛÜÙHÚ[ˆ‚ˆˆØÛÜ™HHÈ”›ÛZ\Ú[™ÈÜÜÈˆˆ“X\›š[™ÈX]ÚŽÂˆœÚÚ[HX]œ›Ý[™
+X]›X^
+X]›Z[ŠLœÚÚ[
+ˆÈ
+ÈØÛÜ™H
+ˆŒÊJJNÂˆÛÛœÝÛÛ›ÛY\[šÜÈH
+Ë›Øš™XÝ]™\È×JK™š[\Š
+Øš™XÝ]™JHOˆØš™XÝ]™K›ÝÛ™\ˆOOHœ^Y\ˆŠK›[™ÝÂˆÛÛœÝ\XÚ\][ÛˆHX]›X^
+Œ‹X]›Z[ŠKË[YHÈ
+JNÂˆÛÛœÝÛÛ[X[™HX]›X^
+X]œ›Ý[™
+
+ØÛÜ™H
+ˆˆ
+È
+™\Ý[OOHÛÛˆˆÈHˆN
+H
+ÈÛÛ›ÛY\[šÜÈ
+ˆ
+H
+ˆ\XÚ\][ÛŠJNÂˆœ™]šY]ÜÈHË‹‹œœ™]šY]ÜËÈ‹‹œË™\Ý[\˜][ÛŽˆË[YKØÛÜ™KÝ[[X\žKÛÛ[X[™WKœÛXÙJMJNÂˆØØ[ÝÜ˜YÙKœÙ]][J“Ñ’SWÒÑVK”ÓÓ‹œÝš[™ÚYžJ
+JNÂˆØØ[ÝÜ˜YÙKœÙ]][JÓÓSPS‘Ô“Ñ’SWÒÑVK”ÓÓ‹œÝš[™ÚYžJÂˆ‹‹˜ÛÛ[X[™›Ùš[KˆˆÛÛ[X[™›Ùš[Kž
+ÈÛÛ[X[™ˆ\Ý]Ø\™ˆÛÛ[X[™ˆHØ]\ÙšY\ÈÛÛ[X[™›Ùš[JJNÂŸB‚‹ËÈH˜]YšY[\È[[[Û˜[H\™Ù\ˆ[ˆHšY]ÜÜˆHZ[š[X\\ÈB‹ËÈ˜\ÝØ^HÈ[\\›Ý[™]ÛˆÝXÚØÜ™Y[œË‚˜ÛÛœÝÈHÌˆHNLÂ˜ÛÛœÝVQT—ÐTÑHHÈˆÌŒNˆÈˆH\ÈÛÛœÝÂ˜ÛÛœÝS‘SVWÐTÑHHÈˆÈHÌŒNˆÈˆH\ÈÛÛœÝÂ˜ÛÛœÝ“Ñ×ÐÑSHLÂ˜ÛÛœÝ“Ñ×ÐÓÓÈHX]˜ÙZ[
+ÈÈ“Ñ×ÐÑS
+NÂ˜ÛÛœÝ“Ñ×Ô“ÕÔÈHX]˜ÙZ[
+È“Ñ×ÐÑS
+NÂ˜ÛÛœÝ“Ñ×ÐÓÕS•H“Ñ×ÐÓÓÈ
+ˆ“Ñ×Ô“ÕÔÎÂ\HXÝXØ[]X]HHÈYˆ[X™\ŽÈˆ[X™\ŽÈNˆ[X™\ŽÈžˆ[X™\ŽÈžNˆ[X™\ŽÈ›Ý][ÛŽˆ[X™\ŽÈ˜[\Îˆ™XYÛ›HÛ[X™\‹[X™\—HNÂ‹ËÈ[]˜]Y]X]\È\™H™]\™Yœ›ÛHHÙXˆ›ÝÝ\KˆÙY\[™ÈH›Ý][™Â‹ËÈ[\œÈÜ›X[XZÙ\ÈH]\ˆ[š]H\œ˜Z[ˆ\ÜÈX\ÚY\ˆÈ™]š\Ú]Ú]Ý]‹ËÈX]š[™È[žHÛY™ˆÛÛ\Ú[Û‹˜[\›Ý][™Ë\Üˆ[XYÙH›Û\È[ˆX]Ú\Ë‚˜ÛÛœÝPÕPÐSÔUPUTÎˆ™XYÛ›HXÝXØ[]X]V×HH×NÂ˜ÛÛœÝ[™ÛQ[HH
+Nˆ[X™\‹Žˆ[X™\ŠHOˆX]˜XœÊX]˜][ŒŠX]œÚ[ŠHHŠKX]˜ÛÜÊHHŠJJNÂ‹ËÈÛY™ˆÙYÛY[È›Ü›HHÛÜÙY[]˜]Y\š[Y]\ˆ^Ù\]ÛÈ™X[˜[\Ø\Ë‚‹ËÈÜ›Ý[™[š]È]\Ý[\ˆ›ÝYÚHÚÚÙNÈ›Û™\ÈX^H›HÝ™\ˆH[\™HšYÙK‚˜ÛÛœÝT”RS—Ô’QÑTÈHPÕPÐSÔUPUTË™›]X\
+
+]X]K]X]R[™^
+HO‚ˆ\œ˜^K™œ›ÛJÈ[™ÝˆŽK
+Ë[™^
+HOˆÂˆÛÛœÝ[™ÛHH
+[™^ÈŽ
+H
+ˆX]”H
+ˆŽÂˆÛÛœÝØØ[[™ÛHH[™ÛHH]X]Kœ›Ý][ÛŽÂˆYˆ
+]X]Kœ˜[\ËœÛÛYJ
+˜[\
+HOˆ[™ÛQ[JØØ[[™ÛK˜[\
+HŒÊJH™]\›ˆ[Âˆ™]\›ˆÂˆYˆJŒ
+È]X]R[™^
+ˆ
+È[™^
+Kˆˆ]X]Kž
+ÈX]˜ÛÜÊ[™ÛJH
+ˆ]X]KœžˆNˆ]X]KžH
+ÈX]œÚ[Š[™ÛJH
+ˆ]X]KœžKˆŽˆËˆ]X]RYˆ]X]KšYˆNÂˆJK™š[\Š
+šYÙJNˆšYÙH\ÈÈYˆ[X™\ŽÈˆ[X™\ŽÈNˆ[X™\ŽÈŽˆ[X™\ŽÈ]X]RYˆ[X™\ˆHOˆ›ÛÛX[ŠšYÙJJKŠNÂ˜ÛÛœÝQÒÑÔ“ÕS‘ÔQUTÈHLŽÂ˜ÛÛœÝTS’×ÑSPQÑWÐ“Ó•TÈHŒNÂ\Hš\Ú[Û”ÛÝ\˜ÙHH	ˆÈŽˆ[X™\ˆNÂ‚™[˜Ý[ÛˆX[Uš\Ú[ÛŠÎˆØ[YKX[Nˆ[š]ÈX[H—JNˆš\Ú[Û”ÛÝ\˜ÙV×HÂˆ™]\›ˆÂˆ‹‹™Ë[š]Âˆ™š[\Š
+JHOˆKX[HOOHX[H	‰ˆKšˆ
+Bˆ›X\
+
+JHOˆ
+ÈˆKžNˆKžKŽˆK\HOOHÛÜšÙ\ˆˆÈMHˆK\HOOH™›Û™HˆÈÌÌˆNLJJKˆ‹‹™Ë˜Z[[™ÜÂˆ™š[\Š
+ŠHOˆ‹X[HOOHX[H	‰ˆ‹šˆ
+Bˆ›X\
+
+ŠHOˆ
+Èˆ‹žNˆ‹žKŽˆ‹\HOOHšHˆÈ
+‹œXÚÙYÈNLˆÕTWÔQUTÊHˆŒÌJJKˆNÂŸB™[˜Ý[Ûˆ^Y\•š\Ú[ÛŠÎˆØ[YJNˆš\Ú[Û”ÛÝ\˜ÙV×HÂˆ™]\›ˆX[Uš\Ú[ÛŠËœ^Y\ˆŠNÂŸB™[˜Ý[Ûˆ\Õš\ÚX›Q›ÜŠÎˆØ[YKX[Nˆ[š]ÈX[H—KÚ[ˆY[™ÈH
+HÂˆYˆ
+YË™›ÙÑ[˜X›Y
+H™]\›ˆYNÂˆ™]\›ˆX[Uš\Ú[ÛŠËX[JKœÛÛYJ
+ŠHOˆX]š\Ý
+‹žHÚ[ž‹žHHÚ[žJHH‹œˆ
+ÈY[™ÊNÂŸB™[˜Ý[Ûˆ\Õš\ÚX›JÎˆØ[YKÚ[ˆY[™ÈH
+HÂˆ™]\›ˆ\Õš\ÚX›Q›ÜŠËœ^Y\ˆ‹Ú[Y[™ÊNÂŸB™[˜Ý[Ûˆ\Ñ\ØÛÝ™\™Y
+ÎˆØ[YKÚ[ˆ
+HÂˆYˆ
+YË™›ÙÑ[˜X›Y
+H™]\›ˆYNÂˆÛÛœÝÛÛHX]›X^
+X]›Z[Š“Ñ×ÐÓÓÈHKX]™›ÛÜŠÚ[žÈ“Ñ×ÐÑS
+JJNÂˆÛÛœÝ›ÝÈHX]›X^
+X]›Z[Š“Ñ×Ô“ÕÔÈHKX]™›ÛÜŠÚ[žHÈ“Ñ×ÐÑS
+JJNÂˆ™]\›ˆ›ÛÛX[ŠË™›ÙÔÙY[Ë–Ü›ÝÈ
+ˆ“Ñ×ÐÓÓÈ
+ÈÛÛJNÂŸB™[˜Ý[ÛˆØš™XÝ]™R[[
+ÎˆØ[YKØš™XÝ]™NˆØš™XÝ]™JHÂˆÛÛœÝš\ÚX›HH\Õš\ÚX›JËØš™XÝ]™KQÒÑÔ“ÕS‘ÔQUTÊNÂˆ™]\›ˆÈš\ÚX›K\ØÛÝ™\™Yˆš\ÚX›H\Ñ\ØÛÝ™\™Y
+ËØš™XÝ]™JHNÂŸB™[˜Ý[Ûˆ™]™X[›ÙÊÎˆØ[YJHÂˆYˆ
+P\œ˜^Kš\Ð\œ˜^JË™›ÙÔÙY[ŠHË™›ÙÔÙY[‹›[™ÝOOH“Ñ×ÐÓÕS•
+HË™›ÙÔÙY[ˆH\œ˜^J“Ñ×ÐÓÕS•
+K™š[
+
+NÂˆYˆ
+YË™›ÙÑ[˜X›Y
+HÂˆË™›ÙÔÙY[‹™š[
+JNÂˆ™]\›ŽÂˆBˆÛÛœÝš\Ú[ÛˆH^Y\•š\Ú[ÛŠÊNÂˆ›Üˆ
+]›ÝÈHÈ›ÝÈ“Ñ×Ô“ÕÔÎÈ›ÝÊÊÊBˆ›Üˆ
+]ÛÛHÈÛÛ“Ñ×ÐÓÓÎÈÛÛ
+ÊÊHÂˆÛÛœÝÞHÛÛ
+ˆ“Ñ×ÐÑS
+È“Ñ×ÐÑSÈŽÂˆÛÛœÝÞHH›ÝÈ
+ˆ“Ñ×ÐÑS
+È“Ñ×ÐÑSÈŽÂˆYˆ
+š\Ú[Û‹œÛÛYJ
+ŠHOˆX]š\Ý
+‹žHÞ‹žHHÞJHH‹œˆ
+È“Ñ×ÐÑS
+JHÂˆË™›ÙÔÙY[–Ü›ÝÈ
+ˆ“Ñ×ÐÓÓÈ
+ÈÛÛHHNÂˆBˆBŸB˜ÛÛœÝÝ]ÈHÂˆÛÜšÙ\ŽˆÈŽˆLËÜYYˆL‹[XYÙNˆË˜[™ÙNˆMK˜]NˆŽHKˆ›ÛÜ\ŽˆÈŽˆLKÜYYˆ‹[XYÙNˆË˜[™ÙNˆLK˜]NˆMHKˆ[šÎˆÈŽˆŒ‹ÜYYˆÎ[XYÙNˆŒ˜[™ÙNˆMK˜]NˆKŒMHKˆ›Û™NˆÈŽˆMËÜYYˆ‹[XYÙNˆLË˜[™ÙNˆLÌ˜]NˆÎKˆÚ\\ŽˆÈŽˆMÜYYˆ‹[XYÙNˆ˜[™ÙNˆ˜]NˆHKŸNÂ˜ÛÛœÝZ[[™ÔÝ]ÈHÂˆNˆÈŽˆMKˆ™Yš[™\žNˆÈŽˆˆKˆ˜\œ˜XÚÜÎˆÈŽˆKˆ\œ™]ˆÈŽˆKŸNÂ‹ÊŠ‚ˆ
+ˆÜš]HÚY]È]™H™\žHY™™\™[˜[œÜ\™[X\™Ú[œËÛÈ˜]YšY[ØØ[Bˆ
+ˆØ[››Ý™H[™™\œ™Yœ›ÛHZ\ˆÛÝ\˜ÙKYœ˜[YH[Y[œÚ[ÛœËˆ\ÙH˜]È›Þ\È\™Bˆ
+ˆ[™YÈHš\ÚX›HÚ[ÝY]\Îˆ\›[Üˆ™XYÈX]šY\ˆ[ˆ[™˜[žKÚ[Bˆ
+ˆY™[œÚ]™H\œ™]È™[XZ[ˆÝX›Ü™[˜]HÈH[[™[^H[™˜\ÙHÝXÝ\™\Ë‚ˆ
+‹Â˜ÛÛœÝ[š]™[™\”Ú^™HHÂˆÛÜšÙ\ŽˆÈÎˆNˆŒˆKˆ›ÛÜ\ŽˆÈÎˆM‹ˆŒKˆ[šÎˆÈÎˆLL‹ˆLKˆ›Û™NˆÈÎˆ‹ˆÌKˆÚ\\ŽˆÈÎˆŒ‹ˆŒˆKŸH\ÈÛÛœÝÂ˜ÛÛœÝZ[[™Ô™[™\”Ú^™HHÂˆNˆÈÎˆM‹ˆLNKˆ™Yš[™\žNˆÈÎˆLLˆLˆKˆ˜\œ˜XÚÜÎˆÈÎˆLM‹ˆMˆKˆ\œ™]ˆÈÎˆˆˆKŸH\ÈÛÛœÝÂ˜ÛÛœÝS•SÔ‘SVWÔ‘S‘T—ÔÒV‘HHLÌÂ˜ÛÛœÝZ[[™ÒX[HÈNˆL™Yš[™\žNˆ˜\œ˜XÚÜÎˆLŒ\œ™]ˆÍŒNÂ˜ÛÛœÝ\œ™]Ý]ÈHÈ[XYÙNˆL‹˜[™ÙNˆŒL˜]NˆŽNÂ˜ÛÛœÝZ[[™ÐZ[[YHHÈ™Yš[™\žNˆ‹˜\œ˜XÚÜÎˆ‹\œ™]ˆMHNÂ˜ÛÛœÝ“Ô•Q–WÑTUSÓˆHÂ˜ÛÛœÝ[š]X[HÈÛÜšÙ\ŽˆÌ›ÛÜ\ŽˆMK[šÎˆ›Û™NˆLÍKÚ\\ŽˆŒNÂ˜ÛÛœÝ[š]ÛÜÝHÈÛÜšÙ\ŽˆML›ÛÜ\ŽˆLK[šÎˆ›Û™NˆÌÚ\\ŽˆÌNÂ˜ÛÛœÝ[š]Z[[YHHÈÛÜšÙ\Žˆ›ÛÜ\Žˆ‹[šÎˆMK›Û™NˆL‹Ú\\ŽˆŒNÂ˜ÛÛœÝPVÔUQUQHHŽÂ˜ÛÛœÝ•RSÐÓÔÕHÈ™Yš[™\žNˆŒ˜\œ˜XÚÜÎˆÍŒ\œ™]ˆH\ÈÛÛœÝÂ˜ÛÛœÝ“Ô•Q–WÒS•SÐÓÔÕHNÂ˜ÛÛœÝÐ’‘PÕU‘WÐÐTT‘WÕSQHHLÂ˜ÛÛœÝÐ’‘PÕU‘WÐÐTT‘WÔQUTÈHLNÂ˜ÛÛœÝÐ’‘PÕU‘WÒS•SÔUHHNÂ˜ÛÛœÝ‘SVWÑÐT”’TÓÓ—ÐÐTPÒUHHÂ˜ÛÛœÝ‘SVWÔS‘ÑWÓUSTQTˆHKŒNÂ˜ÛÛœÝ‘SVWÓPVÒHÌÂ˜ÛÛœÝ‘SVWÔ‘P•RSÐÓÓÓÕÓˆHLŽÂ˜ÛÛœÝ‘SVWÔ‘P•RSÑTUSÓˆHNÂ˜ÛÛœÝ‘SVWÔ‘TÓÕTÑWÐÓPTSÑHHNLÂ˜ÛÛœÝÕTWÐÐTPÒUHHLŽÂ˜ÛÛœÝÕTWÔQUTÈHÌÂ˜ÛÛœÝÐÕ’S‘WÒS•SÐÓÔÕHMÂ˜ÛÛœÝÐÕ’S‘WÑTUSÓˆHÌÂ˜ÛÛœÝQWÓ‘UÓÔ’×ÒS•SÐÓÔÕHMŒÂ˜ÛÛœÝQWÓ‘UÓÔ’×ÑTUSÓˆHNÂ˜ÛÛœÝÒTT—ÑTÖWÑTUSÓˆHÂ˜ÛÛœÝÒTT—ÔPÒ×ÑTUSÓˆHÂ˜ÛÛœÝÒTT—ÒSÓÓQWÔUHHNÂ˜ÛÛœÝÒTT—ÐÓÓPUÓÐÒÓÕUHNÂ‚‹ÊŠ‚ˆ
+ˆš\š[™ÈÚÝ[ÛÛ[][šXØ]HHÙX\Ûˆ\ØÚ\™ÙHÚ]Ý]™\XÚ[™ÈH[\™Bˆ
+ˆZ[Y[š]Ú]HÛYÚHZ\Ø[YÛ™Yœ˜[YKˆH›ÙHÝ^\ÈØÚÙYÚ[HBˆ
+ˆÚÜ˜\œ™[ÛY]™H[™]^ž›H[ÙH›ÝšYHHÛ›H™XÛÚ[[Ý[Û‹‚ˆ
+‹Â™[˜Ý[Ûˆ˜]ÕÙX\Û‘š\™PÝYJˆÛÛ^ˆØ[˜\Ô™[™\š[™ÐÛÛ^‘ˆ[™ÛNˆ[X™\‹ˆØØ[HHKˆYXÚ[šXØ[HYKŠHÂˆÛÛ^œØ]™J
+NÂˆÛÛ^œ›Ý]J[™ÛJNÂˆÛÛ^›[™PØ\Hœ›Ý[™ŽÂˆYˆ
+YXÚ[šXØ[
+HÂˆÛÛ^œÝ›ÚÙTÝ[HHœ™Ø˜JM‹NŽLŠHŽÂˆÛÛ^›[™UÚYHH
+ˆØØ[NÂˆÛÛ^˜™YÚ[”]
+
+NÂˆÛÛ^›[Ý™UÊMH
+ˆØØ[K
+NÂˆÛÛ^›[™UÊ
+ˆØØ[K
+NÂˆÛÛ^œÝ›ÚÙJ
+NÂˆÛÛ^œÝ›ÚÙTÝ[HHœ™Ø˜JMÌËNM‹NLKŽJHŽÂˆÛÛ^›[™UÚYHˆ
+ˆØØ[NÂˆÛÛ^˜™YÚ[”]
+
+NÂˆÛÛ^›[Ý™UÊMH
+ˆØØ[K
+NÂˆÛÛ^›[™UÊŒˆ
+ˆØØ[K
+NÂˆÛÛ^œÝ›ÚÙJ
+NÂˆBˆÛÛœÝ]^ž›HH
+YXÚ[šXØ[ÈŽˆŒŠH
+ˆØØ[NÂˆÛÛ^™š[Ý[HHœ™Ø˜JMKŒKLKŽMŠHŽÂˆÛÛ^œÚYÝÐÛÛÜˆHœ™Ø˜JMKNLÌ‹ŽJHŽÂˆÛÛ^œÚYÝÐ›\ˆHÈ
+ˆØØ[NÂˆÛÛ^˜™YÚ[”]
+
+NÂˆÛÛ^›[Ý™UÊ]^ž›H
+ÈH
+ˆØØ[K
+NÂˆÛÛ^›[™UÊ]^ž›KLËH
+ˆØØ[JNÂˆÛÛ^›[™UÊ]^ž›HHˆ
+ˆØØ[K
+NÂˆÛÛ^›[™UÊ]^ž›KËH
+ˆØØ[JNÂˆÛÛ^˜ÛÜÙT]
+
+NÂˆÛÛ^™š[
+
+NÂˆÛÛ^œ™\ÝÜ™J
+NÂŸB˜ÛÛœÝÒTT—ÓPVHÂ˜ÛÛœÝ“ÑPÕSÓ—ÐÓÓÓÕÓˆHÎÂ˜ÛÛœÝTÑQTÔÓÑ•ÐÐTHLÂ˜ÛÛœÝ‘TRT—ÔUHHÂ˜ÛÛœÝ‘TRT—ÐSÖWÔT—ÒHŒLŽÂ˜ÛÛœÝPRS•SSÑWÔU“ÓÔÐÐSˆHNNÂ˜ÛÛœÝÑS•–WÔS‘ÑWÓUSTQTˆHKŒÍNÂ˜ÛÛœÝUÔ’PS×ÒÑVHH™œ›ÛY\‹XÛÛ[X[™]]ÜšX[Ë]ŒHŽÂ˜ÛÛœÝTÓRTÔÑQÕT×ÒÑVHH™œ›ÛY\‹XÛÛ[X[™Y\ÛZ\ÜÙY]\Ë]ŒHŽÂ™[˜Ý[Ûˆ™]\˜[”™YÙ[”˜]J[š]ˆ[š]
+HÂˆÛÛœÝ]™[H[š]›]™[NÂˆ™]\›ˆ]™[HÈÈŒˆˆ]™[HˆÈŒHˆÂŸB™[˜Ý[Ûˆ[š]ÛÛX˜]˜[™ÙJ[š]ˆ[š]
+HÂˆÛÛœÝÝ[˜ÙS][\Y\ˆH[š]\HOOH›ÛÜ\ˆˆ	‰ˆ][š]™Ø\œš\ÛÛ™Y]	‰ˆ[š]œÝ[˜ÙHOOHšÛˆÈÑS•–WÔS‘ÑWÓUSTQTˆˆNÂˆ™]\›ˆÝ]ÖÝ[š]\WKœ˜[™ÙH
+ˆÝ[˜ÙS][\Y\ˆ
+ˆ
+[š]™Ø\œš\ÛÛ™Y]È‘SVWÔS‘ÑWÓUSTQTˆˆJNÂŸB™[˜Ý[Ûˆ\ÐÛÛX˜]\J\Nˆ[š]È\H—JNˆ\H\È›ÛÜ\ˆˆ[šÈˆ™›Û™HˆÂˆ™]\›ˆ\HOOH›ÛÜ\ˆˆ\HOOH[šÈˆ\HOOH™›Û™HŽÂŸB™[˜Ý[Ûˆ\ÐÛÛX˜][š]
+[š]ˆ[š]
+HÂˆ™]\›ˆ\ÐÛÛX˜]\J[š]\JNÂŸB™[˜Ý[Ûˆ\ÙY\\”ÙXÛÛ™
+ÛÝ[ˆ[X™\ŠHÂˆ™]\›ˆÛÝ[HTÑQTÔÓÑ•ÐÐTÈˆX]œÝÊÛÝ[HTÑQTÔÓÑ•ÐÐTKŒJH
+ˆŒÂŸB™[˜Ý[Ûˆ›ÙXÝ[Û‘\˜][Û‘›ÜŠÎˆØ[YKX[Nˆ[š]ÈX[H—K\Nˆ[š]È\H—JHÂˆYˆ
+\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆŠH™]\›ˆ[š]Z[[YVÝ\WNÂˆÛÛœÝ˜\œ˜XÚÜÈHË˜Z[[™ÜË™š[\Š
+Z[[™ÊHOˆZ[[™ËX[HOOHX[H	‰ˆZ[[™Ë\HOOH˜˜\œ˜XÚÜÈˆ	‰ˆZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊJK›[™ÝÂˆ™]\›ˆ[š]Z[[YVÝ\WH
+ˆ
+H
+ÈX]›X^
+˜\œ˜XÚÜÈHJH
+ˆŒN
+NÂŸB™[˜Ý[ÛˆÚ\\ÛÝ[›Ü•X[JÎˆØ[YKX[Nˆ[š]ÈX[H—JHÂˆÛÛœÝXÝ]™HHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHX[H	‰ˆ[š]\HOOH˜Ú\\ˆŠK›[™ÝÂˆÛÛœÝ]Y]YYHË˜Z[[™ÜÂˆ™š[\Š
+Z[[™ÊHOˆZ[[™ËX[HOOHX[JBˆœ™YXÙJ
+ÛÝ[Z[[™ÊHOˆÛÝ[
+Âˆ
+Z[[™Ëœ›ÙXÝ[ÛË\HOOH˜Ú\\ˆˆÈHˆ
+H
+Âˆ
+Z[[™Ëœ›ÙXÝ[ÛËœ]Y]YH×JK™š[\Š
+\JHOˆ\HOOH˜Ú\\ˆŠK›[™Ý
+NÂˆ™]\›ˆXÝ]™H
+È]Y]YYÂŸB™[˜Ý[ÛˆÝ\S][\Y\Š[š]ˆ[š]
+HÂˆ™]\›ˆ
+[š]œÝ\HÏÈÕTWÐÐTPÒUJHHÈÍHˆNÂŸB™[˜Ý[ÛˆX[QØÝš[™JÎˆØ[YKX[Nˆ[š]ÈX[H—JHÂˆ™]\›ˆX[HOOHœ^Y\ˆˆÈË™ØÝš[™HˆË™[™[^QØÝš[™NÂŸB™[˜Ý[ÛˆØÝš[™S][\Y\ŠÎˆØ[YK[š]ˆ[š]
+HÂˆÛÛœÝØÝš[™HHX[QØÝš[™JË[š]X[JNÂˆYˆ
+ØÝš[™HOOH˜Z\ˆˆ	‰ˆ[š]\HOOH™›Û™HŠH™]\›ˆKŒNÂˆYˆ
+ØÝš[™HOOH˜\›[Üˆˆ	‰ˆ[š]\HOOH[šÈŠH™]\›ˆKŒNÂˆ™]\›ˆNÂŸB™[˜Ý[ÛˆÛÝ[\“][\Y\Š]XÚÙ\Žˆ[š]\™Ù]ˆ[š]Z[[™ÊHÂˆÛÛœÝ\™Ù]\HH\™Ù]\NÂˆYˆ
+]XÚÙ\‹\HOOH›ÛÜ\ˆˆ	‰ˆ\™Ù]\HOOH™›Û™HŠH™]\›ˆKMNÂˆYˆ
+]XÚÙ\‹\HOOH™›Û™Hˆ	‰ˆ\™Ù]\HOOH[šÈŠH™]\›ˆKMNÂˆYˆ
+]XÚÙ\‹\HOOH[šÈˆ	‰ˆ\™Ù]\HOOH›ÛÜ\ˆŠH™]\›ˆKMNÂˆ™]\›ˆNÂŸB™[˜Ý[ÛˆÝXÝ\™S][\Y\Š]XÚÙ\Žˆ[š]\™Ù]ˆ[š]Z[[™ÊHÂˆ™]\›ˆZ\Õ[š]
+\™Ù]
+H	‰ˆ]XÚÙ\‹\HOOH™›Û™HˆÈKˆˆNÂŸB™[˜Ý[Ûˆ›Ü›X][Û‘\Ý[˜][ÛœÊ[š]Îˆ[š]×K\Ý[˜][ÛŽˆ
+HÂˆÛÛœÝ™\Ý[H™]ÈX\[X™\‹Š
+NÂˆYˆ
+[š]Ë›[™Ýˆ][š]Ë™]™\žJ\ÐÛÛX˜][š]
+JHÂˆ[š]Ë™›Ü‘XXÚ
+
+[š][™^
+HOˆ™\Ý[œÙ]
+[š]šYÂˆˆ\Ý[˜][Û‹ž
+È
+[™^	HÊH
+ˆ‹ˆNˆ\Ý[˜][Û‹žH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆ‹ˆJJNÂˆ™]\›ˆ™\Ý[ÂˆBˆÛÛœÝÙ[\ˆH[š]Ëœ™YXÙJ
+Ú[[š]
+HOˆ
+ÈˆÚ[ž
+È[š]žNˆÚ[žH
+È[š]žHJKÈˆNˆJNÂˆÙ[\‹žÏH[š]Ë›[™ÝÂˆÙ[\‹žHÏH[š]Ë›[™ÝÂˆÛÛœÝ[™ÛHHX]˜][ŒŠ\Ý[˜][Û‹žHHÙ[\‹žK\Ý[˜][Û‹žHÙ[\‹ž
+NÂˆÛÛœÝ›ÜØ\™HÈˆX]˜ÛÜÊ[™ÛJKNˆX]œÚ[Š[™ÛJHNÂˆÛÛœÝÚYHHÈˆY›ÜØ\™žKNˆ›ÜØ\™žNÂˆÛÛœÝ›ÝÜÎˆ\œ˜^OÈ\Nˆ[š]È\H—NÈ›ÜØ\™Ù™œÙ]ˆ[X™\ˆOˆHÂˆÈ\Nˆ[šÈ‹›ÜØ\™Ù™œÙ]ˆˆKˆÈ\Nˆ›ÛÜ\ˆ‹›ÜØ\™Ù™œÙ]ˆKˆÈ\Nˆ™›Û™H‹›ÜØ\™Ù™œÙ]ˆMKˆNÂˆ›ÝÜË™›Ü‘XXÚ
+
+È\K›ÜØ\™Ù™œÙ]JHOˆÂˆÛÛœÝ›ÝÈH[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH\JNÂˆ›ÝË™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆÛÛœÝÚYSÙ™œÙ]H
+[™^H
+›ÝË›[™ÝHJHÈŠH
+ˆÎÂˆ™\Ý[œÙ]
+[š]šYÂˆˆX]›X^
+ÌX]›Z[ŠÈHÌ\Ý[˜][Û‹ž
+È›ÜØ\™ž
+ˆ›ÜØ\™Ù™œÙ]
+ÈÚYKž
+ˆÚYSÙ™œÙ]
+JKˆNˆX]›X^
+ÌX]›Z[ŠHÌ\Ý[˜][Û‹žH
+È›ÜØ\™žH
+ˆ›ÜØ\™Ù™œÙ]
+ÈÚYKžH
+ˆÚYSÙ™œÙ]
+JKˆJNÂˆJNÂˆJNÂˆ™]\›ˆ™\Ý[ÂŸB™[˜Ý[Ûˆ\œ˜Z[“][\Y\ŠÎˆØ[YK]XÚÙ\Žˆ[š]\™Ù]ˆ[š]Z[[™ÊHÂˆÛÛœÝÛÛ›ÛYH
+Ë›Øš™XÝ]™\È×JK™š[\Š
+Øš™XÝ]™JHOˆØš™XÝ]™K›ÝÛ™\ˆOOH]XÚÙ\‹X[JK›[™ÝÂˆÛÛœÝ]XÚÙ\”]X]HH]XÚÙ\‹\HOOH™›Û™Hˆ	‰ˆ]X]P]
+]XÚÙ\ŠNÂˆÛÛœÝ\™Ù]]X]HH]X]P]
+\™Ù]
+NÂˆÛÛœÝ[]˜][ÛˆH]XÚÙ\”]X]H	‰ˆ]XÚÙ\”]X]KšYOOH\™Ù]]X]OËšYÈKŒHˆNÂˆ™]\›ˆ
+H
+ÈX]›Z[Š‹ÛÛ›ÛY
+H
+ˆTS’×ÑSPQÑWÐ“Ó•TÊH
+ˆ[]˜][ÛŽÂŸB‚™[˜Ý[Ûˆ]X]P]
+Ú[ˆ
+HÂˆ™]\›ˆPÕPÐSÔUPUTË™š[™
+
+]X]JHOˆ]X]PÛÛZ[œÊÚ[]X]KÎÍŠJNÂŸB™[˜Ý[Ûˆ]X]PÛÛZ[œÊÚ[ˆ]X]NˆXÝXØ[]X]KØØ[VHKØØ[VHHØØ[V
+HÂˆÛÛœÝHÚ[žH]X]KžHHÚ[žHH]X]KžNÂˆÛÛœÝÈHX]˜ÛÜÊ\]X]Kœ›Ý][ÛŠKÈHX]œÚ[Š\]X]Kœ›Ý][ÛŠNÂˆÛÛœÝH
+ˆÈHH
+ˆËHH
+ˆÈ
+ÈH
+ˆÎÂˆ™]\›ˆ
+È
+]X]Kœž
+ˆØØ[V
+JH
+Šˆˆ
+È
+HÈ
+]X]KœžH
+ˆØØ[VJJH
+ŠˆˆHNÂŸB™[˜Ý[Ûˆ]X]T˜[\Ú[
+]X]NˆXÝXØ[]X]K˜[\[™^ˆ[X™\‹ØØ[Nˆ[X™\ŠNˆÂˆÛÛœÝ˜[\H]X]Kœ˜[\ÖÜ˜[\[™^NÂˆÛÛœÝØØ[HX]˜ÛÜÊ˜[\
+H
+ˆ]X]Kœž
+ˆØØ[NÂˆÛÛœÝØØ[HHX]œÚ[Š˜[\
+H
+ˆ]X]KœžH
+ˆØØ[NÂˆÛÛœÝÈHX]˜ÛÜÊ]X]Kœ›Ý][ÛŠKÈHX]œÚ[Š]X]Kœ›Ý][ÛŠNÂˆ™]\›ˆÂˆˆ]X]Kž
+ÈØØ[
+ˆÈHØØ[H
+ˆËˆNˆ]X]KžH
+ÈØØ[
+ˆÈ
+ÈØØ[H
+ˆËˆNÂŸB™[˜Ý[Ûˆ\Ý[˜ÙUÔÙYÛY[
+Ú[ˆÝ\ˆ[™ˆ
+HÂˆÛÛœÝH[™žHÝ\žHH[™žHHÝ\žNÂˆÛÛœÝ[™ÝÜ]X\™YH
+ˆ
+ÈH
+ˆNÂˆÛÛœÝH[™ÝÜ]X\™YˆˆÈX]›X^
+X]›Z[ŠK
+
+Ú[žHÝ\ž
+H
+ˆ
+È
+Ú[žHHÝ\žJH
+ˆJHÈ[™ÝÜ]X\™Y
+JBˆˆÂˆ™]\›ˆX]š\Ý
+Ú[žH
+Ý\ž
+È
+ˆ
+KÚ[žHH
+Ý\žH
+ÈH
+ˆ
+JNÂŸB™[˜Ý[Ûˆ[”]X]T˜[\[™JÚ[ˆY[™ÈH
+HÂˆ™]\›ˆPÕPÐSÔUPUTËœÛÛYJ
+]X]JHO‚ˆ]X]Kœ˜[\ËœÛÛYJ
+Ë˜[\[™^
+HO‚ˆ\Ý[˜ÙUÔÙYÛY[
+ˆÚ[ˆ]X]T˜[\Ú[
+]X]K˜[\[™^N
+Kˆ]X]T˜[\Ú[
+]X]K˜[\[™^KŒÍ
+Kˆ
+HHMˆ
+ÈY[™Ëˆ
+Kˆ
+NÂŸB™[˜Ý[ÛˆÙYÛY[Ü›ÜÜÙ\Ô]X]JÝ\ˆ[™ˆ]X]NˆXÝXØ[]X]KØØ[HHJHÂˆÛÛœÝÓ›Ü›X[^™YH
+Ú[ˆ
+HOˆÂˆÛÛœÝHÚ[žH]X]KžHHÚ[žHH]X]KžNÂˆÛÛœÝÈHX]˜ÛÜÊ\]X]Kœ›Ý][ÛŠKÈHX]œÚ[Š\]X]Kœ›Ý][ÛŠNÂˆ™]\›ˆÂˆˆ
+
+ˆÈHH
+ˆÊHÈ
+]X]Kœž
+ˆØØ[JKˆNˆ
+
+ˆÈ
+ÈH
+ˆÊHÈ
+]X]KœžH
+ˆØØ[JKˆNÂˆNÂˆ™]\›ˆ\Ý[˜ÙUÔÙYÛY[
+ÈˆNˆKÓ›Ü›X[^™Y
+Ý\
+KÓ›Ü›X[^™Y
+[™
+JHHNÂŸB™[˜Ý[Ûˆ]X]Pž\\ÜÔÚ[
+Ý\ˆ\Ý[˜][ÛŽˆ]X]NˆXÝXØ[]X]JHÂˆÛÛœÝØ[™Y]\ÈH\œ˜^K™œ›ÛJÈ[™ÝˆLˆK
+Ë[™^
+HOˆÂˆÛÛœÝ[™ÛHH
+[™^ÈLŠH
+ˆX]”H
+ˆŽÂˆÛÛœÝØØ[HX]˜ÛÜÊ[™ÛJH
+ˆ]X]Kœž
+ˆKMNÂˆÛÛœÝØØ[HHX]œÚ[Š[™ÛJH
+ˆ]X]KœžH
+ˆKMNÂˆÛÛœÝÈHX]˜ÛÜÊ]X]Kœ›Ý][ÛŠKÈHX]œÚ[Š]X]Kœ›Ý][ÛŠNÂˆ™]\›ˆÂˆˆ]X]Kž
+ÈØØ[
+ˆÈHØØ[H
+ˆËˆNˆ]X]KžH
+ÈØØ[
+ˆÈ
+ÈØØ[H
+ˆËˆNÂˆJNÂˆËÈH[š][™XYH™\ÜÙYYØZ[œÝHÛÛ\Ú[Ûˆš[™Èš\œÝ™YYÈHÛX[‚ˆËÈÝ]Ø\™\ØØ\HÚ[ˆÛˆH™^œ˜[YHH™YÝ[\ˆÛË[YÈž\\ÜÈZÙ\ÂˆËÈÝ™\ˆ[™Ø\œšY\È]\›Ý[™H]X]H[œÝXYÙˆ˜XÚÈ[ÈHÛY™‹‚ˆYˆ
+]X]PÛÛZ[œÊÝ\]X]KKŒN
+JHÂˆ™]\›ˆØ[™Y]\ËœÛÜ
+
+KŠHO‚ˆX]š\Ý
+Ý\žHKžÝ\žHHKžJHHX]š\Ý
+Ý\žH‹žÝ\žHH‹žJKˆ
+VÌNÂˆBˆ™]\›ˆØ[™Y]\Âˆ™š[\Š
+Ú[
+HO‚ˆ\ÙYÛY[Ü›ÜÜÙ\Ô]X]JÝ\Ú[]X]KKŒMŠH	‰‚ˆ\ÙYÛY[Ü›ÜÜÙ\Ô]X]JÚ[\Ý[˜][Û‹]X]KKŒMŠKˆ
+BˆœÛÜ
+
+KŠHO‚ˆX]š\Ý
+Ý\žHKžÝ\žHHKžJH
+ÈX]š\Ý
+\Ý[˜][Û‹žHKž\Ý[˜][Û‹žHHKžJHBˆX]š\Ý
+Ý\žH‹žÝ\žHH‹žJHHX]š\Ý
+\Ý[˜][Û‹žH‹ž\Ý[˜][Û‹žHH‹žJKˆ
+VÌNÂŸB™[˜Ý[ÛˆØš™XÝ˜Y]\ÊØš™XÝˆ[š]Z[[™ÊHÂˆ™]\›ˆØš™XÝ\HOOHÛÜšÙ\ˆˆØš™XÝ\HOOH›ÛÜ\ˆˆØš™XÝ\HOOH[šÈˆØš™XÝ\HOOH™›Û™HˆØš™XÝ\HOOH˜Ú\\ˆ‚ˆÈÝ]ÖÛØš™XÝ\WKœ‚ˆˆZ[[™ÔÝ]ÖÛØš™XÝ\WKœŽÂŸB™[˜Ý[Ûˆ\Õ[š]
+Øš™XÝˆ[š]Z[[™ÊNˆØš™XÝ\È[š]Âˆ™]\›ˆÈÛÜšÙ\ˆ‹›ÛÜ\ˆ‹[šÈ‹™›Û™H‹˜Ú\\ˆ—Kš[˜ÛY\ÊØš™XÝ\H\È[š]È\H—JNÂŸB˜ÛÛœÝ[š]˜[YHH
+\Nˆ[š]È\H—JHO‚ˆ\HOOH[šÈˆÈ•S’Èˆˆ\HOOH™›Û™HˆÈ”Õ’RÑH“Ó‘Hˆˆ\KÕ\\Ø\ÙJ
+NÂ˜ÛÛœÝ[š]›ÛHH
+\Nˆ[š]È\H—JHO‚ˆ\HOOHÛÜšÙ\ˆˆÈ“RS‘Tˆˆˆ\HOOH›ÛÜ\ˆˆÈS•KPRTˆS‘S•–Hˆˆ\HOOH[šÈˆÈS•KRS‘S•–HT“SÔˆˆˆ\HOOH™›Û™HˆÈS•KPT“SÔˆRTˆˆˆ‘PÓÓ“ÓRPÈÔPÒPSTÕŽÂ˜ÛÛœÝ[š]]HH
+[š]ˆ[š]
+HOˆÂˆYˆ
+[š]™Ø\œš\ÛÛ™Y]
+H™]\›ˆS•S‘SVHÐT”’TÓÓˆ0­È
+ÉÓX]œ›Ý[™
+
+‘SVWÔS‘ÑWÓUSTQTˆHJH
+ˆL
+_IHS‘ÑXÂˆYˆ
+[š]\HOOH˜Ú\\ˆŠHÂˆYˆ
+[š]˜Ú\\“[ÙHOOH™\ÞYYŠH™]\›ˆ•QH‘UÓÔ’È0­È
+ÍŒÔ‘QUËÓRSˆŽÂˆYˆ
+[š]˜Ú\\“[ÙHOOH™\ÞZ[™ÈŠH™]\›ˆTÖRS‘È0­È	ÓX]œ›Ý[™
+
+
+[š]˜Ú\\”›ÙÜ™\ÜÈ
+HÈÒTT—ÑTÖWÑTUSÓŠH
+ˆL
+_IXÂˆYˆ
+[š]˜Ú\\“[ÙHOOHœXÚÚ[™ÈŠH™]\›ˆPÒÒS‘È0­È	ÓX]œ›Ý[™
+
+
+[š]˜Ú\\”›ÙÜ™\ÜÈ
+HÈÒTT—ÔPÒ×ÑTUSÓŠH
+ˆL
+_IXÂˆ™]\›ˆ‘PÓÓ“ÓRPÈÔPÒPSTÕ0­ÈSÐ’SHŽÂˆBˆYˆ
+\ÐÛÛX˜][š]
+[š]
+JH™]\›ˆ	Ý[š]›ÛJ[š]\J_IÝ[š]\HOOH›ÛÜ\ˆˆ	‰ˆ[š]œÝ[˜ÙHOOHšÛˆÈ0­ÈÑS•–H	ÓX]œ›Ý[™
+[š]ÛÛX˜]˜[™ÙJ[š]
+J_HS‘ÑXˆˆŸXÂˆYˆ
+[š]˜]]Ô™\Z\ŠH™]\›ˆPRS•SSÑIÝ[š]œÝ[˜ÙHOOHœ]›ÛˆÈˆU“ÓˆˆˆŸIÝ[š]œ™\Z\š[™ÈÈˆ0­È‘TRT’S‘ÈˆˆˆŸXÂˆYˆ
+[š]ÛÜšÙ\“[ÙHOOH˜ÛÛœÝXÝŠHÂˆÛÛœÝ]Y]YYH[š]˜Z[]Y]YOË›[™Ý
+[š]˜Z[\™Ù]ÈHˆ
+NÂˆ™]\›ˆÓÓ”Õ•PÕSÓˆUIÜ]Y]YYÈ0­È	Ü]Y]YYHÒUIÜ]Y]YYOOHHÈˆˆˆ”ÈŸHUQUQQˆˆŸXÂˆBˆYˆ
+[š]ÛÜšÙ\“[ÙHOOHœ™\Z\ˆŠH™]\›ˆ”‘TRTˆUHŽÂˆYˆ
+[š]ÛÜšÙ\“[ÙHOOHšÛŠH™]\›ˆ‘ÕPT‘ÔÕ0­ÈRS’S‘ÈUTÑQŽÂˆ™]\›ˆ[X™\‹š\Ò[YÙ\Š[š]œ™\ÛÝ\˜ÙU\™Ù]
+HÈ•T‘ÑUQRS’S‘Èˆˆ“RS‘TˆŽÂŸNÂ™[˜Ý[Ûˆ›Ü›X[^™U[š]Ê[š]Îˆ[š]×JNˆ[š]×HÂˆ™]\›ˆ[š]Ë›X\
+
+˜]ÊHOˆÂˆÛÛœÝ\HH
+˜]Ë\H\ÈÝš[™ÊHOOHØ[Ù\ˆˆÈ[šÈˆˆ˜]Ë\NÂˆÛÛœÝ˜\ÙHH[š]X[Ý\WNÂˆÛÛœÝ]™[HX]›X^
+KX]›Z[ŠË[X™\Š˜]Ë›]™[
+HJJNÂˆÛÛœÝ˜[šÓX^HX]œ›Ý[™
+˜\ÙH
+ˆX]œÝÊKŒL‹]™[HJJNÂˆÛÛœÝX^Bˆ[X™\‹š\Ñš[š]J˜]Ë›X^
+H	‰ˆ˜]Ë›X^ˆˆÈX]›Z[Š˜]Ë›X^˜[šÓX^
+Bˆˆ˜[šÓX^ÂˆÛÛœÝH[X™\‹š\Ñš[š]J˜]Ëš
+BˆÈX]›X^
+X]›Z[Š˜]ËšX^
+JBˆˆX^Âˆ™]\›ˆÂˆ‹‹œ˜]Ëˆ\KˆX^ˆˆˆX]›X^
+[X™\Š˜]Ëž
+H
+Kˆ]™[ˆ\ÝÛÛX˜]]ˆ[X™\‹š\Ñš[š]J˜]Ë›\ÝÛÛX˜]]
+HÈ˜]Ë›\ÝÛÛX˜]]ˆ[™Yš[™Yˆ˜XÚ[™Îˆ[X™\‹š\Ñš[š]J˜]Ë™˜XÚ[™ÊBˆÈ˜]Ë™˜XÚ[™Âˆˆ˜]ËX[HOOHœ^Y\ˆˆÈˆX]”Kˆ[Ý™Q[™ØYÙNˆ›ÛÛX[Š˜]Ë›[Ý™Q[™ØYÙH	‰ˆ˜]Ë\™Ù]
+KˆØ\œš\ÛÛ™Y]ˆ[X™\‹š\Ò[YÙ\Š˜]Ë™Ø\œš\ÛÛ™Y]
+HÈ˜]Ë™Ø\œš\ÛÛ™Y]ˆ[™Yš[™YˆØ\œš\ÛÛ•\™Ù]ˆ[X™\‹š\Ò[YÙ\Š˜]Ë™Ø\œš\ÛÛ•\™Ù]
+HÈ˜]Ë™Ø\œš\ÛÛ•\™Ù]ˆ[™Yš[™YˆÝ\NˆX]›X^
+X]›Z[ŠÕTWÐÐTPÒUK[X™\Š˜]ËœÝ\JHÕTWÐÐTPÒUJJKˆ]]Ô™\Z\Žˆ›ÛÛX[Š˜]Ë˜]]Ô™\Z\ŠKˆ™\Z\•\™Ù]ˆ[X™\‹š\Ò[YÙ\Š˜]Ëœ™\Z\•\™Ù]
+HÈ˜]Ëœ™\Z\•\™Ù]ˆ[™Yš[™Yˆ™\Z\”™[^U\™Ù]ˆ[X™\‹š\Ò[YÙ\Š˜]Ëœ™\Z\”™[^U\™Ù]
+HÈ˜]Ëœ™\Z\”™[^U\™Ù]ˆ[™Yš[™Yˆ™\ÛÝ\˜ÙU\™Ù]ˆ[X™\‹š\Ò[YÙ\Š˜]Ëœ™\ÛÝ\˜ÙU\™Ù]
+HÈ˜]Ëœ™\ÛÝ\˜ÙU\™Ù]ˆ[™Yš[™YˆÛÜšÙ\“[ÙN‚ˆ˜]Ë\HOOHÛÜšÙ\ˆˆ	‰ˆÈ›Z[™H‹šÛ‹˜ÛÛœÝXÝ‹œ™\Z\ˆ—Kš[˜ÛY\Ê˜]ËÛÜšÙ\“[ÙHˆŠBˆÈ˜]ËÛÜšÙ\“[ÙBˆˆ˜]Ë\HOOHÛÜšÙ\ˆˆÈ›Z[™Hˆˆ[™Yš[™YˆZ[\™Ù]ˆ[X™\‹š\Ò[YÙ\Š˜]Ë˜Z[\™Ù]
+HÈ˜]Ë˜Z[\™Ù]ˆ[™Yš[™YˆZ[]Y]YNˆ\œ˜^Kš\Ð\œ˜^J˜]Ë˜Z[]Y]YJBˆÈ˜]Ë˜Z[]Y]YK™š[\Š
+Y
+HOˆ[X™\‹š\Ò[YÙ\ŠY
+JBˆˆ[X™\‹š\Ò[YÙ\Š˜]Ë˜Z[\™Ù]
+HÈÜ˜]Ë˜Z[\™Ù]WHˆ×KˆÝ[˜ÙNˆ˜]ËœÝ[˜ÙHOOHœ]›Ûˆ
+\HOOH›ÛÜ\ˆˆ	‰ˆ˜]ËœÝ[˜ÙHOOHšÛŠHÈ˜]ËœÝ[˜ÙHˆœ\œÝYH‹ˆÚ\\“[ÙN‚ˆ\HOOH˜Ú\\ˆˆ	‰ˆÈ›[Øš[H‹™\ÞZ[™È‹™\ÞYY‹œXÚÚ[™È—Kš[˜ÛY\Ê˜]Ë˜Ú\\“[ÙHˆŠBˆÈ˜]Ë˜Ú\\“[ÙBˆˆ\HOOH˜Ú\\ˆˆÈ›[Øš[Hˆˆ[™Yš[™YˆÚ\\”›ÙÜ™\ÜÎ‚ˆ\HOOH˜Ú\\ˆˆ	‰ˆ
+˜]Ë˜Ú\\“[ÙHOOH™\ÞZ[™Èˆ˜]Ë˜Ú\\“[ÙHOOHœXÚÚ[™ÈŠBˆÈX]›X^
+[X™\Š˜]Ë˜Ú\\”›ÙÜ™\ÜÊH
+Bˆˆ[™Yš[™Yˆ]›Û‚ˆ˜]Ëœ]›Û	‰ˆ˜]Ëœ]›Û˜H	‰ˆ˜]Ëœ]›Û˜‚ˆÈÂˆNˆÈˆ[X™\Š˜]Ëœ]›Û˜Kž
+HNˆ[X™\Š˜]Ëœ]›Û˜KžJHKˆŽˆÈˆ[X™\Š˜]Ëœ]›Û˜‹ž
+HNˆ[X™\Š˜]Ëœ]›Û˜‹žJHKˆ™^ˆ˜]Ëœ]›Û›™^OOH˜HˆÈ˜Hˆˆ˜ˆ‹ˆBˆˆ[™Yš[™YˆNÂˆJNÂŸB™[˜Ý[Ûˆ™\Z\‘Ø[YRYÊÎˆØ[YJHÂˆÛÛœÝØš™XÝÈHË‹‹™Ë˜Z[[™ÜË‹‹™Ë[š]×NÂˆ]™^HNÂˆÛÛœÝÙY[ˆH™]ÈÙ][X™\Š
+NÂˆ›Üˆ
+ÛÛœÝØš™XÝÙˆØš™XÝÊHÂˆYˆ
+S[X™\‹š\Ò[YÙ\ŠØš™XÝšY
+HØš™XÝšYHÙY[‹š\ÊØš™XÝšY
+JHÂˆÚ[H
+ÙY[‹š\Ê™^
+JH™^
+ÊÎÂˆØš™XÝšYH™^ÂˆBˆÙY[‹˜Y
+Øš™XÝšY
+NÂˆ™^HX]›X^
+™^Øš™XÝšY
+ÈJNÂˆBˆË›™^YHX]›X^
+™^[X™\‹š\Ò[YÙ\ŠË›™^Y
+HÈË›™^YˆJNÂŸB‚™[˜Ý[ÛˆZ[[™ÓÜ\˜][Û˜[
+ŽˆZ[[™ÊHÂˆ™]\›ˆ‹šˆ	‰ˆX‹œXÚÙY	‰ˆX‹œ™[ØØ][Ûˆ	‰ˆ
+‹œ›ÙÜ™\ÜÈOOH[™Yš[™Y‹œ›ÙÜ™\ÜÈHJNÂŸB‚™[˜Ý[Ûˆ[š][”Ý\T˜[™ÙJÎˆØ[YK[š]ˆ[š]
+HÂˆ™]\›ˆË˜Z[[™ÜËœÛÛYJˆ
+Z[[™ÊHO‚ˆZ[[™ËX[HOOH[š]X[H	‰‚ˆZ[[™Ë\HOOH\œ™]ˆ	‰‚ˆZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊH	‰‚ˆX]š\Ý
+Z[[™ËžH[š]žZ[[™ËžHH[š]žJHHÕTWÔQUTËˆ
+NÂŸB‚™[˜Ý[ÛˆP›ØÚÙY]
+ÎˆØ[YKNˆZ[[™Ëˆ[X™\‹Nˆ[X™\‹\ÞZ[™ÈH˜[ÙJHÂˆÛÛœÝ˜Y]\ÈHZ[[™ÔÝ]ËšKœˆ
+ˆ
+\ÞZ[™ÈÈHˆŽ
+NÂˆ™]\›ˆ˜Y]\È
+ÈˆÈH˜Y]\ÈHH˜Y]\È
+ÈHˆH˜Y]\ÈHˆË˜Z[[™ÜËœÛÛYJ
+Z[[™ÊHOˆZ[[™ËšYOOHKšY	‰ˆZ[[™Ëšˆ	‰‚ˆX]š\Ý
+Z[[™ËžHZ[[™ËžHHJHZ[[™ÔÝ]ÖØZ[[™Ë\WKœˆ
+È˜Y]\È
+ÈM
+HˆË˜Üž\Ý[ËœÛÛYJ
+Üž\Ý[
+HOˆÜž\Ý[˜[[Ý[ˆ	‰ˆX]š\Ý
+Üž\Ý[žHÜž\Ý[žHHJH˜Y]\È
+ÈÌJHˆT”RS—Ô’QÑTËœÛÛYJ
+šYÙJHOˆX]š\Ý
+šYÙKžHšYÙKžHHJHšYÙKœˆ
+È˜Y]\È
+ÈÊNÂŸB‚™[˜Ý[Ûˆ[Ý™TXÚÙYJÎˆØ[YKNˆZ[[™Ëˆ[X™\ŠHÂˆYˆ
+ZK›[Øš[U\™Ù]Kœ™[ØØ][ÛŠH™]\›ŽÂˆÛÛœÝHK›[Øš[U\™Ù]žHKžHHK›[Øš[U\™Ù]žHHKžNÂˆÛÛœÝ\Ý[˜ÙHHX]š\Ý
+JNÂˆYˆ
+\Ý[˜ÙHÊHÂˆK›[Øš[U\™Ù]H[™Yš[™YÂˆ™]\›ŽÂˆBˆÛÛœÝ\Ú\™YHX]˜][ŒŠK
+NÂˆÛÛœÝÜYYHLŽÂˆÛÛœÝÝ\HX]›Z[Š\Ý[˜ÙKÜYY
+ˆ
+NÂˆÛÛœÝÝY\š[™ÈHÌ‹K‹Ž‹KŽ‹KŒ‹LKŒ‹X]”HÈ‹SX]”HÈ—NÂˆÛÛœÝÚÚXÙHHÝY\š[™Âˆ›X\
+
+Ù™œÙ]
+HOˆÂˆÛÛœÝ[™ÛHH\Ú\™Y
+ÈÙ™œÙ]Âˆ™]\›ˆÈ[™ÛKˆKž
+ÈX]˜ÛÜÊ[™ÛJH
+ˆÝ\NˆKžH
+ÈX]œÚ[Š[™ÛJH
+ˆÝ\NÂˆJBˆ™š[™
+
+Ø[™Y]JHOˆZP›ØÚÙY]
+ËKØ[™Y]KžØ[™Y]KžJJNÂˆYˆ
+XÚÚXÙJH™]\›ŽÂˆKžHÚÚXÙKžÂˆKžHHÚÚXÙKžNÂˆK›[Øš[Q˜XÚ[™ÈHÚÚXÙK˜[™ÛNÂŸB‚™[˜Ý[Ûˆ]Y]YUÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\Žˆ[š]Z[[™ÒYˆ[X™\ŠHÂˆÛÛœÝ]Y]YHH\œ˜^Kš\Ð\œ˜^JÛÜšÙ\‹˜Z[]Y]YJHÈÛÜšÙ\‹˜Z[]Y]YHˆ×NÂˆYˆ
+\]Y]YKš[˜ÛY\ÊZ[[™ÒY
+JH]Y]YKœ\Ú
+Z[[™ÒY
+NÂˆÛÜšÙ\‹˜Z[]Y]YHH]Y]YNÂˆÛÜšÙ\‹˜Z[\™Ù]H]Y]YVÌNÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHH˜ÛÛœÝXÝŽÂˆÛÜšÙ\‹œ™\ÛÝ\˜ÙU\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\”™[^U\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂŸB‚‹ÊŠˆ]HÙ[XÝYÛÜšÙ\ˆÛˆ[ˆ^\Ý[™ÈÚ\™Yœ˜[YH[[YYX][K™\Ù\š[™È]\ˆ›ØœËˆ
+‹Â™[˜Ý[Ûˆ\ÜÚYÛ•ÛÜšÙ\•Ô[™[™ÐÛÛœÝXÝ[ÛŠÛÜšÙ\Žˆ[š]Z[[™ÒYˆ[X™\ŠHÂˆÛÛœÝ]Y]YHH\œ˜^Kš\Ð\œ˜^JÛÜšÙ\‹˜Z[]Y]YJBˆÈÛÜšÙ\‹˜Z[]Y]YBˆˆÛÜšÙ\‹˜Z[\™Ù]ÈÝÛÜšÙ\‹˜Z[\™Ù]Hˆ×NÂˆÛÜšÙ\‹˜Z[]Y]YHHØZ[[™ÒY‹‹œ]Y]YK™š[\Š
+Y
+HOˆYOOHZ[[™ÒY
+WNÂˆÛÜšÙ\‹˜Z[\™Ù]HZ[[™ÒYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHH˜ÛÛœÝXÝŽÂˆÛÜšÙ\‹œ™\ÛÝ\˜ÙU\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\”™[^U\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂŸB‚™[˜Ý[ÛˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\Žˆ[š]™^[ÙNˆ[š]ÈÛÜšÙ\“[ÙH—HHšÛŠHÂˆÛÜšÙ\‹˜Z[]Y]YHH×NÂˆÛÜšÙ\‹˜Z[\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHH™^[ÙNÂˆÛÜšÙ\‹œ™\ÛÝ\˜ÙU\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\”™[^U\™Ù]H[™Yš[™YÂŸB‚™[˜Ý[Ûˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™[^T™\Z\ŠÛÜšÙ\œÎˆ[š]×K™[^NˆØš™XÝ]™JHÂˆÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹œ™\Z\ˆŠNÂˆÛÜšÙ\‹œ™\Z\”™[^U\™Ù]H™[^KšYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHHœ™\Z\ˆŽÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆJNÂŸB‚™[˜Ý[Ûˆ™\Z\˜X›T™[^S™X\ŠÎˆØ[YKX[Nˆ[š]ÈX[H—Kˆ[X™\‹Nˆ[X™\ŠHÂˆ™]\›ˆ
+Ë›Øš™XÝ]™\È×JBˆ™š[\Š
+™[^JHO‚ˆ™[^K›ÝÛ™\ˆOOHX[H	‰‚ˆ[[™[^SÜ\˜][Û˜[
+™[^JH	‰‚ˆ™[^Kš™[^K›X^ˆ
+BˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHKžHHJHHX]š\Ý
+‹žH‹žHHJJVÌNÂŸB‚™[˜Ý[Ûˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™\ÛÝ\˜ÙJÎˆØ[YKÛÜšÙ\œÎˆ[š]×K™\ÛÝ\˜ÙR[™^ˆ[X™\ŠHÂˆÛÛœÝ™\ÛÝ\˜ÙHHË˜Üž\Ý[ÖÜ™\ÛÝ\˜ÙR[™^NÂˆYˆ
+\™\ÛÝ\˜ÙH™\ÛÝ\˜ÙK˜[[Ý[H
+H™]\›ˆ˜[ÙNÂˆÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹›Z[™HŠNÂˆÛÜšÙ\‹œ™\ÛÝ\˜ÙU\™Ù]H™\ÛÝ\˜ÙR[™^ÂˆÛÜšÙ\‹˜]]Ô™\Z\ˆH˜[ÙNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹œ™\Z\”™[^U\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆÛÜšÙ\‹œ]›ÛH[™Yš[™YÂˆÛÜšÙ\‹œ™]™X][™ÈH˜[ÙNÂˆYˆ
+ÛÜšÙ\‹œÝ[˜ÙHOOHœ]›ÛŠHÛÜšÙ\‹œÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆ™]\›ˆYNÂŸB‚™[˜Ý[Ûˆ\ÒYUÛÜšÙ\ŠÎˆØ[YK[š]ˆ[š]
+HÂˆYˆ
+[š]X[HOOHœ^Y\ˆˆ[š]\HOOHÛÜšÙ\ˆˆ[š]šH[š]™Ø\œš\ÛÛ™Y]
+H™]\›ˆ˜[ÙNÂˆÛÛœÝ\Ô[™[™ÐÛÛœÝXÝ[ÛˆH
+[š]˜Z[]Y]YH
+[š]˜Z[\™Ù]ÈÝ[š]˜Z[\™Ù]Hˆ×JJBˆœÛÛYJ
+Y
+HOˆË˜Z[[™ÜËœÛÛYJ
+Z[[™ÊHO‚ˆZ[[™ËšYOOHY	‰ˆZ[[™ËX[HOOH[š]X[H	‰ˆZ[[™Ëšˆ	‰ˆ
+Z[[™Ëœ›ÙÜ™\ÜÈÏÈJHKˆ
+JNÂˆ™]\›ˆZ\Ô[™[™ÐÛÛœÝXÝ[Ûˆ	‰‚ˆ][š]\™Ù]	‰ˆ][š]™[™[^H	‰ˆ][š]›˜]ˆ	‰ˆ][š]œ™\Z\•\™Ù]	‰ˆ][š]œ™\Z\”™[^U\™Ù]	‰‚ˆ][š]›Z[š[™È	‰ˆ][š]˜Z[[™È	‰ˆ][š]œ™\Z\š[™È	‰‚ˆ
+[š]ÛÜšÙ\“[ÙHOOHšÛˆ[š]ÛÜšÙ\“[ÙHOOHœ™\Z\ˆˆ›ÛÛX[Š[š]˜]]Ô™\Z\ŠJNÂŸB‚™[˜Ý[Ûˆ]X]U˜]™[›Ý]JNˆ[š]\Ý[˜][ÛŽˆ
+HÂˆYˆ
+K\HOOH™›Û™HŠHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆBˆ]›Ý]HHKœ]X]T›Ý]NÂˆ]]X]HH›Ý]BˆÈPÕPÐSÔUPUTË™š[™
+
+Ø[™Y]JHOˆØ[™Y]KšYOOH›Ý]HKœ]X]RY
+Bˆˆ[™Yš[™YÂˆYˆ
+›Ý]H	‰ˆ\]X]JHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ›Ý]HH[™Yš[™YÂˆBˆYˆ
+›Ý]H	‰ˆ]X]JHÂˆYˆ
+›Ý]Kœ\ÙHOOH˜ž\\ÜÈŠHÂˆÛÛœÝž\\ÜÈH›Ý]K˜ž\\ÜÎÂˆYˆ
+Xž\\ÜÈ\ÙYÛY[Ü›ÜÜÙ\Ô]X]JK\Ý[˜][Û‹]X]KKŒMŠJHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆK›˜]ˆH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆBˆYˆ
+X]š\Ý
+KžHž\\ÜËžKžHHž\\ÜËžJHM
+HÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆK›˜]ˆH[™Yš[™YÂˆ™]\›ˆ]X]U˜]™[›Ý]JK\Ý[˜][ÛŠNÂˆBˆ™]\›ˆÈÛØ[ˆž\\ÜËYÛ›Ü™T]X]RYˆ[™Yš[™YNÂˆBˆËÈ\ÙHHXÝX[Ø[ØX›HÜ›ÝHÚY\ˆš\ÝX[ØÛY™ˆ›ÛÝš[ˆBˆËÈ\Ý[˜][Ûˆ™\ÚYHHÛY™ˆ]\Ý›Ý]H›ÝYÚH˜[\[œÝXYÙ‚ˆËÈÛÛš[˜Ú[™ÈH[š]]Ø[ˆØ[ÈÝ˜ZYÚÝ™\ˆH˜XÚÈYÙK‚ˆÛÛœÝ\Ý[˜][Û’[œÚYHH]X]P]
+\Ý[˜][ÛŠOËšYOOH]X]KšYÂˆÛÛœÝ[\š[™ÈH›Ý]Kœ\ÙHOOH˜\›ØXÚˆ›Ý]Kœ\ÙHOOH™[\ˆŽÂˆYˆ
+
+[\š[™È	‰ˆY\Ý[˜][Û’[œÚYJH
+Y[\š[™È	‰ˆ\Ý[˜][Û’[œÚYJJHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ›Ý]HH[™Yš[™YÂˆ]X]HH[™Yš[™YÂˆH[ÙHYˆ
+[\š[™È	‰ˆ]X]PÛÛZ[œÊK]X]KÍŠJHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆH[ÙHYˆ
+Y[\š[™È	‰ˆ›Ý]Kœ\ÙHOOH˜ÛX\ˆˆ	‰ˆ\]X]PÛÛZ[œÊK]X]KKŒÎ
+JHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆBˆBˆYˆ
+\›Ý]JHÂˆÛÛœÝ[œÚYT]X]HHPÕPÐSÔUPUTË™š[™
+
+Ø[™Y]JHOˆ]X]PÛÛZ[œÊKØ[™Y]KŽN
+JNÂˆÛÛœÝ˜[\]X]HHPÕPÐSÔUPUTË™š[™
+
+Ø[™Y]JHO‚ˆ]X]PÛÛZ[œÊKØ[™Y]KKŒÍ
+H	‰ˆ[”]X]T˜[\[™JKN
+Kˆ
+NÂˆÛÛœÝ\Ý[˜][Û”]X]HH]X]P]
+\Ý[˜][ÛŠNÂˆ]X]HH[œÚYT]X]H˜[\]X]NÂˆYˆ
+]X]H	‰ˆ\Ý[˜][Û”]X]OËšYOOH]X]KšY
+H™]\›ˆ[™Yš[™YÂˆYˆ
+\]X]H	‰ˆY\Ý[˜][Û”]X]JHÂˆÛÛœÝ›ØÚÚ[™Ô]X]HHPÕPÐSÔUPUTÂˆ™š[\Š
+Ø[™Y]JHOˆÙYÛY[Ü›ÜÜÙ\Ô]X]JK\Ý[˜][Û‹Ø[™Y]KKŒMŠJBˆœÛÜ
+
+KŠHO‚ˆ\Ý[˜ÙUÔÙYÛY[
+KK\Ý[˜][ÛŠHH\Ý[˜ÙUÔÙYÛY[
+‹K\Ý[˜][ÛŠKˆ
+VÌNÂˆYˆ
+X›ØÚÚ[™Ô]X]JH™]\›ˆ[™Yš[™YÂˆÛÛœÝž\\ÜÈH]X]Pž\\ÜÔÚ[
+K\Ý[˜][Û‹›ØÚÚ[™Ô]X]JNÂˆYˆ
+Xž\\ÜÊH™]\›ˆ[™Yš[™YÂˆ›Ý]HHÂˆ]X]RYˆ›ØÚÚ[™Ô]X]KšYˆ˜[\[™^ˆˆ\ÙNˆ˜ž\\ÜÈ‹ˆž\\ÜËˆNÂˆKœ]X]T›Ý]HH›Ý]NÂˆK›˜]ˆH[™Yš[™YÂˆ™]\›ˆÈÛØ[ˆž\\ÜËYÛ›Ü™T]X]RYˆ[™Yš[™YNÂˆBˆÛÛœÝ›Ý]T]X]HH]X]H\Ý[˜][Û”]X]HNÂˆÛÛœÝ˜[\[™^H›Ý]T]X]Kœ˜[\Âˆ›X\
+
+Ë[™^
+HOˆÂˆÛÛœÝ[›™\ˆH]X]T˜[\Ú[
+›Ý]T]X]K[™^ÌŠNÂˆÛÛœÝÝ]\ˆH]X]T˜[\Ú[
+›Ý]T]X]K[™^KŒŽ
+NÂˆ™]\›ˆÂˆ[™^ˆÛÜÝˆ]X]BˆÈX]š\Ý
+KžH[›™\‹žKžHH[›™\‹žJH
+ÈX]š\Ý
+\Ý[˜][Û‹žHÝ]\‹ž\Ý[˜][Û‹žHHÝ]\‹žJBˆˆX]š\Ý
+KžHÝ]\‹žKžHHÝ]\‹žJH
+ÈX]š\Ý
+\Ý[˜][Û‹žH[›™\‹ž\Ý[˜][Û‹žHH[›™\‹žJKˆNÂˆJBˆœÛÜ
+
+KŠHOˆK˜ÛÜÝH‹˜ÛÜÝ
+VÌKš[™^Âˆ›Ý]HHÂˆ]X]RYˆ›Ý]T]X]KšYˆ˜[\[™^ˆ\ÙNˆ]X]HÈ
+[œÚYT]X]HÈ™^]ˆˆ˜ÛX\ˆŠHˆ˜\›ØXÚ‹ˆNÂˆKœ]X]T›Ý]HH›Ý]NÂˆK›˜]ˆH[™Yš[™YÂˆ]X]HH›Ý]T]X]NÂˆBˆ]X]HHPÕPÐSÔUPUTË™š[™
+
+Ø[™Y]JHOˆØ[™Y]KšYOOH›Ý]HKœ]X]RY
+NÂˆYˆ
+\]X]JH™]\›ˆ[™Yš[™YÂˆÛÛœÝÝ]\ˆH]X]T˜[\Ú[
+]X]K›Ý]Kœ˜[\[™^KŒŽ
+NÂˆÛÛœÝ[›™\ˆH]X]T˜[\Ú[
+]X]K›Ý]Kœ˜[\[™^ÌŠNÂˆYˆ
+›Ý]Kœ\ÙHOOH˜\›ØXÚˆ	‰ˆX]š\Ý
+KžHÝ]\‹žKžHHÝ]\‹žJHMŠHÂˆ›Ý]Kœ\ÙHH™[\ˆŽÂˆK›˜]ˆH[™Yš[™YÂˆBˆYˆ
+›Ý]Kœ\ÙHOOH™[\ˆˆ	‰ˆ
+X]š\Ý
+KžH[›™\‹žKžHH[›™\‹žJHLÈ]X]PÛÛZ[œÊK]X]KÍŠJJHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆK›˜]ˆH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆBˆYˆ
+›Ý]Kœ\ÙHOOH™^]ˆ	‰ˆX]š\Ý
+KžHÝ]\‹žKžHHÝ]\‹žJHLÊHÂˆ›Ý]Kœ\ÙHH˜ÛX\ˆŽÂˆK›˜]ˆH[™Yš[™YÂˆBˆYˆ
+›Ý]Kœ\ÙHOOH˜ÛX\ˆˆ	‰ˆ\]X]PÛÛZ[œÊK]X]KKŒÎ
+JHÂˆKœ]X]T›Ý]HH[™Yš[™YÂˆ™]\›ˆ[™Yš[™YÂˆBˆ™]\›ˆÂˆÛØ[ˆ›Ý]Kœ\ÙHOOH˜\›ØXÚˆÈÝ]\ˆˆ›Ý]Kœ\ÙHOOH™[\ˆˆÈ[›™\ˆˆ›Ý]Kœ\ÙHOOH™^]ˆÈÝ]\ˆˆ\Ý[˜][Û‹ˆYÛ›Ü™T]X]RYˆ›Ý]Kœ\ÙHOOH™[\ˆˆ›Ý]Kœ\ÙHOOH™^]ˆ›Ý]Kœ\ÙHOOH˜ÛX\ˆˆÈ]X]KšYˆ[™Yš[™YˆNÂŸB‚™[˜Ý[Ûˆ›ØÚÚ[™ÓØœÝXÛJˆÎˆØ[YKˆNˆ[š]ˆ\Ý[˜][ÛŽˆˆYÛ›Ü™PZ[[™ÒYÎˆ[X™\‹ˆYÛ›Ü™T]X]RYÎˆ[X™\‹ŠHÂˆÛÛœÝH\Ý[˜][Û‹žHKžÂˆÛÛœÝHH\Ý[˜][Û‹žHHKžNÂˆÛÛœÝ[™ÝÜ]X\™YH
+ˆ
+ÈH
+ˆNÂˆYˆ
+[™ÝÜ]X\™YJH™]\›ˆ[™Yš[™YÂˆÛÛœÝØœÝXÛ\ÈHÂˆ‹‹™Ë˜Z[[™ÜÂˆ™š[\Š
+Z[[™ÊHOˆZ[[™Ëšˆ	‰ˆZ[[™ËšYOOHYÛ›Ü™PZ[[™ÒY
+Bˆ›X\
+
+Z[[™ÊHOˆ
+ÈYˆZ[[™ËšYˆZ[[™ËžNˆZ[[™ËžKŽˆZ[[™ÔÝ]ÖØZ[[™Ë\WKœˆJJKˆ‹‹™Ë˜Üž\Ý[Âˆ›X\
+
+Üž\Ý[[™^
+HOˆ
+ÈÜž\Ý[[™^JJBˆ™š[\Š
+ÈÜž\Ý[JHO‚ˆÜž\Ý[˜[[Ý[ˆ	‰‚ˆZ[”]X]T˜[\[™JÜž\Ý[Ž
+H	‰‚ˆX]š\Ý
+Üž\Ý[žH\Ý[˜][Û‹žÜž\Ý[žHH\Ý[˜][Û‹žJHˆ‹ˆ
+Bˆ›X\
+
+ÈÜž\Ý[[™^JHOˆ
+ÈYˆJ[™^
+ÈL
+KˆÜž\Ý[žNˆÜž\Ý[žKŽˆJJKˆ‹‹ŠË›Øš™XÝ]™\È×JBˆ™š[\Š
+Øš™XÝ]™JHOˆX]š\Ý
+Øš™XÝ]™KžH\Ý[˜][Û‹žØš™XÝ]™KžHH\Ý[˜][Û‹žJHˆ
+Bˆ›X\
+
+Øš™XÝ]™JHOˆ
+ÈYˆJØš™XÝ]™KšY
+ÈL
+KˆØš™XÝ]™KžNˆØš™XÝ]™KžKŽˆÎJJKˆ‹‹•T”RS—Ô’QÑTË™š[\Š
+šYÙJHOˆšYÙKœ]X]RYOOHYÛ›Ü™T]X]RY
+KˆNÂˆ™]\›ˆØœÝXÛ\Âˆ›X\
+
+ØœÝXÛJHOˆÂˆÛÛœÝHX]›X^
+ˆˆX]›Z[ŠK
+
+ØœÝXÛKžHKž
+H
+ˆ
+È
+ØœÝXÛKžHHKžJH
+ˆJHÈ[™ÝÜ]X\™Y
+Kˆ
+NÂˆÛÛœÝHKž
+È
+ˆÂˆÛÛœÝHHKžH
+ÈH
+ˆÂˆÛÛœÝÛX\˜[˜ÙHHÝ]ÖÝK\WKœˆ
+ÈØœÝXÛKœˆ
+ÈLŽÂˆ™]\›ˆÈØœÝXÛK›ØÚÙYˆX]š\Ý
+ØœÝXÛKžHØœÝXÛKžHHJHÛX\˜[˜ÙHNÂˆJBˆ™š[\Š
+Ø[™Y]JHOˆØ[™Y]K˜›ØÚÙY	‰ˆØ[™Y]KˆŒ	‰ˆØ[™Y]KŽMŠBˆœÛÜ
+
+KŠHOˆKH‹
+VÌOË›ØœÝXÛNÂŸB‚™[˜Ý[Ûˆ[Ý™U[š]ÝØ\™
+ˆÎˆØ[YKˆNˆ[š]ˆ\Ý[˜][ÛŽˆˆˆ[X™\‹ˆYÛ›Ü™PZ[[™ÒYÎˆ[X™\‹ŠHÂˆÛÛœÝ]X]T›Ý]HH]X]U˜]™[›Ý]JK\Ý[˜][ÛŠNÂˆÛÛœÝ˜]™[\Ý[˜][ÛˆH]X]T›Ý]OË™ÛØ[\Ý[˜][ÛŽÂˆÛÛœÝYÛ›Ü™T]X]RYH]X]T›Ý]OËšYÛ›Ü™T]X]RYÂˆYˆ
+ˆK›˜]ˆ	‰‚ˆ[X™\‹š\Ñš[š]JK›˜]ÚXÚÐ]
+H	‰‚ˆË[YHH
+K›˜]ÚXÚÐ]
+Bˆ
+HÂˆÛÛœÝ›ÙÜ™\ÜÈHX]š\Ý
+KžH
+K›˜]ÚXÚÖÏÈKž
+KKžHH
+K›˜]ÚXÚÖHÏÈKžJJNÂˆYˆ
+›ÙÜ™\ÜÈ
+HÂˆK›˜]ˆH[™Yš[™YÂˆK›˜]”ÚYHHK›˜]”ÚYHOOHHÈLHˆNÂˆBˆK›˜]ÚXÚÐ]HË[YH
+ÈNÂˆK›˜]ÚXÚÖHKžÂˆK›˜]ÚXÚÖHHKžNÂˆBˆYˆ
+K›˜]ˆ	‰ˆX]š\Ý
+K›˜]‹žHKžK›˜]‹žHHKžJHJHK›˜]ˆH[™Yš[™YÂˆYˆ
+]K›˜]ŠHÂˆÛÛœÝ›ØÚÙ\ˆHK\HOOH™›Û™HˆÈ[™Yš[™Yˆ›ØÚÚ[™ÓØœÝXÛJËK˜]™[\Ý[˜][Û‹YÛ›Ü™PZ[[™ÒYYÛ›Ü™T]X]RY
+NÂˆYˆ
+›ØÚÙ\ŠHÂˆÛÛœÝH˜]™[\Ý[˜][Û‹žHKžÂˆÛÛœÝHH˜]™[\Ý[˜][Û‹žHHKžNÂˆÛÛœÝ\Ý[˜ÙHHX]›X^
+KX]š\Ý
+JJNÂˆÛÛœÝ›ÜØ\™HÈ\Ý[˜ÙNÂˆÛÛœÝ›ÜØ\™HHHÈ\Ý[˜ÙNÂˆÛÛœÝÛX\˜[˜ÙHHÝ]ÖÝK\WKœˆ
+È›ØÚÙ\‹œˆ
+ÈŒŽÂˆÛÛœÝ™Y™\œ™YÚYHHK›˜]”ÚYH
+
+KšY
+È›ØÚÙ\‹šY
+H	HˆOOHÈHˆLJNÂˆÛÛœÝØ[™Y]\ÈH
+Ü™Y™\œ™YÚYK\™Y™\œ™YÚYWH\ÈÛÛœÝ
+K›X\
+
+ÚYJHOˆ
+ÂˆÚYKˆÚ[ˆÂˆˆX]›X^
+ŒX]›Z[ŠÈHŒ›ØÚÙ\‹žH›ÜØ\™H
+ˆÛX\˜[˜ÙH
+ˆÚYH
+È›ÜØ\™
+ˆÍ
+JKˆNˆX]›X^
+ŒX]›Z[ŠHŒ›ØÚÙ\‹žH
+È›ÜØ\™
+ˆÛX\˜[˜ÙH
+ˆÚYH
+È›ÜØ\™H
+ˆÍ
+JKˆKˆJJNÂˆÛÛœÝÚÜÙ[ˆHØ[™Y]\Ë™š[™
+
+ÈÚ[JHOˆÂˆÛÛœÝ›Ø™HHÈ‹‹KˆÚ[žNˆÚ[žK˜]Žˆ[™Yš[™YNÂˆ™]\›ˆX›ØÚÚ[™ÓØœÝXÛJË›Ø™K˜]™[\Ý[˜][Û‹YÛ›Ü™PZ[[™ÒYYÛ›Ü™T]X]RY
+NÂˆJHØ[™Y]\ÖÌNÂˆK›˜]”ÚYHHÚÜÙ[‹œÚYNÂˆK›˜]ˆHÚÜÙ[‹œÚ[ÂˆK›˜]ÚXÚÐ]HË[YH
+ÈNÂˆK›˜]ÚXÚÖHKžÂˆK›˜]ÚXÚÖHHKžNÂˆBˆBˆÛÛœÝÛØ[HK›˜]ˆ˜]™[\Ý[˜][ÛŽÂˆÛÛœÝHÛØ[žHKžÂˆÛÛœÝHHÛØ[žHHKžNÂˆÛÛœÝ\Ý[˜ÙHHX]š\Ý
+JNÂˆYˆ
+\Ý[˜ÙHŒJH™]\›ŽÂˆK™˜XÚ[™ÈHX]˜][ŒŠK
+NÂˆÛÛœÝØÝš[™TÜYYHÝ]ÖÝK\WKœÜYY
+ˆ
+X[QØÝš[™JËKX[JHOOH˜Z\ˆˆ	‰ˆK\HOOH™›Û™HˆÈKŒMHˆJNÂˆÛÛœÝ˜]™[ÜYYHK™›Ü›X][Û”ÜYYÈX]›Z[ŠØÝš[™TÜYYK™›Ü›X][Û”ÜYY
+HˆØÝš[™TÜYYÂˆÛÛœÝÝ\HX]›Z[Š\Ý[˜ÙK˜]™[ÜYY
+ˆÝ\S][\Y\ŠJH
+ˆ
+Kœ™]™X][™ÈÈKŒˆˆJH
+ˆ
+NÂˆK›[Ýš[™ÈHÝ\ˆŒNÂˆKžHX]›X^
+Ý]ÖÝK\WKœ‹X]›Z[ŠÈHÝ]ÖÝK\WKœ‹Kž
+È
+È\Ý[˜ÙJH
+ˆÝ\
+JNÂˆKžHHX]›X^
+Ý]ÖÝK\WKœ‹X]›Z[ŠHÝ]ÖÝK\WKœ‹KžH
+È
+HÈ\Ý[˜ÙJH
+ˆÝ\
+JNÂŸB‚™[˜Ý[Ûˆ™XÛÜ™]XÚÐ[\
+ÎˆØ[YK\™Ù]ˆ[š]Z[[™ÊHÂˆÛÛœÝ[\ÈHË˜]XÚÐ[\È
+Ë˜]XÚÐ[\ÈH×JNÂˆÛÛœÝ^\Ý[™ÈH[\Ë™š[™
+
+[\
+HOˆ[\\™Ù]YOOH\™Ù]šY	‰ˆ[\X[HOOH\™Ù]X[JNÂˆYˆ
+^\Ý[™ÊHÂˆ^\Ý[™ËžH\™Ù]žÂˆ^\Ý[™ËžHH\™Ù]žNÂˆ^\Ý[™Ë™^\™\Ð]HË[YH
+ÈNÂˆH[ÙHÂˆ[\Ëœ\Ú
+Âˆ\™Ù]Yˆ\™Ù]šYˆX[Nˆ\™Ù]X[Kˆˆ\™Ù]žˆNˆ\™Ù]žKˆÝ\Y]ˆË[YKˆ^\™\Ð]ˆË[YH
+ÈKˆJNÂˆBˆYˆ
+[\Ë›[™Ýˆ
+H[\ËœÜXÙJ[\Ë›[™ÝH
+NÂŸB‚™[˜Ý[Ûˆ™\ÛÝ\˜ÙPÛ\Ý\ŠˆÙ[\ŽˆˆÛÝ[ˆ[X™\‹ˆ[[Ý[ˆ[X™\‹ˆÚ[™Îˆ™\ÛÝ\˜ÙRÚ[™×HHÈ˜Ü™Y]È—KŠNˆÜž\Ý[×HÂˆÛÛœÝ›Ý][ÛˆHX]œ˜[™ÛJ
+H
+ˆX]”H
+ˆŽÂˆ™]\›ˆ\œ˜^K™œ›ÛJÈ[™ÝˆÛÝ[K
+Ë[™^
+HOˆÂˆÛÛœÝš[™ÈHM
+È[™^
+ˆH
+ÈX]œ˜[™ÛJ
+H
+ˆLŽÂˆÛÛœÝ[™ÛHH›Ý][Ûˆ
+È[™^
+ˆ
+
+X]”H
+ˆŠHÈÛÝ[
+H
+È
+X]œ˜[™ÛJ
+HHJH
+ˆÂˆ™]\›ˆÂˆˆX]œ›Ý[™
+X]›X^
+ÌX]›Z[ŠÈHÌÙ[\‹ž
+ÈX]˜ÛÜÊ[™ÛJH
+ˆš[™ÊJJKˆNˆX]œ›Ý[™
+X]›X^
+ÌX]›Z[ŠHÌÙ[\‹žH
+ÈX]œÚ[Š[™ÛJH
+ˆš[™ÊJJKˆ[[Ý[ˆÚ[™ˆÚ[™ÖÚ[™^	HÚ[™Ë›[™ÝKˆNÂˆJNÂŸB‚™[˜Ý[Ûˆ˜[[˜ÙY™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÎˆØš™XÝ]™V×JNˆÜž\Ý[×HÂˆÛÛœÝÜ[š[™ÓÙ™œÙ]HÎL
+ÈX]œ˜[™ÛJ
+H
+ˆLÂˆÛÛœÝÜ[š[™ÖHHVQT—ÐTÑKžHHMÌ
+ÈX]œ˜[™ÛJ
+H
+ˆÍÂˆÛÛœÝ^Y\Ù[\ˆHÈˆVQT—ÐTÑKž
+ÈÜ[š[™ÓÙ™œÙ]NˆÜ[š[™ÖHNÂˆÛÛœÝ[™[^PÙ[\ˆHÈˆÈH^Y\Ù[\‹žNˆÜ[š[™ÖHNÂˆÛÛœÝÛÛ\ÝYÜ™XYHÌ
+ÈX]œ˜[™ÛJ
+H
+ˆMÌÂˆÛÛœÝÛÛ\ÝYÙ™œÙ]HLML
+ÈX]œ˜[™ÛJ
+H
+ˆÌÂˆÛÛœÝÛÛ\ÝYHHÈˆÈÈˆ
+ÈÛÛ\ÝYÙ™œÙ]NˆÈˆHÛÛ\ÝYÜ™XYNÂˆÛÛœÝÛÛ\ÝYˆHÈˆÈÈˆHÛÛ\ÝYÙ™œÙ]NˆÈˆ
+ÈÛÛ\ÝYÜ™XYNÂˆ™]\›ˆÛX\”™[^P\›ØXÚ\ÊÂˆ‹‹œ™\ÛÝ\˜ÙPÛ\Ý\Š^Y\Ù[\‹LÌÈ˜Ü™Y]È‹˜[ÞH—JKˆ‹‹œ™\ÛÝ\˜ÙPÛ\Ý\Š[™[^PÙ[\‹LÌÈ˜Ü™Y]È‹˜[ÞH—JKˆ‹‹œ™\ÛÝ\˜ÙPÛ\Ý\ŠÛÛ\ÝYKËLLÈ˜Ü™Y]È‹˜Ü™Y]È‹˜[ÞH—JKˆ‹‹œ™\ÛÝ\˜ÙPÛ\Ý\ŠÛÛ\ÝY‹ËLLÈ˜[ÞH‹˜[ÞH‹˜Ü™Y]È—JKˆKØš™XÝ]™\ÊNÂŸB‚™[˜Ý[Ûˆ˜[™ÛT™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÎˆØš™XÝ]™V×JNˆÜž\Ý[×HÂˆ™]\›ˆ˜[[˜ÙY™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÊNÂŸB‚™[˜Ý[Ûˆ][\^Y\”™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÎˆØš™XÝ]™V×JNˆÜž\Ý[×HÂˆ™]\›ˆ˜[[˜ÙY™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÊNÂŸB‚™[˜Ý[ÛˆX\Øš™XÝ]™\Ê
+NˆØš™XÝ]™V×HÂˆÛÛœÝ™\XØ[Ü™XYHÌ
+ÈX]œ˜[™ÛJ
+H
+ˆŒŒÂˆÛÛœÝÜš^›Û[Ù™œÙ]HLLL
+ÈX]œ˜[™ÛJ
+H
+ˆŒŒÂˆ™]\›ˆÂˆÈYˆKˆÈÈˆ
+ÈÜš^›Û[Ù™œÙ]NˆÈˆH™\XØ[Ü™XYÝÛ™\Žˆ›™]]˜[‹Ø\\™Nˆˆ‘SVWÓPVÒX^ˆ‘SVWÓPVÒKˆÈYˆ‹ˆÈÈˆHÜš^›Û[Ù™œÙ]NˆÈˆ
+È™\XØ[Ü™XYÝÛ™\Žˆ›™]]˜[‹Ø\\™Nˆˆ‘SVWÓPVÒX^ˆ‘SVWÓPVÒKˆNÂŸB‚‹ÊŠˆÙY\H[Ø[Ú[™ËÜ™\Z\ˆ[™H\›Ý[™]™\žH™[^K[˜ÛY[™ÈÛØ]™YX\Ëˆ
+‹Â™[˜Ý[ÛˆÛX\”™[^P\›ØXÚ\ÊÜž\Ý[ÎˆÜž\Ý[×KØš™XÝ]™\ÎˆØš™XÝ]™V×JNˆÜž\Ý[×HÂˆ™]\›ˆÜž\Ý[Ë›X\
+
+Üž\Ý[[™^
+HOˆÂˆÛÛœÝ[Ý™YHÈ‹‹˜Üž\Ý[NÂˆ›Üˆ
+ÛÛœÝØš™XÝ]™HÙˆØš™XÝ]™\ÊHÂˆÛÛœÝH[Ý™YžHØš™XÝ]™KžÂˆÛÛœÝHH[Ý™YžHHØš™XÝ]™KžNÂˆÛÛœÝ\Ý[˜ÙHHX]š\Ý
+JNÂˆYˆ
+\Ý[˜ÙHH‘SVWÔ‘TÓÕTÑWÐÓPTSÑJHÛÛ[YNÂˆÛÛœÝ[™ÛHH\Ý[˜ÙHˆBˆÈX]˜][ŒŠK
+H
+È
+[™^	HˆOOHÈKŒˆŒ
+Bˆˆ[™^
+ˆ‹ŒÎNNÂˆÛÛœÝÛX\˜[˜ÙHH‘SVWÔ‘TÓÕTÑWÐÓPTSÑH
+È
+[™^	HÊH
+ˆMŽÂˆ[Ý™YžHX]œ›Ý[™
+X]›X^
+ÌX]›Z[ŠÈHÌØš™XÝ]™Kž
+ÈX]˜ÛÜÊ[™ÛJH
+ˆÛX\˜[˜ÙJJJNÂˆ[Ý™YžHHX]œ›Ý[™
+X]›X^
+ÌX]›Z[ŠHÌØš™XÝ]™KžH
+ÈX]œÚ[Š[™ÛJH
+ˆÛX\˜[˜ÙJJJNÂˆBˆ™]\›ˆ[Ý™YÂˆJNÂŸB‚™[˜Ý[Ûˆ[[™[^SÜ\˜][Û˜[
+Øš™XÝ]™NˆØš™XÝ]™JHÂˆ™]\›ˆØš™XÝ]™Kšˆ	‰ˆØš™XÝ]™Kœ™XZ[]OOH[™Yš[™YÂŸB‚™[˜Ý[Ûˆ™XÛÜ™™[^P]XÚÐ[\
+ÎˆØ[YKØš™XÝ]™NˆØš™XÝ]™KY™[™[™ÕX[Nˆ[š]ÈX[H—JHÂˆÛÛœÝ[\ÈHË˜]XÚÐ[\È
+Ë˜]XÚÐ[\ÈH×JNÂˆÛÛœÝ\™Ù]YHJL
+ÈØš™XÝ]™KšY
+NÂˆÛÛœÝ^\Ý[™ÈH[\Ë™š[™
+
+[\
+HOˆ[\\™Ù]YOOH\™Ù]Y	‰ˆ[\X[HOOHY™[™[™ÕX[JNÂˆYˆ
+^\Ý[™ÊHÂˆ^\Ý[™ËžHØš™XÝ]™KžÂˆ^\Ý[™ËžHHØš™XÝ]™KžNÂˆ^\Ý[™Ë™^\™\Ð]HË[YH
+ÈNÂˆH[ÙHÂˆ[\Ëœ\Ú
+Âˆ\™Ù]YˆX[NˆY™[™[™ÕX[KˆˆØš™XÝ]™KžˆNˆØš™XÝ]™KžKˆÝ\Y]ˆË[YKˆ^\™\Ð]ˆË[YH
+ÈKˆJNÂˆBˆYˆ
+[\Ë›[™Ýˆ
+H[\ËœÜXÙJ[\Ë›[™ÝH
+NÂŸB‚™[˜Ý[Ûˆ\Ý›ÞR[[™[^JÎˆØ[YKØš™XÝ]™NˆØš™XÝ]™KY™[™[™ÕX[Nˆ[š]ÈX[H—JHÂˆØš™XÝ]™KšHÂˆØš™XÝ]™K›ÝÛ™\ˆH›™]]˜[ŽÂˆØš™XÝ]™K˜Ø\\™HHÂˆØš™XÝ]™Kœ™XZ[]HË[YH
+È‘SVWÔ‘P•RSÐÓÓÓÕÓŽÂˆØš™XÝ]™Kœ™XZ[›ÙÜ™\ÜÈHÂˆ™[^SØØÝ\[ÊËØš™XÝ]™JK™›Ü‘XXÚ
+
+ØØÝ\[
+HOˆZ™XÝœ›ÛR[[™[^JËØØÝ\[
+JNÂˆË[š]Ë™›Ü‘XXÚ
+
+[š]
+HOˆÂˆYˆ
+[š]™Ø\œš\ÛÛ•\™Ù]OOHØš™XÝ]™KšY
+H[š]™Ø\œš\ÛÛ•\™Ù]H[™Yš[™YÂˆJNÂˆYˆ
+Y™[™[™ÕX[HOOHœ^Y\ˆˆ\Õš\ÚX›JËØš™XÝ]™KQÒÑÔ“ÕS‘ÔQUTÊJHÂˆË›Y\ÜØYÙHH	ÙY™[™[™ÕX[HOOHœ^Y\ˆˆÈ’S•S‘SVH”‘PPÒQˆˆ‘S‘SVH‘SVH”‘PPÒQŸH8 %Ø\œš\ÛÛˆ^ÜÙYÈ™XZ[ØÚÈXÝ]™K˜ÂˆBŸB‚™[˜Ý[Ûˆ™[^SØØÝ\[ÊÎˆØ[YKØš™XÝ]™NˆØš™XÝ]™KX[OÎˆ[š]ÈX[H—JHÂˆ™]\›ˆË[š]Ë™š[\Š
+[š]
+HO‚ˆ[š]šˆ	‰‚ˆ[š]\HOOH›ÛÜ\ˆˆ	‰‚ˆ[š]™Ø\œš\ÛÛ™Y]OOHØš™XÝ]™KšY	‰‚ˆ
+]X[H[š]X[HOOHX[JKˆ
+NÂŸB‚™[˜Ý[Ûˆ[\’[[™[^JÎˆØ[YK[š]ˆ[š]Øš™XÝ]™NˆØš™XÝ]™JHÂˆYˆ
+[š]\HOOH›ÛÜ\ˆˆ[š]šHZ[[™[^SÜ\˜][Û˜[
+Øš™XÝ]™JJH™]\›ˆ˜[ÙNÂˆÛÛœÝØØÝ\[ÈH™[^SØØÝ\[ÊËØš™XÝ]™JNÂˆYˆ
+ØØÝ\[ËœÛÛYJ
+ØØÝ\[
+HOˆØØÝ\[X[HOOH[š]X[JHØØÝ\[Ë›[™ÝH‘SVWÑÐT”’TÓÓ—ÐÐTPÒUJH™]\›ˆ˜[ÙNÂˆÛÛœÝÛÝHØØÝ\[Ë›[™ÝÂˆÛÛœÝÝÛ™\œÚ\Ú[™ÙYHØš™XÝ]™K›ÝÛ™\ˆOOH[š]X[NÂˆÛÛœÝÙ™œÙ]ÈHÞÈˆLNNˆNHKÈˆNNˆNHKÈˆLNNˆHKÈˆNNˆHWNÂˆ[š]™Ø\œš\ÛÛ™Y]HØš™XÝ]™KšYÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H[™Yš[™YÂˆ[š]žHØš™XÝ]™Kž
+ÈÙ™œÙ]ÖÜÛÝKžÂˆ[š]žHHØš™XÝ]™KžH
+ÈÙ™œÙ]ÖÜÛÝKžNÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ]X]T›Ý]HH[™Yš[™YÂˆ[š]œÝ[˜ÙHHœ\œÝYHŽÂˆØš™XÝ]™K›ÝÛ™\ˆH[š]X[NÂˆØš™XÝ]™K˜Ø\\™HH[š]X[HOOHœ^Y\ˆˆÈÐ’‘PÕU‘WÐÐTT‘WÕSQHˆSÐ’‘PÕU‘WÐÐTT‘WÕSQNÂˆËœÙ[XÝYHËœÙ[XÝY™š[\Š
+Y
+HOˆYOOH[š]šY
+NÂˆYˆ
+ÝÛ™\œÚ\Ú[™ÙY	‰ˆ
+[š]X[HOOHœ^Y\ˆˆ\Õš\ÚX›JËØš™XÝ]™KQÒÑÔ“ÕS‘ÔQUTÊJJHÂˆË›Y\ÜØYÙHH	Ý[š]X[HOOHœ^Y\ˆˆÈ’S•S‘SVHÑPÕT‘Qˆˆ‘S‘SVH‘SVHÐTT‘QŸH0­ÈØ\œš\ÛÛˆ	ÛØØÝ\[Ë›[™Ý
+È_KÉÔ‘SVWÑÐT”’TÓÓ—ÐÐTPÒU_K˜ÂˆBˆ™]\›ˆYNÂŸB‚™[˜Ý[ÛˆZ™XÝœ›ÛR[[™[^JÎˆØ[YK[š]ˆ[š]
+HÂˆYˆ
+][š]™Ø\œš\ÛÛ™Y]
+H™]\›ŽÂˆÛÛœÝØš™XÝ]™HH
+Ë›Øš™XÝ]™\È×JK™š[™
+
+Ø[™Y]JHOˆØ[™Y]KšYOOH[š]™Ø\œš\ÛÛ™Y]
+NÂˆ[š]™Ø\œš\ÛÛ™Y]H[™Yš[™YÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H[™Yš[™YÂˆYˆ
+[Øš™XÝ]™JH™]\›ŽÂˆÛÛœÝ[™ÛHH[š]šY
+ˆ‹ŒÎNNÂˆ[š]žHØš™XÝ]™Kž
+ÈX]˜ÛÜÊ[™ÛJH
+ˆŽÂˆ[š]žHHØš™XÝ]™KžH
+ÈX]œÚ[Š[™ÛJH
+ˆÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ]X]T›Ý]HH[™Yš[™YÂŸB‚™[˜Ý[Ûˆ[š]X[
+Ü[ÛœÎˆÈ›ÙÑ[˜X›YÎˆ›ÛÛX[ˆHHßJNˆØ[YHÂˆÛÛœÝY\]™HHY\]™QY™šXÝ[J
+NÂˆÛÛœÝX\ÚY\ÝH\ÑX\ÚY\Ý
+Y\]™JNÂˆÛÛœÝ›ÙÑ[˜X›YHÜ[ÛœË™›ÙÑ[˜X›YÏÈYNÂˆÛÛœÝØš™XÝ]™\ÈHX\Øš™XÝ]™\Ê
+NÂˆ™]\›ˆÂˆÜ™Y]ÎˆLˆ[™[^PÜ™Y]ÎˆMLˆ[ÞNˆLŒˆ[™[^P[ÞNˆLŒˆ[[ˆˆ[™[^R[[ˆˆÝÙ\ŽˆL‹ˆ[™[^TÝÙ\ŽˆL‹ˆØ]™Nˆˆ[YNˆˆØ]™P]ˆX\ÚY\ÝÈˆMLˆZU[šÐ]ˆ‹ˆZPXÝ[Û]ˆˆZP]XÚÐ]ˆX\ÚY\ÝÈˆMLˆY\]™Kˆ›ÙÔÙY[Žˆ\œ˜^J“Ñ×ÐÓÕS•
+K™š[
+
+Kˆ›ÙÑ[˜X›YˆX]ÚÝ]Îˆ[\TÝ]Ê
+KˆÙ[XÝYˆ×KˆØ[Y\˜NˆÈˆNˆVQT—ÐTÑKžHKˆ›ÛÛNˆKˆ[ÙNˆœÙ[XÝ‹ˆY\ÜØYÙN‚ˆ	ÙX\ÚY\ÝÈˆMLHÙXÛÛ™ÈÈ™\\™KˆZ[™HÜ™Y]È›Üˆ[š]Ë[ÞH›ÜˆÝXÝ\™\Ë[™ÙXÝ\™H[[™[^\ËˆRH]™[	ØY\]™HŽMHÈ™X\Ú[™ÈˆˆY\]™HˆKŒHÈœš\Ú[™ÈˆˆœÝXYHŸK˜ˆÝ™\Žˆˆ‹ˆ›ÜYšYYˆ˜[ÙKˆ›ÜYžT›ÙXÝ[ÛŽˆ[™Yš[™Yˆ[™[^Q›ÜYšYYˆ˜[ÙKˆ[™[^Q›ÜYžT›ÙXÝ[ÛŽˆ[™Yš[™YˆØÝš[™Nˆ[™Yš[™YˆØÝš[™T›ÙXÝ[ÛŽˆ[™Yš[™Yˆ[™[^QØÝš[™Nˆ[™Yš[™Yˆ[™[^QØÝš[™T›ÙXÝ[ÛŽˆ[™Yš[™Yˆ˜YS™]ÛÜšÎˆ˜[ÙKˆ˜YS™]ÛÜšÔ›ÙXÝ[ÛŽˆ[™Yš[™Yˆ[™[^U˜YS™]ÛÜšÎˆ˜[ÙKˆ[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛŽˆ[™Yš[™Yˆ[™[^QØÝš[™RÛ›ÝÛŽˆ˜[ÙKˆØÛÝ]Y[™[^QØÝš[™Nˆ[™Yš[™YˆX\™\œÚ[ÛŽˆ‹ˆ™^YˆŒˆÚÝÎˆ×Kˆ[XYÙS[X™\œÎˆ×Kˆ]XÚÐ[\Îˆ×KˆØš™XÝ]™\Ëˆ[š]ÎˆÂˆÂˆYˆKˆX[Nˆœ^Y\ˆ‹ˆ\NˆÛÜšÙ\ˆ‹ˆˆVQT—ÐTÑKžHKˆNˆVQT—ÐTÑKžH
+ÈÌˆˆÌˆX^ˆÌˆKˆÂˆYˆ‹ˆX[Nˆœ^Y\ˆ‹ˆ\Nˆ›ÛÜ\ˆ‹ˆˆVQT—ÐTÑKž
+ÈŒˆNˆVQT—ÐTÑKžH
+ÈLˆˆMKˆX^ˆMKˆKˆÂˆYˆËˆX[Nˆœ^Y\ˆ‹ˆ\Nˆ›ÛÜ\ˆ‹ˆˆVQT—ÐTÑKž
+ÈLˆNˆVQT—ÐTÑKžH
+ÈˆˆMKˆX^ˆMKˆKˆÂˆYˆˆX[Nˆ™[™[^H‹ˆ\NˆÛÜšÙ\ˆ‹ˆˆS‘SVWÐTÑKžHÌˆNˆS‘SVWÐTÑKžHHLˆˆÌˆX^ˆÌˆˆˆ]™[ˆKˆKˆKˆZ[[™ÜÎˆÂˆÈYˆX[Nˆœ^Y\ˆ‹\NˆšH‹ˆVQT—ÐTÑKžNˆVQT—ÐTÑKžKˆLX^ˆLKˆÈYˆKX[Nˆ™[™[^H‹\NˆšH‹ˆS‘SVWÐTÑKžNˆS‘SVWÐTÑKžKˆLX^ˆLKˆÂˆYˆ‹ˆX[Nˆ™[™[^H‹ˆ\Nˆ˜˜\œ˜XÚÜÈ‹ˆˆS‘SVWÐTÑKžHˆNˆS‘SVWÐTÑKžH
+ÈLÌˆˆLŒˆX^ˆLŒˆKˆÂˆYˆËˆX[Nˆ™[™[^H‹ˆ\Nˆœ™Yš[™\žH‹ˆˆS‘SVWÐTÑKžHŒˆNˆS‘SVWÐTÑKžHHLÍKˆˆˆX^ˆˆ›ÙÜ™\ÜÎˆKˆKˆKˆÜž\Ý[Îˆ˜[™ÛT™\ÛÝ\˜ÙQšY[ÊØš™XÝ]™\ÊKˆNÂŸB‚™[˜Ý[Ûˆ[š]X[][\^Y\ŠÜ[ÛœÎˆÈ›ÙÑ[˜X›YÎˆ›ÛÛX[ˆHHßJNˆØ[YHÂˆÛÛœÝ›ÙÑ[˜X›YHÜ[ÛœË™›ÙÑ[˜X›YÏÈYNÂˆÛÛœÝÈH[š]X[
+È›ÙÑ[˜X›YJNÂˆË˜Ü™Y]ÈHLÂˆË™[™[^PÜ™Y]ÈHLÂˆË˜[ÞHHLŒÂˆË™[™[^P[ÞHHLŒÂˆËš[[HÂˆË™[™[^R[[HÂˆËœÝÙ\ˆHLŽÂˆË™[™[^TÝÙ\ˆHLŽÂˆËØ]™HHÂˆËØ]™P]H[X™\‹“PVÔÐQ‘WÒS•QÑTŽÂˆË˜ZU[šÐ]H[X™\‹“PVÔÐQ‘WÒS•QÑTŽÂˆË˜ZPXÝ[Û]H[X™\‹“PVÔÐQ‘WÒS•QÑTŽÂˆË˜ZP]XÚÐ]H[X™\‹“PVÔÐQ‘WÒS•QÑTŽÂˆË›Y\ÜØYÙHH”’UUHUŒHÓÓ“‘PÕQ8 %\Ý›ÞHHÜÜÚ[™ÈÛÛ[X[™ÛÜ™KˆŽÂˆË[š]ÈHÂˆÈYˆKX[Nˆœ^Y\ˆ‹\NˆÛÜšÙ\ˆ‹ˆVQT—ÐTÑKžHKNˆVQT—ÐTÑKžH
+ÈÌˆÌX^ˆÌ˜XÚ[™ÎˆKˆÈYˆ‹X[Nˆœ^Y\ˆ‹\Nˆ›ÛÜ\ˆ‹ˆVQT—ÐTÑKž
+ÈŒNˆVQT—ÐTÑKžH
+ÈLˆMKX^ˆMK˜XÚ[™ÎˆKˆÈYˆËX[Nˆœ^Y\ˆ‹\Nˆ›ÛÜ\ˆ‹ˆVQT—ÐTÑKž
+ÈLNˆVQT—ÐTÑKžH
+ÈˆMKX^ˆMK˜XÚ[™ÎˆKˆÈYˆX[Nˆ™[™[^H‹\NˆÛÜšÙ\ˆ‹ˆS‘SVWÐTÑKž
+ÈKNˆS‘SVWÐTÑKžH
+ÈÌˆÌX^ˆÌ˜XÚ[™ÎˆX]”HKˆÈYˆKX[Nˆ™[™[^H‹\Nˆ›ÛÜ\ˆ‹ˆS‘SVWÐTÑKžHŒNˆS‘SVWÐTÑKžH
+ÈLˆMKX^ˆMK˜XÚ[™ÎˆX]”HKˆÈYˆLX[Nˆ™[™[^H‹\Nˆ›ÛÜ\ˆ‹ˆS‘SVWÐTÑKžHLNˆS‘SVWÐTÑKžH
+ÈˆMKX^ˆMK˜XÚ[™ÎˆX]”HKˆNÂˆË˜Z[[™ÜÈHÂˆÈYˆX[Nˆœ^Y\ˆ‹\NˆšH‹ˆVQT—ÐTÑKžNˆVQT—ÐTÑKžKˆLX^ˆLKˆÈYˆKX[Nˆ™[™[^H‹\NˆšH‹ˆS‘SVWÐTÑKžNˆS‘SVWÐTÑKžKˆLX^ˆLKˆNÂˆË›Øš™XÝ]™\ÈHX\Øš™XÝ]™\Ê
+NÂˆË˜Üž\Ý[ÈH][\^Y\”™\ÛÝ\˜ÙQšY[ÊË›Øš™XÝ]™\ÊNÂˆË›™^YHŒÂˆË˜Ø[Y\˜HHÈˆNˆVQT—ÐTÑKžHNÂˆËœÙ[XÝYH×NÂˆË™›ÙÔÙY[ˆH\œ˜^J“Ñ×ÐÓÕS•
+K™š[
+
+NÂˆ™]™X[›ÙÊÊNÂˆ™]\›ˆÎÂŸB‚™[˜Ý[ÛˆÝØ\X[JX[Nˆ[š]ÈX[H—JNˆ[š]ÈX[H—HÂˆ™]\›ˆX[HOOHœ^Y\ˆˆÈ™[™[^Hˆˆœ^Y\ˆŽÂŸB‚™[˜Ý[ÛˆÝY\Ý\œÜXÝ]™J]]Üš]]]™NˆØ[YKØØ[ˆØ[YH[š\œÝÛ˜\ÚÝˆ›ÛÛX[ŠNˆØ[YHÂˆÛÛœÝšY]ÈHÝXÝ\™YÛÛ™J]]Üš]]]™JNÂˆšY]Ë[š]ÈHšY]Ë[š]Ë›X\
+
+[š]
+HOˆ
+È‹‹[š]X[NˆÝØ\X[J[š]X[JHJJNÂˆšY]Ë˜Z[[™ÜÈHšY]Ë˜Z[[™ÜË›X\
+
+Z[[™ÊHOˆ
+È‹‹˜Z[[™ËX[NˆÝØ\X[JZ[[™ËX[JHJJNÂˆšY]ËœÚÝÈHšY]ËœÚÝË›X\
+
+ÚÝ
+HOˆ
+È‹‹œÚÝX[NˆÝØ\X[JÚÝX[JHJJNÂˆšY]Ë™[XYÙS[X™\œÈHšY]Ë™[XYÙS[X™\œË›X\
+
+[X™\ŠHOˆ
+È‹‹›[X™\‹X[NˆÝØ\X[J[X™\‹X[JHJJNÂˆšY]Ë˜]XÚÐ[\ÈH
+šY]Ë˜]XÚÐ[\È×JK›X\
+
+[\
+HOˆ
+È‹‹˜[\X[NˆÝØ\X[J[\X[JHJJNÂˆÝšY]Ë˜Ü™Y]ËšY]Ë™[™[^PÜ™Y]×HHÝšY]Ë™[™[^PÜ™Y]ËšY]Ë˜Ü™Y]×NÂˆÝšY]Ë˜[ÞKšY]Ë™[™[^P[ÞWHHÝšY]Ë™[™[^P[ÞKšY]Ë˜[ÞWNÂˆÝšY]Ëš[[šY]Ë™[™[^R[[HHÝšY]Ë™[™[^R[[šY]Ëš[[NÂˆšY]Ë›Øš™XÝ]™\ÈH
+šY]Ë›Øš™XÝ]™\È×JK›X\
+
+Øš™XÝ]™JHOˆ
+Âˆ‹‹›Øš™XÝ]™KˆÝÛ™\ŽˆØš™XÝ]™K›ÝÛ™\ˆOOHœ^Y\ˆˆÈ™[™[^HˆˆØš™XÝ]™K›ÝÛ™\ˆOOH™[™[^HˆÈœ^Y\ˆˆˆ›™]]˜[‹ˆØ\\™Nˆ[Øš™XÝ]™K˜Ø\\™KˆJJNÂˆÛÛœÝÜÝÝÙ\ˆHšY]ËœÝÙ\ŽÂˆšY]ËœÝÙ\ˆHšY]Ë™[™[^TÝÙ\ˆÏÈLŽÂˆšY]Ë™[™[^TÝÙ\ˆHÜÝÝÙ\ŽÂˆÝšY]Ë™›ÜYšYYšY]Ë™[™[^Q›ÜYšYYHHÝšY]Ë™[™[^Q›ÜYšYYšY]Ë™›ÜYšYYNÂˆÝšY]Ë™›ÜYžT›ÙXÝ[Û‹šY]Ë™[™[^Q›ÜYžT›ÙXÝ[Û—HHÝšY]Ë™[™[^Q›ÜYžT›ÙXÝ[Û‹šY]Ë™›ÜYžT›ÙXÝ[Û—NÂˆÝšY]Ë™ØÝš[™KšY]Ë™[™[^QØÝš[™WHHÝšY]Ë™[™[^QØÝš[™KšY]Ë™ØÝš[™WNÂˆÝšY]Ë™ØÝš[™T›ÙXÝ[Û‹šY]Ë™[™[^QØÝš[™T›ÙXÝ[Û—HHÝšY]Ë™[™[^QØÝš[™T›ÙXÝ[Û‹šY]Ë™ØÝš[™T›ÙXÝ[Û—NÂˆÝšY]Ë˜YS™]ÛÜšËšY]Ë™[™[^U˜YS™]ÛÜš×HHÝšY]Ë™[™[^U˜YS™]ÛÜšËšY]Ë˜YS™]ÛÜš×NÂˆÝšY]Ë˜YS™]ÛÜšÔ›ÙXÝ[Û‹šY]Ë™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[Û—HHÝšY]Ë™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[Û‹šY]Ë˜YS™]ÛÜšÔ›ÙXÝ[Û—NÂˆšY]Ë›Ý™\ˆH]]Üš]]]™K›Ý™\ˆOOHÛÛˆˆÈ›ÜÝˆˆ]]Üš]]]™K›Ý™\ˆOOH›ÜÝˆÈÛÛˆˆˆˆŽÂˆšY]Ë˜Ø[Y\˜HHš\œÝÛ˜\ÚÝÈÈˆÈHNˆS‘SVWÐTÑKžHHˆØØ[Ë˜Ø[Y\˜HÈˆÈHNˆS‘SVWÐTÑKžHNÂˆšY]Ëž›ÛÛHHØØ[Ëž›ÛÛHNÂˆšY]ËœÙ[XÝYH
+ØØ[ËœÙ[XÝY×JK™š[\Š
+Y
+HO‚ˆË‹‹šY]Ë[š]Ë‹‹šY]Ë˜Z[[™Ü×KœÛÛYJ
+Øš™XÝ
+HOˆØš™XÝšYOOHY	‰ˆØš™XÝX[HOOHœ^Y\ˆŠKˆ
+NÂˆšY]Ë›[ÙHHØØ[Ë›[ÙHœÙ[XÝŽÂˆšY]Ë›Y\ÜØYÙHHØØ[Ë›Y\ÜØYÙH”’UUHUŒHÓÓ“‘PÕQ8 %\Ý›ÞHHÜÜÚ[™ÈÛÛ[X[™ÛÜ™KˆŽÂˆšY]Ë™›ÙÔÙY[ˆHØØ[Ë™›ÙÔÙY[Ë›[™ÝOOH“Ñ×ÐÓÕS•ÈË‹‹›ØØ[™›ÙÔÙY[—Hˆ\œ˜^J“Ñ×ÐÓÕS•
+K™š[
+
+NÂˆ™]™X[›ÙÊšY]ÊNÂˆÛÛœÝ[™[^RHHšY]Ë˜Z[[™ÜË™š[™
+
+Z[[™ÊHOˆZ[[™ËX[HOOH™[™[^Hˆ	‰ˆZ[[™Ë\HOOHšHŠNÂˆÛÛœÝ[™[^RUš\ÚX›HH›ÛÛX[Š[™[^RH	‰ˆ\Õš\ÚX›JšY]Ë[™[^RKZ[[™ÔÝ]ËšKœŠJNÂˆšY]ËœØÛÝ]Y[™[^QØÝš[™HH[™[^RUš\ÚX›HÈ
+šY]Ë™[™[^QØÝš[™H››Û™HŠHˆØØ[ËœØÛÝ]Y[™[^QØÝš[™NÂˆšY]Ë™[™[^QØÝš[™RÛ›ÝÛˆHšY]ËœØÛÝ]Y[™[^QØÝš[™HOOH[™Yš[™YÂˆ™]\›ˆšY]ÎÂŸB‚™[˜Ý[Ûˆ™\Z\Z[[™ÊŽˆZ[[™ÊNˆZ[[™ÈÂˆÛÛœÝX^Bˆ[X™\‹š\Ñš[š]J‹›X^
+H	‰ˆ‹›X^ˆˆÈ‹›X^ˆˆZ[[™ÒX[Ø‹\WNÂˆÛÛœÝ›ÙXÝ[ÛˆBˆ‹œ›ÙXÝ[Ûˆ	‰ˆÈÛÜšÙ\ˆ‹›ÛÜ\ˆ‹[šÈ‹™›Û™H‹˜Ú\\ˆ—Kš[˜ÛY\Ê‹œ›ÙXÝ[Û‹\JBˆÈÂˆ‹‹˜‹œ›ÙXÝ[Û‹ˆ[\ÙYˆX]›X^
+[X™\Š‹œ›ÙXÝ[Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+ˆKˆ[X™\Š‹œ›ÙXÝ[Û‹™\˜][ÛŠH[š]Z[[YVØ‹œ›ÙXÝ[Û‹\WKˆ
+Kˆ]Y]YNˆ\œ˜^Kš\Ð\œ˜^J‹œ›ÙXÝ[Û‹œ]Y]YJBˆÈ‹œ›ÙXÝ[Û‹œ]Y]YK™š[\Š
+\JHO‚ˆÈÛÜšÙ\ˆ‹›ÛÜ\ˆ‹[šÈ‹™›Û™H‹˜Ú\\ˆ—Kš[˜ÛY\Ê\JKˆ
+Bˆˆ×KˆBˆˆ[™Yš[™YÂˆ™]\›ˆÂˆ‹‹˜‹ˆX^ˆˆ[X™\‹š\Ñš[š]J‹š
+HÈX]›X^
+X]›Z[Š‹šX^
+JHˆX^ˆ›ÙXÝ[Û‹ˆÛÛœÝXÝ[Û‘\˜][ÛŽ‚ˆ‹œ›ÙÜ™\ÜÈOOH[™Yš[™YˆÈX]›X^
+ˆKˆ[X™\Š‹˜ÛÛœÝXÝ[Û‘\˜][ÛŠHˆ
+‹\HOOH\œ™]ˆÈZ[[™ÐZ[[YK\œ™]ˆŠKˆ
+Bˆˆ[™Yš[™YˆÛÛœÝXÝ[Û”Ý\Y‚ˆ‹œ›ÙÜ™\ÜÈOOH[™Yš[™Y	‰ˆ‹œ›ÙÜ™\ÜÈBˆÈ›ÛÛX[Š‹˜ÛÛœÝXÝ[Û”Ý\Y‹œ›ÙÜ™\ÜÈˆ
+Bˆˆ[™Yš[™Yˆ˜[N‚ˆ‹œ˜[H	‰ˆ[X™\‹š\Ñš[š]J‹œ˜[Kž
+H	‰ˆ[X™\‹š\Ñš[š]J‹œ˜[KžJBˆÈ‹œ˜[Bˆˆ[™Yš[™YˆÛÛÛÝÛŽˆX]›X^
+[X™\Š‹˜ÛÛÛÝÛŠH
+KˆXÚÙYˆ‹\HOOHšHˆÈ›ÛÛX[Š‹œXÚÙY
+Hˆ[™Yš[™Yˆ[Øš[U\™Ù]‚ˆ‹\HOOHšHˆ	‰ˆ‹›[Øš[U\™Ù]	‰ˆ[X™\‹š\Ñš[š]J‹›[Øš[U\™Ù]ž
+H	‰ˆ[X™\‹š\Ñš[š]J‹›[Øš[U\™Ù]žJBˆÈ‹›[Øš[U\™Ù]ˆˆ[™Yš[™Yˆ[Øš[Q˜XÚ[™Îˆ‹\HOOHšHˆ	‰ˆ[X™\‹š\Ñš[š]J‹›[Øš[Q˜XÚ[™ÊHÈ‹›[Øš[Q˜XÚ[™Èˆ[™Yš[™Yˆ™[ØØ][ÛŽ‚ˆ‹\HOOHšHˆ	‰ˆ‹œ™[ØØ][Ûˆ	‰ˆ
+‹œ™[ØØ][Û‹›[ÙHOOHœXÚÈˆ‹œ™[ØØ][Û‹›[ÙHOOH™\ÞHŠBˆÈÂˆ[ÙNˆ‹œ™[ØØ][Û‹›[ÙKˆ[\ÙYˆX]›X^
+[X™\Š‹œ™[ØØ][Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+K[X™\Š‹œ™[ØØ][Û‹™\˜][ÛŠHJKˆBˆˆ[™Yš[™YˆNÂŸB‚™[˜Ý[ÛˆY˜]QØ[YJ\œÙYˆØ[YKY\ÜØYÙNˆÝš[™ÊNˆØ[YHÂˆYˆ
+ˆP\œ˜^Kš\Ð\œ˜^J\œÙY[š]ÊHˆP\œ˜^Kš\Ð\œ˜^J\œÙY˜Z[[™ÜÊHˆP\œ˜^Kš\Ð\œ˜^J\œÙY˜Üž\Ý[ÊBˆ
+H›ÝÈ™]È\œ›ÜŠ’[˜[YØ]™HŠNÂˆÛÛœÝØ]™Y[YHHX]›X^
+[X™\Š\œÙY[YJH
+NÂˆÛÛœÝØ]™YY\]™HHX]›X^
+ˆŽ‹ˆX]›Z[ŠKŒN[X™\Š\œÙY˜Y\]™JHY\]™QY™šXÝ[J
+JKˆ
+NÂˆÛÛœÝZP]XÚÐ]H\ÑX\ÚY\Ý
+Ø]™YY\]™JH	‰ˆ
+[X™\Š\œÙYØ]™JH
+HOOHˆÈX]›X^
+[X™\Š\œÙY˜ZP]XÚÐ]
+H
+Bˆˆ[X™\Š\œÙY˜ZP]XÚÐ]
+HX]›X^
+Ø]™Y[YH
+ÈŒL
+NÂˆÛÛœÝ™\Z\™YˆØ[YHHÂˆ‹‹œ\œÙYˆÜ™Y]ÎˆX]›X^
+[X™\Š\œÙY˜Ü™Y]ÊH
+Kˆ[™[^PÜ™Y]Îˆ[X™\‹š\Ñš[š]J[X™\Š\œÙY™[™[^PÜ™Y]ÊJBˆÈX]›X^
+[X™\Š\œÙY™[™[^PÜ™Y]ÊJBˆˆLˆ[ÞNˆ[X™\‹š\Ñš[š]J[X™\Š\œÙY˜[ÞJJHÈX]›X^
+[X™\Š\œÙY˜[ÞJJHˆLŒˆ[™[^P[ÞNˆ[X™\‹š\Ñš[š]J[X™\Š\œÙY™[™[^P[ÞJJHÈX]›X^
+[X™\Š\œÙY™[™[^P[ÞJJHˆLŒˆ[[ˆ[X™\‹š\Ñš[š]J[X™\Š\œÙYš[[
+JHÈX]›X^
+[X™\Š\œÙYš[[
+JHˆˆ[™[^R[[ˆ[X™\‹š\Ñš[š]J[X™\Š\œÙY™[™[^R[[
+JHÈX]›X^
+[X™\Š\œÙY™[™[^R[[
+JHˆˆÝÙ\ŽˆX]›X^
+[X™\Š\œÙYœÝÙ\ŠH
+Kˆ[™[^TÝÙ\ŽˆX]›X^
+[X™\Š\œÙY™[™[^TÝÙ\ŠHLŠKˆØ]™NˆX]›X^
+[X™\Š\œÙYØ]™JH
+Kˆ[YNˆØ]™Y[YKˆØ]™P]ˆ[X™\Š\œÙYØ]™P]
+HZP]XÚÐ]ˆZU[šÐ]ˆX]›Z[Š[X™\Š\œÙY˜ZU[šÐ]
+HØ]™Y[YKØ]™Y[YH
+ÈŒJKˆZPXÝ[Û]ˆ[X™\Š\œÙY˜ZPXÝ[Û]
+HØ]™Y[YKˆZP]XÚÐ]ˆY\]™NˆØ]™YY\]™KˆX]ÚÝ]ÎˆÈ‹‹™[\TÝ]Ê
+K‹‹Š\œÙY›X]ÚÝ]ÈßJHKˆ›ÙÔÙY[Žˆ\œ˜^Kš\Ð\œ˜^J\œÙY™›ÙÔÙY[ŠH	‰ˆ\œÙY™›ÙÔÙY[‹›[™ÝOOH“Ñ×ÐÓÕS•ˆÈ\œÙY™›ÙÔÙY[‹›X\
+
+Ù[
+HOˆ
+Ù[ÈHˆ
+JBˆˆ\œ˜^J“Ñ×ÐÓÕS•
+K™š[
+
+Kˆ›ÙÑ[˜X›Yˆ\œÙY™›ÙÑ[˜X›YOOH˜[ÙKˆ›ÜYšYYˆ›ÛÛX[Š\œÙY™›ÜYšYY
+Kˆ›ÜYžT›ÙXÝ[ÛŽ‚ˆ\œÙY™›ÜYžT›ÙXÝ[Ûˆ	‰ˆ\\œÙY™›ÜYšYYˆÈÂˆ[\ÙYˆX]›X^
+[X™\Š\œÙY™›ÜYžT›ÙXÝ[Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY™›ÜYžT›ÙXÝ[Û‹™\˜][ÛŠH“Ô•Q–WÑTUSÓŠKˆBˆˆ[™Yš[™Yˆ[™[^Q›ÜYšYYˆ›ÛÛX[Š\œÙY™[™[^Q›ÜYšYY
+Kˆ[™[^Q›ÜYžT›ÙXÝ[ÛŽ‚ˆ\œÙY™[™[^Q›ÜYžT›ÙXÝ[Ûˆ	‰ˆ\\œÙY™[™[^Q›ÜYšYYˆÈÂˆ[\ÙYˆX]›X^
+[X™\Š\œÙY™[™[^Q›ÜYžT›ÙXÝ[Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY™[™[^Q›ÜYžT›ÙXÝ[Û‹™\˜][ÛŠH“Ô•Q–WÑTUSÓŠKˆBˆˆ[™Yš[™YˆØÝš[™Nˆ\œÙY™ØÝš[™HOOH˜Z\ˆˆ\œÙY™ØÝš[™HOOH˜\›[ÜˆˆÈ\œÙY™ØÝš[™Hˆ[™Yš[™YˆØÝš[™T›ÙXÝ[ÛŽ‚ˆ
+\œÙY™ØÝš[™T›ÙXÝ[ÛË\HOOH˜Z\ˆˆ\œÙY™ØÝš[™T›ÙXÝ[ÛË\HOOH˜\›[ÜˆŠH	‰ˆ\\œÙY™ØÝš[™BˆÈÈ\Nˆ\œÙY™ØÝš[™T›ÙXÝ[Û‹\K[\ÙYˆX]›X^
+[X™\Š\œÙY™ØÝš[™T›ÙXÝ[Û‹™[\ÙY
+H
+K\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY™ØÝš[™T›ÙXÝ[Û‹™\˜][ÛŠHÐÕ’S‘WÑTUSÓŠHBˆˆ[™Yš[™Yˆ[™[^QØÝš[™Nˆ\œÙY™[™[^QØÝš[™HOOH˜Z\ˆˆ\œÙY™[™[^QØÝš[™HOOH˜\›[ÜˆˆÈ\œÙY™[™[^QØÝš[™Hˆ[™Yš[™Yˆ[™[^QØÝš[™T›ÙXÝ[ÛŽ‚ˆ
+\œÙY™[™[^QØÝš[™T›ÙXÝ[ÛË\HOOH˜Z\ˆˆ\œÙY™[™[^QØÝš[™T›ÙXÝ[ÛË\HOOH˜\›[ÜˆŠH	‰ˆ\\œÙY™[™[^QØÝš[™BˆÈÈ\Nˆ\œÙY™[™[^QØÝš[™T›ÙXÝ[Û‹\K[\ÙYˆX]›X^
+[X™\Š\œÙY™[™[^QØÝš[™T›ÙXÝ[Û‹™[\ÙY
+H
+K\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY™[™[^QØÝš[™T›ÙXÝ[Û‹™\˜][ÛŠHÐÕ’S‘WÑTUSÓŠHBˆˆ[™Yš[™Yˆ˜YS™]ÛÜšÎˆ›ÛÛX[Š\œÙY˜YS™]ÛÜšÊKˆ˜YS™]ÛÜšÔ›ÙXÝ[ÛŽ‚ˆ\œÙY˜YS™]ÛÜšÔ›ÙXÝ[Ûˆ	‰ˆ\\œÙY˜YS™]ÛÜšÂˆÈÂˆ[\ÙYˆX]›X^
+[X™\Š\œÙY˜YS™]ÛÜšÔ›ÙXÝ[Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY˜YS™]ÛÜšÔ›ÙXÝ[Û‹™\˜][ÛŠHQWÓ‘UÓÔ’×ÑTUSÓŠKˆBˆˆ[™Yš[™Yˆ[™[^U˜YS™]ÛÜšÎˆ›ÛÛX[Š\œÙY™[™[^U˜YS™]ÛÜšÊKˆ[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛŽ‚ˆ\œÙY™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[Ûˆ	‰ˆ\\œÙY™[™[^U˜YS™]ÛÜšÂˆÈÂˆ[\ÙYˆX]›X^
+[X™\Š\œÙY™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[Û‹™[\ÙY
+H
+Kˆ\˜][ÛŽˆX]›X^
+K[X™\Š\œÙY™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[Û‹™\˜][ÛŠHQWÓ‘UÓÔ’×ÑTUSÓŠKˆBˆˆ[™Yš[™Yˆ[™[^QØÝš[™RÛ›ÝÛŽˆ›ÛÛX[Š\œÙY™[™[^QØÝš[™RÛ›ÝÛŠKˆØÛÝ]Y[™[^QØÝš[™N‚ˆ\œÙYœØÛÝ]Y[™[^QØÝš[™HOOH˜Z\ˆˆ\œÙYœØÛÝ]Y[™[^QØÝš[™HOOH˜\›[Üˆˆ\œÙYœØÛÝ]Y[™[^QØÝš[™HOOH››Û™H‚ˆÈ\œÙYœØÛÝ]Y[™[^QØÝš[™Bˆˆ[™Yš[™YˆX\™\œÚ[ÛŽˆ‹ˆÚÝÎˆ×Kˆ[XYÙS[X™\œÎˆ×Kˆ]XÚÐ[\Îˆ\œ˜^Kš\Ð\œ˜^J\œÙY˜]XÚÐ[\ÊBˆÈ\œÙY˜]XÚÐ[\Âˆ™š[\Š
+[\
+HOˆ[\	‰ˆ[X™\‹š\Ñš[š]J[\\™Ù]Y
+H	‰ˆ[X™\‹š\Ñš[š]J[\™^\™\Ð]
+JBˆ›X\
+
+[\
+HOˆ
+Âˆ\™Ù]Yˆ[\\™Ù]YˆX[Nˆ[\X[HOOH™[™[^HˆÈ™[™[^Hˆˆœ^Y\ˆ‹ˆˆ[X™\Š[\ž
+HˆNˆ[X™\Š[\žJHˆÝ\Y]ˆ[X™\Š[\œÝ\Y]
+HØ]™Y[YKˆ^\™\Ð]ˆ[X™\Š[\™^\™\Ð]
+HØ]™Y[YKˆJJBˆˆ×KˆÙ[XÝYˆ×Kˆ[ÙNˆœÙ[XÝ‹ˆØ[Y\˜N‚ˆ\œÙY˜Ø[Y\˜H	‰ˆ[X™\‹š\Ñš[š]J\œÙY˜Ø[Y\˜Kž
+H	‰ˆ[X™\‹š\Ñš[š]J\œÙY˜Ø[Y\˜KžJBˆÈ\œÙY˜Ø[Y\˜BˆˆÈˆNˆVQT—ÐTÑKžHKˆ›ÛÛNˆX]›X^
+MKX]›Z[ŠKË[X™\Š\œÙYž›ÛÛJHJJKˆ[š]Îˆ›Ü›X[^™U[š]Ê\œÙY[š]ÊK›X\
+
+JHOˆ
+Âˆ‹‹Kˆ˜]Žˆ[™Yš[™Yˆ˜]ÚXÚÐ]ˆ[™Yš[™Yˆ˜]ÚXÚÖˆ[™Yš[™Yˆ˜]ÚXÚÖNˆ[™Yš[™Yˆ]X]T›Ý]Nˆ[™Yš[™YˆØ\œžZ[™Õ\NˆK˜Ø\œžZ[™Õ\HOOH˜[ÞHˆÈ˜[ÞHˆˆ˜Ü™Y]È‹ˆJJKˆZ[[™ÜÎˆ\œÙY˜Z[[™ÜË›X\
+™\Z\Z[[™ÊKˆÜž\Ý[Îˆ\œÙY˜Üž\Ý[Ë›X\
+
+›ÙK[™^
+HOˆ
+Âˆ‹‹››ÙKˆ[[Ý[ˆX]›X^
+[X™\Š›ÙK˜[[Ý[
+H
+KˆÚ[™ˆ›ÙKšÚ[™OOH˜[ÞHˆÈ˜[ÞHˆˆ[™^	HˆOOHÈ˜Ü™Y]Èˆˆ˜[ÞH‹ˆJJKˆØš™XÝ]™\Îˆ\œ˜^Kš\Ð\œ˜^J\œÙY›Øš™XÝ]™\ÊH	‰ˆ\œÙY›Øš™XÝ]™\Ë›[™ÝˆÈ\œÙY›Øš™XÝ]™\Ë›X\
+
+Øš™XÝ]™K[™^
+HOˆ
+ÂˆYˆ[X™\‹š\Ò[YÙ\ŠØš™XÝ]™KšY
+HÈØš™XÝ]™KšYˆ[™^
+ÈKˆˆ[X™\‹š\Ñš[š]JØš™XÝ]™Kž
+HÈØš™XÝ]™KžˆÈÈ‹ˆNˆ[X™\‹š\Ñš[š]JØš™XÝ]™KžJHÈØš™XÝ]™KžHˆ[™^OOHÈÌˆHÌˆÝÛ™\ŽˆÈœ^Y\ˆ‹™[™[^H‹›™]]˜[—Kš[˜ÛY\ÊØš™XÝ]™K›ÝÛ™\ŠHÈØš™XÝ]™K›ÝÛ™\ˆˆ›™]]˜[‹ˆØ\\™NˆX]›X^
+SÐ’‘PÕU‘WÐÐTT‘WÕSQKX]›Z[ŠÐ’‘PÕU‘WÐÐTT‘WÕSQK[X™\ŠØš™XÝ]™K˜Ø\\™JH
+JKˆˆX]›X^
+X]›Z[Š‘SVWÓPVÒ[X™\‹š\Ñš[š]JØš™XÝ]™Kš
+HÈ[X™\ŠØš™XÝ]™Kš
+Hˆ‘SVWÓPVÒ
+JKˆX^ˆ‘SVWÓPVÒˆ™XZ[]ˆ[X™\‹š\Ñš[š]JØš™XÝ]™Kœ™XZ[]
+HÈ[X™\ŠØš™XÝ]™Kœ™XZ[]
+Hˆ[™Yš[™Yˆ™XZ[›ÙÜ™\ÜÎˆ[X™\‹š\Ñš[š]JØš™XÝ]™Kœ™XZ[›ÙÜ™\ÜÊBˆÈX]›X^
+X]›Z[ŠK[X™\ŠØš™XÝ]™Kœ™XZ[›ÙÜ™\ÜÊJJBˆˆ[™Yš[™YˆJJBˆˆX\Øš™XÝ]™\Ê
+KˆY\ÜØYÙKˆNÂˆ™\Z\™Y˜Üž\Ý[ÈHÛX\”™[^P\›ØXÚ\Ê™\Z\™Y˜Üž\Ý[Ë™\Z\™Y›Øš™XÝ]™\ÊNÂˆ™\Z\‘Ø[YRYÊ™\Z\™Y
+NÂˆ™]\›ˆ™\Z\™YÂŸB™[˜Ý[ÛˆØYØ[YJ
+NˆØ[YHÂˆYˆ
+\[ÙˆÚ[™ÝÈOOH[™Yš[™YŠH™]\›ˆ[š]X[
+
+NÂˆžHÂˆZYÜ˜]PÛÛ[X[™\”ÝÜ˜YÙJ
+NÂˆÛÛœÝØ]™YHØØ[ÝÜ˜YÙK™Ù]][JÐU‘WÒÑVJNÂˆYˆ
+\Ø]™Y
+H™]\›ˆ[š]X[
+
+NÂˆÛÛœÝ\œÙYH”ÓÓ‹œ\œÙJØ]™Y
+H\ÈØ[YNÂˆ™]\›ˆY˜]QØ[YJ\œÙY“X]Ú™\Ý[YYœ›ÛH[Ý\ˆ\Ý]]ÜØ]™KˆŠNÂˆHØ]ÚÂˆØØ[ÝÜ˜YÙKœ™[[Ý™R][JÐU‘WÒÑVJNÂˆ™]\›ˆ[š]X[
+
+NÂˆBŸB‚™^ÜY˜][[˜Ý[ÛˆÛYJ
+HÂˆÛÛœÝØ[˜\ÈH\ÙT™YSØ[˜\Ñ[[Y[Š[
+KˆØ[YHH\ÙT™YØ[YOŠ[š]X[
+
+JKˆ\H\ÙT™YÂˆ\œ˜Z[ÎˆS[XYÙQ[[Y[Âˆ\œ˜Z[“^Y\ÎˆSØ[˜\Ñ[[Y[Âˆ[š]ÏÎˆS[XYÙQ[[Y[ÂˆÛÜšÙ\‘\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[ÂˆÛÜšÙ\•Ø[ÏÎˆS[XYÙQ[[Y[ÂˆÛÜšÙ\•Ø[ÐÏÎˆS[XYÙQ[[Y[Âˆ›ÛÜ\‘\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[Âˆ›ÛÜ\•Ø[ÏÎˆS[XYÙQ[[Y[Âˆ›ÛÜ\•Ø[ÐÏÎˆS[XYÙQ[[Y[Âˆ[šÑ\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[Âˆ›Û™Q\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[Âˆ›Û™S[Ý™OÎˆS[XYÙQ[[Y[ÂˆÚ\\‘\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[ÂˆÚ\\‘\ÞYYÎˆS[XYÙQ[[Y[ÂˆÛÜšÙ\“Z[™OÎˆS[XYÙQ[[Y[Âˆ\œ™]\™XÝ[ÛœÏÎˆS[XYÙQ[[Y[ÂˆZ[[™ÜÏÎˆS[XYÙQ[[Y[ÂˆÜž\Ý[ÎˆS[XYÙQ[[Y[Âˆ[ÞPÜž\Ý[ÎˆSØ[˜\Ñ[[Y[ÂˆXÝXØ[]X]OÎˆS[XYÙQ[[Y[ÂˆÛÛ[X[™Ü˜]Û\ÎˆS[XYÙQ[[Y[Âˆ[[™[^OÎˆS[XYÙQ[[Y[ÂˆOŠßJKˆÙ^\ÈH\ÙT™YŠ™]ÈÙ]Ýš[™ÏŠ
+JKˆÚ[\ˆH\ÙT™YÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆÞˆ[X™\ŽÂˆÞNˆ[X™\ŽÂˆ˜YÎˆ›ÛÛX[ŽÂˆÝ\ˆÂˆH[Š[
+KˆÝXÚÚ[ÈH\ÙT™YŠ™]ÈX\[X™\‹Š
+JKˆ[˜ÚH\ÙT™YÂˆ\Ý[˜ÙNˆ[X™\ŽÂˆ›ÛÛNˆ[X™\ŽÂˆÛÜ›ZYˆÂˆH[Š[
+Kˆ[˜ÚÛÛœÝ[YYH\ÙT™YŠ˜[ÙJKˆ[Ý™QÙ\Ý\™HH\ÙT™YÂˆ[Y\Îˆ™]\›•\O\[ÙˆÙ][Y[Ý]ŽÂˆÜ[™Yˆ›ÛÛX[ŽÂˆÝ\ˆÂˆÛÜ›ˆÂˆÚÚXÙNˆ™[™ØYÙHˆ™\™XÝˆ[ÂˆH[Š[
+Kˆ\ÝH\ÙT™YŠ
+Kˆ]XÚÕ[Y\œÈH\ÙT™Y™XÛÜ™[X™\‹[X™\ŠßJKˆ\Ý\H\ÙT™YÈYˆ[X™\ŽÈ[YNˆ[X™\ˆH[Š[
+KˆÛÛ›ÛÜ›Ý\ÈH\ÙT™Y™XÛÜ™[X™\‹[X™\–×OŠßJKˆ\ÝÜ›Ý\Ù^HH\ÙT™YÈÜ›Ý\ˆ[X™\ŽÈ[YNˆ[X™\ˆH[Š[
+KˆX]ÚÝ\YH\ÙT™YŠ˜[ÙJKˆY\ˆH\ÙT™YY\”Ù\ÜÚ[Ûˆ[Š[
+Kˆ][\^Y\”›ÛHH\ÙT™Y][\^Y\”›ÛOŠœÛÛÈŠKˆš]˜]SX]Ú›ÙÈH\ÙT™YŠYJKˆÝY\ÝÛ˜\ÚÝ™XYHH\ÙT™YŠ˜[ÙJKˆ™]ÛÜšÔÛ˜\ÚÝ]H\ÙT™YŠ
+Kˆ\ÝYXÚÈH\ÙT™YŠLJNÂˆÛÛœÝÝZKÙ]ZWHH\ÙTÝ]JÂˆÜ™Y]ÎˆLˆ[ÞNˆLŒˆ[[ˆˆØš™XÝ]™\Îˆˆ\›^Nˆ‹ˆ\ÙY\ˆˆÝÙ\ŽˆL‹ˆØ]™NˆˆÙ[XÝYˆ“›ÈÙ[XÝ[Ûˆ‹ˆY\ÜØYÙNˆ”ÙXÝ\™H[Ý\ˆ˜\ÙHÚ]Ù[žH\œ™]ÈY\ˆ[Ý\ˆš\œÝ™Yš[™\žKˆ‹ˆÝ™\Žˆˆ‹ˆ›ÙXÝ[ÛŽˆ[\È
+›ÙXÝ[Ûˆ	ˆÈZ[[™ÎˆšHˆ˜˜\œ˜XÚÜÈˆJH[ˆ›ÙXÝ[ÛZ[[™Îˆ[\È
+šHˆ˜˜\œ˜XÚÜÈŠH[ˆZ[[ÙNˆ[\È
+˜Z[\™Yš[™\žHˆ˜Z[X˜\œ˜XÚÜÈˆ˜Z[]\œ™]ŠH[ˆ\ÒNˆYKˆ\Ð˜\œ˜XÚÜÎˆ˜[ÙKˆ˜\œ˜XÚÜÐZ[[™Îˆ˜[ÙKˆÙ[XÝYZ[[™Îˆ[\ÈZ[[™ÖÈ\H—H[ˆÙ[XÝYÛÛœÝXÝ[ÛŽˆ˜[ÙKˆTXÚÙYˆ˜[ÙKˆT™[ØØ][ÛŽˆ[\ÈZ[[™ÖÈœ™[ØØ][Ûˆ—H[ˆ›ÜYšYYˆ˜[ÙKˆ›ÜYžT›ÙXÝ[ÛŽˆ[\ÈÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆH[ˆ›ÙXÝ[ÛÛÛÛÝÛŽˆˆØÝš[™Nˆ[\ÈØÝš[™H[ˆØÝš[™T›ÙXÝ[ÛŽˆ[\ÈÈ\NˆØÝš[™NÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆH[ˆ˜YS™]ÛÜšÎˆ˜[ÙKˆ˜YS™]ÛÜšÔ›ÙXÝ[ÛŽˆ[\ÈÈ[\ÙYˆ[X™\ŽÈ\˜][ÛŽˆ[X™\ˆH[ˆÚ\\ÛÝ[ˆˆ[™[^QØÝš[™Nˆ[\ÈØÝš[™H[ˆ[™[^QØÝš[™RÛ›ÝÛŽˆ˜[ÙKˆØ[ÛX\Žˆ˜[ÙKˆØ[˜Ù[[ÙNˆ˜[ÙKˆÙ[XÝYÛÛX˜]ˆˆÙ[XÝY[š]ÎˆˆÙ[XÝYÛÜšÙ\œÎˆˆÙ[XÝY[š]\Nˆ[\È[š]È\H—H›Z^Yˆ[ˆÙ[XÝYÚ\\“[ÙNˆ[\È[š]È˜Ú\\“[ÙH—H›Z^Yˆ[ˆÙ[XÝYÝ[˜ÙNˆ[\È[š]ÈœÝ[˜ÙH—H›Z^Yˆ[ˆ]]Ô™\Z\Žˆ˜[ÙKˆ™\Z\š[™ÕÛÜšÙ\œÎˆˆYUÛÜšÙ\œÎˆˆÙ[XÝY[š]Ø\™Îˆ×H\È\œ˜^OÈYˆ[X™\ŽÈ\Nˆ[š]È\H—NÈˆ[X™\ŽÈX^ˆ[X™\ŽÈ]™[ˆ[X™\ˆO‹ˆJNÂˆÛÛœÝÜØ]™TÝ]\ËÙ]Ø]™TÝ]\×HH\ÙTÝ]JUUÔÐU‘HÓˆŠNÂˆÛÛœÝÛ[Ý™PÚÛÜÙ\‹Ù][Ý™PÚÛÜÙ\—HH\ÙTÝ]OÂˆˆ[X™\ŽÂˆNˆ[X™\ŽÂˆÛÜ›ˆÂˆÚÚXÙNˆ™[™ØYÙHˆ™\™XÝˆ[ÂˆH[Š[
+NÂˆÛÛœÝÜ]\ÙYÙ]]\ÙYHH\ÙTÝ]J˜[ÙJNÂˆÛÛœÝÚÛYSÜ[‹Ù]ÛYSÜ[—HH\ÙTÝ]JYJNÂˆÛÛœÝØÛÛ[X[™›Ùš[KÙ]ÛÛ[X[™›Ùš[WHH\ÙTÝ]OÛÛ[X[™›Ùš[OŠÈˆÜ[Ú[Îˆ\Ý]Ø\™ˆš\™PÛÛ›Û˜[šÎˆJNÂˆÛÛœÝÚ\Ð]]ÜØ]™KÙ]\Ð]]ÜØ]™WHH\ÙTÝ]J˜[ÙJNÂˆÛÛœÝÛ™]ÓX]Ú›ÙËÙ]™]ÓX]Ú›Ù×HH\ÙTÝ]JYJNÂˆÛÛœÝÚ›Ú[ÛÙKÙ]›Ú[ÛÙWHH\ÙTÝ]JˆŠNÂˆÛÛœÝÛ™]ÛÜšËÙ]™]ÛÜš×HH\ÙTÝ]OÂˆ›ÛNˆ][\^Y\”›ÛNÂˆÝ]\ÎˆY\”Ý]\ÎÂˆÛÙNˆÝš[™ÎÂˆ]Z[ˆÝš[™ÎÂˆOŠÈ›ÛNˆœÛÛÈ‹Ý]\ÎˆšYH‹ÛÙNˆˆ‹]Z[ˆˆˆJNÂˆÛÛœÝØÛÛ[X[™X‹Ù]ÛÛ[X[™X—HH\ÙTÝ]O˜Z[[™ÜÈˆ[š]ÈˆXÚŠˆ[š]È‹ˆ
+NÂˆÛÛœÝÛÛ[X[™Ù[XÝ[ÛˆH\ÙT™YŠˆŠNÂˆÛÛœÝÝ]ÜšX[Ñ[˜X›YÙ]]ÜšX[Ñ[˜X›YHH\ÙTÝ]JYJNÂˆÛÛœÝÙ\ÛZ\ÜÙY\ËÙ]\ÛZ\ÜÙY\×HH\ÙTÝ]OÝš[™Ö×OŠ×JNÂˆÛÛœÝ]\ÙY™YˆH\ÙT™YŠYJNÂ‚ˆ\ÙQY™™XÝ
+
+
+HOˆÂˆÛÛœÝ[Y\ˆHÚ[™ÝËœÙ][Y[Ý]
+
+
+HOˆÂˆÙ]ÛÛ[X[™›Ùš[J™XYÛÛ[X[™›Ùš[J
+JNÂˆK
+NÂˆ™]\›ˆ
+
+HOˆÚ[™ÝË˜ÛX\•[Y[Ý]
+[Y\ŠNÂˆK×JNÂ‚ˆ\ÙQY™™XÝ
+
+
+HOˆÂˆYˆ
+™]ÛÜšËœ›ÛHOOHœÛÛÈŠHš]˜]SX]Ú›ÙË˜Ý\œ™[H™]ÓX]Ú›ÙÎÂˆKÛ™]ÛÜšËœ›ÛK™]ÓX]Ú›Ù×JNÂ‚ˆ\ÙQY™™XÝ
+
+
+HOˆÂˆ]XÝ]™HHYNÂˆÛÛœÝØYH
+ˆÙ^Nˆ\œ˜Z[ˆˆ[š]ÈˆÛÜšÙ\‘\™XÝ[ÛœÈˆÛÜšÙ\•Ø[ÈˆÛÜšÙ\•Ø[ÐÈˆ›ÛÜ\‘\™XÝ[ÛœÈˆ›ÛÜ\•Ø[Èˆ›ÛÜ\•Ø[ÐÈˆ[šÑ\™XÝ[ÛœÈˆ™›Û™Q\™XÝ[ÛœÈˆ™›Û™S[Ý™Hˆ˜Ú\\‘\™XÝ[ÛœÈˆ˜Ú\\‘\ÞYYˆÛÜšÙ\“Z[™Hˆ\œ™]\™XÝ[ÛœÈˆ˜Z[[™ÜÈˆ˜Üž\Ý[ˆXÝXØ[]X]Hˆ˜ÛÛ[X[™Ü˜]Û\ˆˆš[[™[^H‹ˆÜ˜ÎˆÝš[™Ëˆ
+HOˆÂˆÛÛœÝ[XYÙHH™]È[XYÙJ
+NÂˆ[XYÙK™XÛÙ[™ÈH˜\Þ[˜ÈŽÂˆ[XYÙK›Û›ØYH
+
+HOˆÂˆYˆ
+XXÝ]™JH™]\›ŽÂˆ\˜Ý\œ™[ÚÙ^WHH[XYÙNÂˆYˆ
+Ù^HOOH˜Üž\Ý[ŠHÂˆËÈTÛ™HØ[˜\Èš[\œÈÈ›Ý™[XX›H™XÛÛÜˆHÚ\™YÞX[‚ˆËÈÜž\Ý[ˆZ[[ˆ\ÛÛ]Y[X™\ˆÜš]HÛ˜ÙHÛÈ[ÞH\ÜÚ]È\™BˆËÈš\ÚX›HY™™\™[Ûˆ]™\žHœ˜[YH[™œ›ÝÜÙ\‹‚ˆÛÛœÝ[ÞHHØÝ[Y[˜Ü™X]Q[[Y[
+˜Ø[˜\ÈŠNÂˆ[ÞKÚYH[XYÙK›˜]\˜[ÚY[XYÙKÚYÂˆ[ÞKšZYÚH[XYÙK›˜]\˜[ZYÚ[XYÙKšZYÚÂˆÛÛœÝ[ÞPÛÛ^H[ÞK™Ù]ÛÛ^
+Œ™ŠHNÂˆ[ÞPÛÛ^™˜]Ò[XYÙJ[XYÙK
+NÂˆ[ÞPÛÛ^™ÛØ˜[ÛÛ\ÜÚ]SÜ\˜][ÛˆHœÛÝ\˜ÙKX]ÜŽÂˆ[ÞPÛÛ^™š[Ý[HHœ™Ø˜JMMË‹ŽŠHŽÂˆ[ÞPÛÛ^™š[™XÝ
+[ÞKÚY[ÞKšZYÚ
+NÂˆ[ÞPÛÛ^™ÛØ˜[ÛÛ\ÜÚ]SÜ\˜][ÛˆHœÛÝ\˜ÙK[Ý™\ˆŽÂˆ\˜Ý\œ™[˜[ÞPÜž\Ý[H[ÞNÂˆBˆYˆ
+Ù^HOOH\œ˜Z[ˆŠHÂˆÛÛœÝ^Y\ˆHØÝ[Y[˜Ü™X]Q[[Y[
+˜Ø[˜\ÈŠNÂˆ^Y\‹ÚYHÎÂˆ^Y\‹šZYÚHÂˆÛÛœÝÝH^Y\‹™Ù]ÛÛ^
+Œ™ŠHNÂˆÝ™š[Ý[HHˆÌLXŒXˆŽÂˆÝ™š[™XÝ
+Ë
+NÂˆÛÛœÝ[HHÍŽÂˆ›Üˆ
+]HH›ÝÈHÈHÈH
+ÏH[K›ÝÊÊÊBˆ›Üˆ
+]HÛÛHÈÎÈ
+ÏH[KÛÛ
+ÊÊHÂˆÝœØ]™J
+NÂˆÝ˜[œÛ]J
+È[HÈ‹H
+È[HÈŠNÂˆÝœ›Ý]J
+
+›ÝÈ
+ÈÛÛ
+H	H
+H
+ˆX]”HÈŠNÂˆÝ™˜]Ò[XYÙJ[XYÙK][HÈ‹][HÈ‹[K[JNÂˆÝœ™\ÝÜ™J
+NÂˆBˆÝ™š[Ý[HHœ™Ø˜J‹LLKŒMŠHŽÂˆÝ™š[™XÝ
+Ë
+NÂˆÝ™š[Ý[HHœ™Ø˜JML‹LKŒN
+HŽÂˆÝ™š[™XÝ
+Ž
+NÂˆÝ™š[Ý[HHœ™Ø˜JÎKÌ‹ŒLŠHŽÂˆÝ™š[™XÝ
+ÈHŽŽ
+NÂˆÝ™š[Ý[HHœ™Ø˜JËLLKŒM
+HŽÂˆÝ™š[™XÝ
+ŽÈHLÍŒ
+NÂˆ\˜Ý\œ™[\œ˜Z[“^Y\ˆH^Y\ŽÂˆBˆNÂˆ[XYÙKœÜ˜ÈHÜ˜ÎÂˆNÂˆØY
+\œ˜Z[ˆ‹‹ÙØ[YKX\Ùœ›ÛY\‹]\œ˜Z[‹]ŒKÙXœŠNÂˆØY
+[š]È‹‹ÙØ[YKX\Ùœ›ÛY\‹][š]ËX]\Ë]ŒKœ™ÈŠNÂˆØY
+ÛÜšÙ\‘\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹]ÛÜšÙ\‹Y\™XÝ[ÛœË]Œ‹œ™ÈŠNÂˆØY
+ÛÜšÙ\•Ø[È‹‹ÙØ[YKX\Ùœ›ÛY\‹]ÛÜšÙ\‹]Ø[ËX‹]ŒËœ™ÈŠNÂˆØY
+ÛÜšÙ\•Ø[ÐÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹]ÛÜšÙ\‹]Ø[ËXË]œ™ÈŠNÂˆØY
+›ÛÜ\‘\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹]›ÛÜ\‹Y\™XÝ[ÛœË]Œ‹œ™ÈŠNÂˆØY
+›ÛÜ\•Ø[È‹‹ÙØ[YKX\Ùœ›ÛY\‹]›ÛÜ\‹]Ø[ËX‹]ŒËœ™ÈŠNÂˆØY
+›ÛÜ\•Ø[ÐÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹]›ÛÜ\‹]Ø[ËXË]œ™ÈŠNÂˆØY
+[šÑ\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹][šËY\™XÝ[ÛœË]Œ‹œ™ÈŠNÂˆØY
+™›Û™Q\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹\ÝšZÙKY›Û™KY\™XÝ[ÛœË]ŒKœ™ÈŠNÂˆØY
+™›Û™S[Ý™H‹‹ÙØ[YKX\Ùœ›ÛY\‹\ÝšZÙKY›Û™K[[Ý™KX‹]Œ‹œ™ÈŠNÂˆØY
+˜Ú\\‘\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹XÚ\\‹Y\™XÝ[ÛœË]ŒKœ™ÈŠNÂˆØY
+˜Ú\\‘\ÞYY‹‹ÙØ[YKX\Ùœ›ÛY\‹XÚ\\‹Y\ÞYY]ŒKœ™ÈŠNÂˆØY
+ÛÜšÙ\“Z[™H‹‹ÙØ[YKX\Ùœ›ÛY\‹]ÛÜšÙ\‹[Z[™K]ŒKœ™ÈŠNÂˆØY
+\œ™]\™XÝ[ÛœÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹]\œ™]Y\™XÝ[ÛœË]ŒKœ™ÈŠNÂˆØY
+˜Z[[™ÜÈ‹‹ÙØ[YKX\Ùœ›ÛY\‹XZ[[™ÜËX]\Ë]ŒKœ™ÈŠNÂˆØY
+˜Üž\Ý[‹‹ÙØ[YKX\Ùœ›ÛY\‹XÜž\Ý[]ŒKœ™ÈŠNÂˆØY
+˜ÛÛ[X[™Ü˜]Û\ˆ‹‹ÙØ[YKX\Ùœ›ÛY\‹XÛÛ[X[™XÜ˜]Û\‹]ŒKœ™ÈŠNÂˆØY
+š[[™[^H‹‹ÙØ[YKX\Ùœ›ÛY\‹Z[[\™[^KX[šÙ\‹]ŒKœ™ÈŠNÂˆ™]\›ˆ
+
+HOˆÂˆXÝ]™HH˜[ÙNÂˆNÂˆK×JNÂˆÛÛœÝ™\Ú^™HH\ÙPØ[˜XÚÊ
+
+HOˆÂˆÛÛœÝÈHØ[˜\Ë˜Ý\œ™[ÂˆYˆ
+XÊH™]\›ŽÂˆÛÛœÝH]šXÙT^[˜][ÈKˆˆHË™Ù]›Ý[™[™ÐÛY[™XÝ
+
+NÂˆËÚYH‹ÚY
+ˆÂˆËšZYÚH‹šZYÚ
+ˆÂˆË™Ù]ÛÛ^
+Œ™ŠOËœÙ]˜[œÙ›Ü›J
+NÂˆK×JNÂˆÛÛœÝØÜ™Y[•ÕÛÜ›H
+Þˆ[X™\‹ÞNˆ[X™\ŠHOˆÂˆÛÛœÝÈHØ[˜\Ë˜Ý\œ™[KˆÈHØ[YK˜Ý\œ™[Âˆ™]\›ˆÂˆˆ
+ÞHË˜ÛY[ÚYÈŠHÈËž›ÛÛH
+ÈË˜Ø[Y\˜KžˆNˆ
+ÞHHË˜ÛY[ZYÚÈŠHÈËž›ÛÛH
+ÈË˜Ø[Y\˜KžKˆNÂˆNÂˆÛÛœÝ[Ý™PØ[Y\˜UÈH
+ˆ[X™\‹Nˆ[X™\ŠHOˆÂˆÛÛœÝÈHØ[˜\Ë˜Ý\œ™[ÂˆYˆ
+XÊH™]\›ŽÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆÛÛœÝ[•ÈHË˜ÛY[ÚYÈ
+ˆ
+ˆËž›ÛÛJNÂˆÛÛœÝ[’HË˜ÛY[ZYÚÈ
+ˆ
+ˆËž›ÛÛJNÂˆË˜Ø[Y\˜KžHX]›X^
+[•ËX]›Z[ŠÈH[•Ë
+JNÂˆË˜Ø[Y\˜KžHHX]›X^
+[’X]›Z[ŠH[’JJNÂˆNÂˆÛÛœÝÞ[˜ÈH
+
+HOˆÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ˆÚÜÙ[ˆHË‹‹™Ë[š]Ë‹‹™Ë˜Z[[™Ü×K™š[\Š
+ÊHO‚ˆËœÙ[XÝYš[˜ÛY\ÊËšY
+Kˆ
+NÂˆÛÛœÝÙ[XÝ[Û’Ù^HHËœÙ[XÝYš›Ú[Š‹ŠNÂˆYˆ
+Ù[XÝ[Û’Ù^HOOHÛÛ[X[™Ù[XÝ[Û‹˜Ý\œ™[
+HÂˆÛÛ[X[™Ù[XÝ[Û‹˜Ý\œ™[HÙ[XÝ[Û’Ù^NÂˆÙ]ÛÛ[X[™XŠ[š]ÈŠNÂˆBˆÛÛœÝÚÜÙ[•[š]ÈHÚÜÙ[‹™š[\Š\Õ[š]
+NÂˆÛÛœÝÚÜÙ[•\\ÈHË‹‹›™]ÈÙ]
+ÚÜÙ[•[š]Ë›X\
+
+[š]
+HOˆ[š]\JJWNÂˆÛÛœÝÚÜÙ[Ú\\“[Ù\ÈHË‹‹›™]ÈÙ]
+ÚÜÙ[•[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH˜Ú\\ˆŠK›X\
+
+[š]
+HOˆ[š]˜Ú\\“[ÙH›[Øš[HŠJWNÂˆÛÛœÝÚÜÙ[”Ý[˜Ù\ÈHË‹‹›™]ÈÙ]
+ÚÜÙ[•[š]Âˆ™š[\Š
+[š]
+HOˆ\ÐÛÛX˜][š]
+[š]
+H
+[š]\HOOHÛÜšÙ\ˆˆ	‰ˆ[š]˜]]Ô™\Z\ŠJBˆ›X\
+
+[š]
+HOˆ[š]œÝ[˜ÙHœ\œÝYHŠJWNÂˆÛÛœÝÛ™HHÚÜÙ[–ÌKˆ˜[šÈBˆÛ™H	‰ˆ\Õ[š]
+Û™JBˆÈ0­ÈS’È	ÛÛ™K›]™[_H0­È	ÛÛ™KžHˆˆˆŽÂˆÛÛœÝÙ[XÝYZ[[™ÈHË˜Z[[™ÜË™š[™
+ˆ
+ŠHOˆ‹X[HOOHœ^Y\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê‹šY
+Kˆ
+NÂˆÛÛœÝ^Y\˜\œ˜XÚÜÈHË˜Z[[™ÜË™š[\Šˆ
+ŠHOˆ‹X[HOOHœ^Y\ˆˆ	‰ˆ‹\HOOH˜˜\œ˜XÚÜÈ‹ˆ
+NÂˆÙ]ZJÂˆÜ™Y]ÎˆX]™›ÛÜŠË˜Ü™Y]ÊKˆ[ÞNˆX]™›ÛÜŠË˜[ÞJKˆ[[ˆX]™›ÛÜŠËš[[
+KˆØš™XÝ]™\Îˆ
+Ë›Øš™XÝ]™\È×JK™š[\Š
+Øš™XÝ]™JHOˆØš™XÝ]™K›ÝÛ™\ˆOOHœ^Y\ˆŠK›[™Ýˆ\›^NˆË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ\ÐÛÛX˜][š]
+[š]
+JK›[™Ýˆ\ÙY\ˆ\ÙY\\”ÙXÛÛ™
+Ë[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ\ÐÛÛX˜][š]
+[š]
+JK›[™Ý
+H
+ˆŒˆÝÙ\ŽˆËœÝÙ\‹ˆØ]™NˆËØ]™KˆÙ[XÝYˆÚÜÙ[‹›[™ÝˆÈÚÜÙ[‹›[™ÝOOHBˆÈ\Õ[š]
+Û™JBˆÈÛ™K\HOOH˜Ú\\ˆ‚ˆÈ	Ý[š]˜[YJÛ™K\J_H0­È	ÓX]˜ÙZ[
+Û™Kš
+_KÉÓX]˜ÙZ[
+Û™K›X^
+_H0­È	Ý[š]]JÛ™J_Xˆˆ	Ý[š]˜[YJÛ™K\J_H0­È	ÓX]˜ÙZ[
+Û™Kš
+_KÉÓX]˜ÙZ[
+Û™K›X^
+_H0­È	ÓX]œ›Ý[™
+Ý]ÖÛÛ™K\WK™[XYÙH
+ˆ
+H
+È
+
+Û™K›]™[JHHJH
+ˆŒN
+J_HQÈ0­È	Ý[š]]JÛ™J_H0­È	ÊÛ™KœÝ\HÏÈÕTWÐÐTPÒUJHˆÈÕTH	ÓX]˜ÙZ[
+Û™KœÝ\HÏÈÕTWÐÐTPÒUJ_\Øˆ“ÕUÑˆÕTH8¢$ŒIHŸIÊÛ™K›]™[JHˆHÈ0­È‘QÑSˆ	Ê™]\˜[”™YÙ[”˜]JÛ™JH
+ˆL
+KÑš^Y
+
+_IHÜØˆˆŸIÛÛ™Kœ™]™X][™ÈÈˆ0­È‘U‘PUS‘ÈˆˆˆŸIÜ˜[šßXˆˆ
+Û™Kœ›ÙÜ™\ÜÈÏÈJHBˆÈ	ÛÛ™K\KÕ\\Ø\ÙJ
+_HÒT‘Q”SQH0­È	ÛÛ™K˜ÛÛœÝXÝ[Û”Ý\YÈ	ÓX]œ›Ý[™
+
+Û™Kœ›ÙÜ™\ÜÈ
+H
+ˆL
+_IH•RSˆ•ÐRUS‘È“ÔˆÓÔ’ÑTˆŸXˆˆ	ÛÛ™K\HOOH\œ™]ˆÈ”ÑS•–HT”‘U0­ÈŒLS‘ÑH0­ÈLˆQÈˆˆÛ™K\HOOHšHˆ	‰ˆÛ™KœXÚÙYÈÓÓSPS‘ÔUÓTˆˆˆÛ™K\KÕ\\Ø\ÙJ
+_H0­È	ÓX]˜ÙZ[
+Û™Kš
+_KÉÓX]˜ÙZ[
+Û™K›X^
+_H	ÛÛ™K\HOOHšHˆ	‰ˆÛ™Kœ™[ØØ][ÛˆÈ0­È	ÛÛ™Kœ™[ØØ][Û‹›[ÙHOOHœXÚÈˆÈ”PÒÒS‘Èˆˆ‘TÖRS‘ÈŸH	ÓX]œ›Ý[™
+Û™Kœ™[ØØ][Û‹™[\ÙYÈÛ™Kœ™[ØØ][Û‹™\˜][Ûˆ
+ˆL
+_IXˆÛ™K\HOOHšHˆ	‰ˆÛ™KœXÚÙYÈˆ0­ÈSÐ’SH0­ÈÖTÕSTÈÑ‘“S‘HˆˆÛ™K\HOOHšHˆ	‰ˆË™›ÜYšYYÈˆ0­È“Ô•Q’QQˆˆˆŸXˆˆ	ØÚÜÙ[‹›[™ÝHS’UÈÑSPÕQˆˆ“›ÈÙ[XÝ[Ûˆ‹ˆY\ÜØYÙNˆË›Y\ÜØYÙKˆÝ™\ŽˆË›Ý™\‹ˆ›ÙXÝ[ÛŽˆÙ[XÝYZ[[™ÏËœ›ÙXÝ[Û‚ˆÈÂˆ‹‹œÙ[XÝYZ[[™Ëœ›ÙXÝ[Û‹ˆZ[[™ÎˆÙ[XÝYZ[[™Ë\H\ÈšHˆ˜˜\œ˜XÚÜÈ‹ˆBˆˆ[ˆ›ÙXÝ[ÛÛÛÛÝÛŽˆÙ[XÝYZ[[™ÏË˜ÛÛÛÝÛˆˆ›ÙXÝ[ÛZ[[™Î‚ˆÙ[XÝYZ[[™È	‰‚ˆÈšH‹˜˜\œ˜XÚÜÈ—Kš[˜ÛY\ÊÙ[XÝYZ[[™Ë\JH	‰‚ˆZ[[™ÓÜ\˜][Û˜[
+Ù[XÝYZ[[™ÊBˆÈ
+Ù[XÝYZ[[™Ë\H\ÈšHˆ˜˜\œ˜XÚÜÈŠBˆˆ[ˆ\ÒNˆË˜Z[[™ÜËœÛÛYJ
+ŠHOˆ‹X[HOOHœ^Y\ˆˆ	‰ˆ‹\HOOHšHŠKˆ\Ð˜\œ˜XÚÜÎˆ^Y\˜\œ˜XÚÜËœÛÛYJˆ
+ŠHOˆ‹œ›ÙÜ™\ÜÈOOH[™Yš[™Y‹œ›ÙÜ™\ÜÈHKˆ
+Kˆ˜\œ˜XÚÜÐZ[[™Îˆ^Y\˜\œ˜XÚÜËœÛÛYJˆ
+ŠHOˆ‹œ›ÙÜ™\ÜÈOOH[™Yš[™Y	‰ˆ‹œ›ÙÜ™\ÜÈKˆ
+KˆZ[[ÙNˆË›[ÙKœÝ\ÕÚ]
+˜Z[ŠBˆÈ
+Ë›[ÙH\È˜Z[\™Yš[™\žHˆ˜Z[X˜\œ˜XÚÜÈˆ˜Z[]\œ™]ŠBˆˆ[ˆÙ[XÝYZ[[™ÎˆÙ[XÝYZ[[™ÏË\H[ˆÙ[XÝYÛÛœÝXÝ[ÛŽˆ›ÛÛX[ŠÙ[XÝYZ[[™È	‰ˆ
+Ù[XÝYZ[[™Ëœ›ÙÜ™\ÜÈÏÈJHJKˆTXÚÙYˆ›ÛÛX[ŠÙ[XÝYZ[[™ÏË\HOOHšHˆ	‰ˆÙ[XÝYZ[[™ËœXÚÙY
+KˆT™[ØØ][ÛŽˆÙ[XÝYZ[[™ÏË\HOOHšHˆ	‰ˆÙ[XÝYZ[[™Ëœ™[ØØ][ÛˆÈÈ‹‹œÙ[XÝYZ[[™Ëœ™[ØØ][ÛˆHˆ[ˆ›ÜYšYYˆ›ÛÛX[ŠË™›ÜYšYY
+Kˆ›ÜYžT›ÙXÝ[ÛŽˆË™›ÜYžT›ÙXÝ[Ûˆ[ˆØÝš[™NˆË™ØÝš[™H[ˆØÝš[™T›ÙXÝ[ÛŽˆË™ØÝš[™T›ÙXÝ[Ûˆ[ˆ˜YS™]ÛÜšÎˆ›ÛÛX[ŠË˜YS™]ÛÜšÊKˆ˜YS™]ÛÜšÔ›ÙXÝ[ÛŽˆË˜YS™]ÛÜšÔ›ÙXÝ[Ûˆ[ˆÚ\\ÛÝ[ˆÚ\\ÛÝ[›Ü•X[JËœ^Y\ˆŠKˆ[™[^QØÝš[™NˆËœØÛÝ]Y[™[^QØÝš[™HOOH˜Z\ˆˆËœØÛÝ]Y[™[^QØÝš[™HOOH˜\›[ÜˆˆÈËœØÛÝ]Y[™[^QØÝš[™Hˆ[ˆ[™[^QØÝš[™RÛ›ÝÛŽˆ›ÛÛX[ŠË™[™[^QØÝš[™RÛ›ÝÛŠKˆØ[ÛX\ŽˆÚÜÙ[‹›[™ÝˆË›[ÙHOOHœÙ[XÝ‹ˆØ[˜Ù[[ÙNˆË›[ÙHOOHœÙ[XÝ‹ˆÙ[XÝYÛÛX˜]ˆÚÜÙ[‹™š[\Š
+Øš™XÝ
+HOˆ\Õ[š]
+Øš™XÝ
+H	‰ˆ\ÐÛÛX˜][š]
+Øš™XÝ
+JK›[™ÝˆÙ[XÝY[š]ÎˆÚÜÙ[•[š]Ë›[™ÝˆÙ[XÝYÛÜšÙ\œÎˆÚÜÙ[•[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠK›[™ÝˆÙ[XÝY[š]\NˆÚÜÙ[•\\Ë›[™ÝOOHHÈÚÜÙ[•\\ÖÌHˆÚÜÙ[•\\Ë›[™ÝÈ›Z^Yˆˆ[ˆÙ[XÝYÚ\\“[ÙNˆÚÜÙ[Ú\\“[Ù\Ë›[™ÝOOHHÈÚÜÙ[Ú\\“[Ù\ÖÌHˆÚÜÙ[Ú\\“[Ù\Ë›[™ÝÈ›Z^Yˆˆ[ˆÙ[XÝYÝ[˜ÙNˆÚÜÙ[”Ý[˜Ù\Ë›[™ÝOOHHÈÚÜÙ[”Ý[˜Ù\ÖÌHˆÚÜÙ[”Ý[˜Ù\Ë›[™ÝÈ›Z^Yˆˆ[ˆ]]Ô™\Z\ŽˆÚÜÙ[•[š]ËœÛÛYJ
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠH	‰ˆÚÜÙ[•[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠK™]™\žJ
+[š]
+HOˆ[š]˜]]Ô™\Z\ŠKˆ™\Z\š[™ÕÛÜšÙ\œÎˆÚÜÙ[•[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆˆ	‰ˆ
+[š]œ™\Z\•\™Ù][š]œ™\Z\”™[^U\™Ù]
+JK›[™ÝˆYUÛÜšÙ\œÎˆË[š]Ë™š[\Š
+[š]
+HOˆ\ÒYUÛÜšÙ\ŠË[š]
+JK›[™ÝˆÙ[XÝY[š]Ø\™ÎˆÚÜÙ[•[š]Âˆ™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ\ÐÛÛX˜][š]
+[š]
+JBˆ›X\
+
+[š]
+HOˆ
+ÈYˆ[š]šY\Nˆ[š]\Kˆ[š]šX^ˆ[š]›X^]™[ˆ[š]›]™[HJJKˆJNÂˆNÂ‚ˆÛÛœÝ™[[Ý™TÙ[XÝY[š]H
+Yˆ[X™\ŠHOˆÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆËœÙ[XÝYHËœÙ[XÝY™š[\Š
+Ù[XÝYY
+HOˆÙ[XÝYYOOHY
+NÂˆË›Y\ÜØYÙHHËœÙ[XÝY›[™ÝÈ	ÙËœÙ[XÝY›[™ÝH[š]ÈÙ[XÝY˜ˆ”Ù[XÝ[ÛˆÛX\™YˆŽÂˆ\Ý\˜Ý\œ™[H[ÂˆÞ[˜Ê
+NÂˆNÂ‚ˆÛÛœÝY\”Ù[™H
+Y\ÜØYÙNˆ[šÛ›ÝÛŠHOˆY\‹˜Ý\œ™[ËœÙ[™
+Y\ÜØYÙJNÂ‚ˆ[˜Ý[Ûˆ\T™[[ÝTÚ[
+^[ØYˆ™XÛÜ™Ýš[™Ë[šÛ›ÝÛŠHÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆÛÛœÝÞH[X™\Š^[ØYž
+KÞHH[X™\Š^[ØYžJNÂˆYˆ
+S[X™\‹š\Ñš[š]JÞ
+HS[X™\‹š\Ñš[š]JÞJJH™]\›ŽÂˆÛÛœÝÙ[XÝYYÈH\œ˜^Kš\Ð\œ˜^J^[ØYœÙ[XÝY
+BˆÈ^[ØYœÙ[XÝY™š[\Š
+Y
+NˆY\È[X™\ˆOˆ[X™\‹š\Ò[YÙ\ŠY
+JBˆˆ×NÂˆÛÛœÝ[ÙHH\[Ùˆ^[ØY›[ÙHOOHœÝš[™ÈˆÈ^[ØY›[ÙHˆœÙ[XÝŽÂˆYˆ
+[ÙHOOH›[Ý™KZHŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Z[[™ÊHO‚ˆZ[[™ËX[HOOH™[™[^Hˆ	‰ˆZ[[™Ë\HOOHšHˆ	‰ˆZ[[™ËœXÚÙY	‰ˆÙ[XÝYYËš[˜ÛY\ÊZ[[™ËšY
+JNÂˆYˆ
+JHÂˆK›[Øš[U\™Ù]HÈˆX]›X^
+X]›Z[ŠÈHÞ
+JKNˆX]›X^
+X]›Z[ŠHÞJJHNÂˆK›[Øš[Q˜XÚ[™ÈHX]˜][ŒŠÞHHKžKÞHKž
+NÂˆBˆ™]\›ŽÂˆBˆYˆ
+[ÙHOOHœÙ]\˜[HŠHÂˆÛÛœÝZ[[™ÈHË˜Z[[™ÜË™š[™
+
+ŠHO‚ˆ‹X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê‹šY
+H	‰ˆÈšH‹˜˜\œ˜XÚÜÈ—Kš[˜ÛY\Ê‹\JH	‰ˆZ[[™ÓÜ\˜][Û˜[
+ŠJNÂˆYˆ
+Z[[™ÊHZ[[™Ëœ˜[HHÈˆX]›X^
+ÌX]›Z[ŠÈHÌÞ
+JKNˆX]›X^
+ÌX]›Z[ŠHÌÞJJHNÂˆ™]\›ŽÂˆBˆÛÛœÝ™[[ÝU[š]ÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê[š]šY
+JNÂˆÛÛœÝ™[[ÝUÛÜšÙ\œÑ›Ü”™\ÛÝ\˜ÙHH™[[ÝU[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠNÂˆÛÛœÝ™\ÛÝ\˜ÙR]HË˜Üž\Ý[Âˆ›X\
+
+™\ÛÝ\˜ÙK[™^
+HOˆ
+È™\ÛÝ\˜ÙK[™^JJBˆ™š[\Š
+È™\ÛÝ\˜ÙHJHOˆ™\ÛÝ\˜ÙK˜[[Ý[ˆ	‰ˆ\Õš\ÚX›Q›ÜŠË™[™[^H‹™\ÛÝ\˜ÙK
+JBˆœÛÜ
+
+KŠHOˆX]š\Ý
+Kœ™\ÛÝ\˜ÙKžHÞKœ™\ÛÝ\˜ÙKžHHÞJHHX]š\Ý
+‹œ™\ÛÝ\˜ÙKžHÞ‹œ™\ÛÝ\˜ÙKžHHÞJJVÌNÂˆYˆ
+ˆ[ÙHOOHœÙ[XÝˆ	‰‚ˆ™[[ÝUÛÜšÙ\œÑ›Ü”™\ÛÝ\˜ÙK›[™Ý	‰‚ˆ™\ÛÝ\˜ÙR]	‰‚ˆX]š\Ý
+™\ÛÝ\˜ÙR]œ™\ÛÝ\˜ÙKžHÞ™\ÛÝ\˜ÙR]œ™\ÛÝ\˜ÙKžHHÞJHˆ
+HÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™\ÛÝ\˜ÙJË™[[ÝUÛÜšÙ\œÑ›Ü”™\ÛÝ\˜ÙK™\ÛÝ\˜ÙR]š[™^
+NÂˆ™]\›ŽÂˆBˆYˆ
+[ÙHOOHœ™\Z\ˆŠHÂˆÛÛœÝÛÜšÙ\œÈH™[[ÝU[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠNÂˆÛÛœÝ™[^HH™\Z\˜X›T™[^S™X\ŠË™[™[^H‹ÞÞJNÂˆYˆ
+™[^H	‰ˆX]š\Ý
+™[^KžHÞ™[^KžHHÞJHÍŠHÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™[^T™\Z\ŠÛÜšÙ\œË™[^JNÂˆ™]\›ŽÂˆBˆÛÛœÝ™\Z\˜X›HHË‹‹™Ë˜Z[[™ÜË‹‹™Ë[š]×Bˆ™š[\Š
+Øš™XÝ
+HOˆØš™XÝX[HOOH™[™[^Hˆ	‰ˆØš™XÝšˆ	‰ˆØš™XÝšØš™XÝ›X^	‰ˆ
+\Õ[š]
+Øš™XÝ
+HZ[[™ÓÜ\˜][Û˜[
+Øš™XÝ
+JJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+™\Z\˜X›H	‰ˆX]š\Ý
+™\Z\˜X›KžHÞ™\Z\˜X›KžHHÞJHÌ
+HÂˆÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹šYOOH™\Z\˜X›KšY
+K™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹œ™\Z\ˆŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H™\Z\˜X›KšYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHHœ™\Z\ˆŽÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆJNÂˆBˆ™]\›ŽÂˆBˆYˆ
+[ÙHOOHœÙ]\]›ÛXHˆ[ÙHOOHœÙ]\]›ÛXˆŠHÂˆÛÛœÝ]›Û\œÈH™[[ÝU[š]Ë™š[\Š
+[š]
+HOˆ\ÐÛÛX˜][š]
+[š]
+H
+[š]\HOOHÛÜšÙ\ˆˆ	‰ˆ[š]˜]]Ô™\Z\ŠJNÂˆYˆ
+[ÙHOOHœÙ]\]›ÛXHŠHÂˆ]›Û\œË™›Ü‘XXÚ
+
+[š]
+HOˆÈ[š]œ]›ÛHÈNˆÈˆÞNˆÞHKŽˆÈˆÞNˆÞHK™^ˆ˜HˆNÈJNÂˆH[ÙHÂˆ]›Û\œË™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆÛÛœÝHH[š]œ]›ÛË˜HÈˆ[š]žNˆ[š]žHNÂˆ[š]œ]›ÛHÈKŽˆÈˆÞNˆÞHK™^ˆ˜ˆˆNÂˆ[š]œÝ[˜ÙHHœ]›ÛŽÂˆYˆ
+[š]\HOOHÛÜšÙ\ˆŠH[š]ÛÜšÙ\“[ÙHHšÛŽÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]\™Ù]HÈˆKž
+È
+[™^	HÊH
+ˆŒ‹NˆKžH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆŒˆNÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆJNÂˆBˆ™]\›ŽÂˆBˆYˆ
+[ÙKœÝ\ÕÚ]
+˜Z[HŠJHÂˆÛÛœÝ\HH[ÙHOOH˜Z[\™Yš[™\žHˆÈœ™Yš[™\žHˆˆ[ÙHOOH˜Z[X˜\œ˜XÚÜÈˆÈ˜˜\œ˜XÚÜÈˆˆ[ÙHOOH˜Z[]\œ™]ˆÈ\œ™]ˆˆ[ÂˆYˆ
+]\JH™]\›ŽÂˆÛÛœÝÛÜÝH•RSÐÓÔÕÝ\WNÂˆÛÛœÝ˜Y]\ÈHZ[[™ÔÝ]ÖÝ\WKœŽÂˆÛÛœÝ›ØÚÙYBˆË˜Z[[™ÜËœÛÛYJ
+ŠHOˆX]š\Ý
+‹žHÞ‹žHHÞJHZ[[™ÔÝ]ÖØ‹\WKœˆ
+È˜Y]\È
+ÈN
+HˆË˜Üž\Ý[ËœÛÛYJ
+Üž\Ý[
+HOˆÜž\Ý[˜[[Ý[ˆ	‰ˆX]š\Ý
+Üž\Ý[žHÞÜž\Ý[žHHÞJH˜Y]\È
+ÈÍŠHˆT”RS—Ô’QÑTËœÛÛYJ
+šYÙJHOˆX]š\Ý
+šYÙKžHÞšYÙKžHHÞJHšYÙKœˆ
+È˜Y]\È
+ÈN
+HˆÞ˜Y]\È
+ÈŒÞˆÈH˜Y]\ÈHŒÞH˜Y]\È
+ÈŒÞHˆH˜Y]\ÈHŒÂˆYˆ
+›ØÚÙYË™[™[^P[ÞHÛÜÝ
+H™]\›ŽÂˆË™[™[^P[ÞHOHÛÜÝÂˆÛÛœÝZ[[™ÒYHË›™^Y
+ÊÎÂˆË˜Z[[™ÜËœ\Ú
+ÂˆYˆZ[[™ÒYX[Nˆ™[™[^H‹\KˆÞNˆÞKˆKˆX^ˆZ[[™ÒX[Ý\WK›ÙÜ™\ÜÎˆÛÛœÝXÝ[Û‘\˜][ÛŽˆZ[[™ÐZ[[YVÝ\WKÛÛœÝXÝ[Û”Ý\Yˆ˜[ÙKˆJNÂˆ™[[ÝU[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠK™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆ]Y]YUÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹Z[[™ÒY
+NÂˆJNÂˆ™]\›ŽÂˆBˆÛÛœÝ[š]ÈH™[[ÝU[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH˜Ú\\ˆˆ
+[š]˜Ú\\“[ÙH›[Øš[HŠHOOH›[Øš[HŠNÂˆYˆ
+][š]Ë›[™Ý
+H™]\›ŽÂˆÛÛœÝ™[^HH
+Ë›Øš™XÝ]™\È×JBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+™[^H	‰ˆX]š\Ý
+™[^KžHÞ™[^KžHHÞJHÌŠHÂˆYˆ
+ˆ[š]Ë›[™Ýˆ	‰‚ˆ[š]Ë™]™\žJ
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠH	‰‚ˆ™[^K›ÝÛ™\ˆOOH™[™[^Hˆ	‰‚ˆ[[™[^SÜ\˜][Û˜[
+™[^JH	‰‚ˆ™[^Kš™[^K›X^ˆ
+HÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™[^T™\Z\Š[š]Ë™[^JNÂˆ™]\›ŽÂˆBˆYˆ
+Z[[™[^SÜ\˜][Û˜[
+™[^JJH™]\›ŽÂˆÛÛœÝÜÝ[SØØÝ\[ÈH™[^SØØÝ\[ÊË™[^Kœ^Y\ˆŠNÂˆYˆ
+ÜÝ[SØØÝ\[Ë›[™Ý
+HÂˆ[š]Ë™š[\Š\ÐÛÛX˜][š]
+K™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆYˆ
+[š]™Ø\œš\ÛÛ™Y]
+HZ™XÝœ›ÛR[[™[^JË[š]
+NÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]™[™[^HHÜÝ[SØØÝ\[ÖÚ[™^	HÜÝ[SØØÝ\[Ë›[™ÝKšYÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆYˆ
+[š]œÝ[˜ÙHOOHšÛˆ[š]œÝ[˜ÙHOOHœ]›ÛŠH[š]œÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆH[ÙHÂˆÛÛœÝ]˜Z[X›HHX]›X^
+‘SVWÑÐT”’TÓÓ—ÐÐTPÒUHH™[^SØØÝ\[ÊË™[^K™[™[^HŠK›[™Ý
+NÂˆ[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH›ÛÜ\ˆˆ	‰ˆ[š]™Ø\œš\ÛÛ™Y]OOH™[^KšY
+KœÛXÙJ]˜Z[X›JK™›Ü‘XXÚ
+
+[š]
+HOˆÂˆYˆ
+[š]™Ø\œš\ÛÛ™Y]
+HZ™XÝœ›ÛR[[™[^JË[š]
+NÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H™[^KšYÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]\™Ù]HÈˆ™[^KžNˆ™[^KžHNÂˆ[š]›[Ý™Q[™ØYÙHH™[^K›ÝÛ™\ˆOOHœ^Y\ˆŽÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆBˆ™]\›ŽÂˆBˆÛÛœÝ™[[ÝUÛÜšÙ\œÈH[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠNÂˆÛÛœÝ[™[™ÐÛÛœÝXÝ[ÛˆHË˜Z[[™ÜÂˆ™š[\Š
+Z[[™ÊHOˆZ[[™ËX[HOOH™[™[^Hˆ	‰ˆ
+Z[[™Ëœ›ÙÜ™\ÜÈÏÈJHJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+™[[ÝUÛÜšÙ\œË›[™Ý	‰ˆ[™[™ÐÛÛœÝXÝ[Ûˆ	‰ˆX]š\Ý
+[™[™ÐÛÛœÝXÝ[Û‹žHÞ[™[™ÐÛÛœÝXÝ[Û‹žHHÞJHHZ[[™ÔÝ]ÖÜ[™[™ÐÛÛœÝXÝ[Û‹\WKœˆ
+ÈN
+HÂˆ™[[ÝUÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆ\ÜÚYÛ•ÛÜšÙ\•Ô[™[™ÐÛÛœÝXÝ[ÛŠÛÜšÙ\‹[™[™ÐÛÛœÝXÝ[Û‹šY
+JNÂˆ™]\›ŽÂˆBˆÛÛœÝœšY[™T™\Z\˜X›HHË‹‹™Ë˜Z[[™ÜË‹‹™Ë[š]×Bˆ™š[\Š
+Øš™XÝ
+HOˆØš™XÝX[HOOH™[™[^Hˆ	‰ˆØš™XÝšˆ	‰ˆØš™XÝšØš™XÝ›X^	‰ˆ
+\Õ[š]
+Øš™XÝ
+HZ[[™ÓÜ\˜][Û˜[
+Øš™XÝ
+JJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+™[[ÝUÛÜšÙ\œË›[™ÝOOH[š]Ë›[™Ý	‰ˆœšY[™T™\Z\˜X›H	‰ˆX]š\Ý
+œšY[™T™\Z\˜X›KžHÞœšY[™T™\Z\˜X›KžHHÞJHJHÂˆ™[[ÝUÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹šYOOHœšY[™T™\Z\˜X›KšY
+K™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹œ™\Z\ˆŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]HœšY[™T™\Z\˜X›KšYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHHœ™\Z\ˆŽÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆJNÂˆ™]\›ŽÂˆBˆÛÛœÝšXÝ[HHË‹‹™Ë[š]Ë‹‹™Ë˜Z[[™Ü×Bˆ™š[\Š
+Øš™XÝ
+HOˆØš™XÝX[HOOHœ^Y\ˆˆ	‰ˆ\Õš\ÚX›Q›ÜŠË™[™[^H‹Øš™XÝØš™XÝ˜Y]\ÊØš™XÝ
+JJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆÛÛœÝ›Ü˜ÙY˜]™[H[ÙHOOH›[Ý™Hˆ[ÙHOOH›[Ý™KY[™ØYÙHŽÂˆÛÛœÝ]XÚÚ[™ÈHY›Ü˜ÙY˜]™[	‰ˆ›ÛÛX[ŠšXÝ[H	‰ˆX]š\Ý
+šXÝ[KžHÞšXÝ[KžHHÞJHJNÂˆÛÛœÝ›Ü›X][ÛˆH›Ü›X][Û‘\Ý[˜][ÛœÊ[š]ËÈˆÞNˆÞHJNÂˆÛÛœÝ›Ü›X][Û”ÜYYH[š]Ë›[™ÝˆH	‰ˆ[š]Ë™]™\žJ\ÐÛÛX˜][š]
+BˆÈX]›Z[Š‹‹[š]Ë›X\
+
+[š]
+HOˆÝ]ÖÝ[š]\WKœÜYY
+ˆ
+X[QØÝš[™JË[š]X[JHOOH˜Z\ˆˆ	‰ˆ[š]\HOOH™›Û™HˆÈKŒMHˆJJJBˆˆ[™Yš[™YÂˆ›Üˆ
+ÛÛœÝÚ[™^[š]HÙˆ[š]Ë™[šY\Ê
+JHÂˆYˆ
+[š]™Ø\œš\ÛÛ™Y]
+HZ™XÝœ›ÛR[[™[^JË[š]
+NÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H[™Yš[™YÂˆYˆ
+]XÚÚ[™È	‰ˆ\ÐÛÛX˜][š]
+[š]
+JHÂˆ[š]™[™[^HHšXÝ[HKšYÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆH[ÙHÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]\™Ù]H›Ü›X][Û‹™Ù]
+[š]šY
+HÈˆÞ
+È
+[™^	HÊH
+ˆ‹NˆÞH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆˆNÂˆ[š]›[Ý™Q[™ØYÙHH\ÐÛÛX˜][š]
+[š]
+H	‰ˆ[ÙHOOH›[Ý™KY[™ØYÙHŽÂˆ[š]™›Ü›X][Û”ÜYYH›Ü›X][Û”ÜYYÂˆYˆ
+[š]›[Ý™Q[™ØYÙJH[š]œÝ[˜ÙHHœ\œÝYHŽÂˆBˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]œ™\Z\•\™Ù]H[™Yš[™YÂˆYˆ
+[š]\HOOHÛÜšÙ\ˆŠHÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠ[š]šÛŠNÂˆBˆ[š]œ]›ÛH[™Yš[™YÂˆYˆ
+[š]œÝ[˜ÙHOOHœ]›Ûˆ
+›Ü˜ÙY˜]™[	‰ˆ[š]œÝ[˜ÙHOOHšÛŠJH[š]œÝ[˜ÙHHœ\œÝYHŽÂˆ[š]›˜]ˆH[™Yš[™YÂˆBˆB‚ˆ[˜Ý[Ûˆ\T™[[ÝPXÝ[ÛŠ^[ØYˆ™XÛÜ™Ýš[™Ë[šÛ›ÝÛŠHÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆÛÛœÝ˜[YHH\[Ùˆ^[ØY›˜[YHOOHœÝš[™ÈˆÈ^[ØY›˜[YHˆˆŽÂˆÛÛœÝÙ[XÝYYÈH\œ˜^Kš\Ð\œ˜^J^[ØYœÙ[XÝY
+BˆÈ^[ØYœÙ[XÝY™š[\Š
+Y
+NˆY\È[X™\ˆOˆ[X™\‹š\Ò[YÙ\ŠY
+JBˆˆ×NÂˆ]Z[[™ÈHË˜Z[[™ÜË™š[™
+
+ŠHOˆ‹X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê‹šY
+JNÂˆYˆ
+˜[YHOOH˜Ø[˜Ù[XÛÛœÝXÝ[ÛˆŠHÂˆYˆ
+XZ[[™È
+Z[[™Ëœ›ÙÜ™\ÜÈÏÈJHHJH™]\›ŽÂˆÛÛœÝ™Y[™HZ[[™Ë˜ÛÛœÝXÝ[Û”Ý\YÈX]™›ÛÜŠ•RSÐÓÔÕØZ[[™Ë\WHÈŠHˆ•RSÐÓÔÕØZ[[™Ë\WNÂˆË™[™[^P[ÞH
+ÏH™Y[™ÂˆÛÛœÝØ[˜Ù[YYHZ[[™ËšYÂˆË˜Z[[™ÜÈHË˜Z[[™ÜË™š[\Š
+Ø[™Y]JHOˆØ[™Y]KšYOOHØ[˜Ù[YY
+NÂˆ›Üˆ
+ÛÛœÝÛÜšÙ\ˆÙˆË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOH™[™[^Hˆ	‰ˆ[š]\HOOHÛÜšÙ\ˆŠJHÂˆÛÛœÝ]Y]YHH
+ÛÜšÙ\‹˜Z[]Y]YH
+ÛÜšÙ\‹˜Z[\™Ù]ÈÝÛÜšÙ\‹˜Z[\™Ù]Hˆ×JJK™š[\Š
+Y
+HOˆYOOHØ[˜Ù[YY
+NÂˆÛÜšÙ\‹˜Z[]Y]YHH]Y]YNÂˆÛÜšÙ\‹˜Z[\™Ù]H]Y]YVÌNÂˆYˆ
+\]Y]YK›[™Ý	‰ˆÛÜšÙ\‹ÛÜšÙ\“[ÙHOOH˜ÛÛœÝXÝŠHÛÜšÙ\‹ÛÜšÙ\“[ÙHH›Z[™HŽÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆBˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœÙ[ŠHÂˆYˆ
+XZ[[™ÈZ[[™Ë\HOOHšHŠH™]\›ŽÂˆÛÛœÝ™Y[™HX]™›ÛÜŠ•RSÐÓÔÕØZ[[™Ë\WHÈŠNÂˆYˆ
+Z[[™Ë\HOOH˜˜\œ˜XÚÜÈŠHË™[™[^PÜ™Y]È
+ÏH™Y[™Âˆ[ÙHË™[™[^P[ÞH
+ÏH™Y[™ÂˆYˆ
+Z[[™Ëœ›ÙÜ™\ÜÈOOHH	‰ˆZ[[™Ë\HOOH\œ™]ŠBˆË™[™[^TÝÙ\ˆHX]›X^
+
+Ë™[™[^TÝÙ\ˆÏÈLŠHH
+Z[[™Ë\HOOHœ™Yš[™\žHˆÈˆŠJNÂˆË˜Z[[™ÜÈHË˜Z[[™ÜË™š[\Š
+Ø[™Y]JHOˆØ[™Y]KšYOOHZ[[™ÈKšY
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH™›ÜYžHŠHÂˆYˆ
+XZ[[™ÈZ[[™Ë\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊHË™[™[^Q›ÜYšYYË™[™[^Q›ÜYžT›ÙXÝ[ÛˆË™[™[^QØÝš[™T›ÙXÝ[ÛˆË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛˆË™[™[^R[[“Ô•Q–WÒS•SÐÓÔÕZ[[™Ëœ›ÙXÝ[ÛŠH™]\›ŽÂˆË™[™[^R[[OH“Ô•Q–WÒS•SÐÓÔÕÂˆË™[™[^Q›ÜYžT›ÙXÝ[ÛˆHÈ[\ÙYˆ\˜][ÛŽˆ“Ô•Q–WÑTUSÓˆNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH™ØÝš[™KXZ\ˆˆ˜[YHOOH™ØÝš[™KX\›[ÜˆŠHÂˆÛÛœÝØÝš[™NˆØÝš[™HH˜[YHOOH™ØÝš[™KXZ\ˆˆÈ˜Z\ˆˆˆ˜\›[ÜˆŽÂˆYˆ
+XZ[[™ÈZ[[™Ë\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊHË™[™[^QØÝš[™HË™[™[^QØÝš[™T›ÙXÝ[ÛˆË™[™[^Q›ÜYžT›ÙXÝ[ÛˆË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛˆË™[™[^R[[ÐÕ’S‘WÒS•SÐÓÔÕZ[[™Ëœ›ÙXÝ[ÛŠH™]\›ŽÂˆË™[™[^R[[OHÐÕ’S‘WÒS•SÐÓÔÕÂˆË™[™[^QØÝš[™T›ÙXÝ[ÛˆHÈ\NˆØÝš[™K[\ÙYˆ\˜][ÛŽˆÐÕ’S‘WÑTUSÓˆNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH˜YK[™]ÛÜšÈŠHÂˆYˆ
+XZ[[™ÈZ[[™Ë\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊHË™[™[^U˜YS™]ÛÜšÈË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛˆË™[™[^Q›ÜYžT›ÙXÝ[ÛˆË™[™[^QØÝš[™T›ÙXÝ[ÛˆË™[™[^R[[QWÓ‘UÓÔ’×ÒS•SÐÓÔÕZ[[™Ëœ›ÙXÝ[ÛŠH™]\›ŽÂˆË™[™[^R[[OHQWÓ‘UÓÔ’×ÒS•SÐÓÔÕÂˆË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛˆHÈ[\ÙYˆ\˜][ÛŽˆQWÓ‘UÓÔ’×ÑTUSÓˆNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™]™X]ŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Z[[™ÊHOˆZ[[™ËX[HOOH™[™[^Hˆ	‰ˆZ[[™Ë\HOOHšHˆ	‰ˆZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊJNÂˆÛÛœÝ[š]ÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê[š]šY
+H	‰ˆ\ÐÛÛX˜][š]
+[š]
+JNÂˆYˆ
+ZH][š]Ë›[™Ý
+H™]\›ŽÂˆ[š]Ë™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ™]™X][™ÈHYNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]\™Ù]HÈˆKž
+È
+[™^	HÊH
+ˆŽHŽNˆKžH
+ÈMH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆNÂˆJNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœXÚËZHˆ˜[YHOOH™\ÞKZHŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Ø[™Y]JHO‚ˆØ[™Y]KX[HOOH™[™[^Hˆ	‰ˆØ[™Y]K\HOOHšHˆ	‰ˆÙ[XÝYYËš[˜ÛY\ÊØ[™Y]KšY
+JNÂˆYˆ
+ZHKœ›ÙXÝ[ÛˆË™[™[^Q›ÜYžT›ÙXÝ[ÛˆË™[™[^QØÝš[™T›ÙXÝ[ÛˆË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛˆKœ™[ØØ][ÛŠH™]\›ŽÂˆYˆ
+˜[YHOOHœXÚËZHˆ	‰ˆZKœXÚÙY
+HKœ™[ØØ][ÛˆHÈ[ÙNˆœXÚÈ‹[\ÙYˆ\˜][ÛŽˆHNÂˆYˆ
+˜[YHOOH™\ÞKZHˆ	‰ˆKœXÚÙY
+HÂˆYˆ
+P›ØÚÙY]
+ËKKžKžKYJJH™]\›ŽÂˆK›[Øš[U\™Ù]H[™Yš[™YÂˆKœ™[ØØ][ÛˆHÈ[ÙNˆ™\ÞH‹[\ÙYˆ\˜][ÛŽˆˆNÂˆBˆ™]\›ŽÂˆBˆÛÛœÝÙ[XÝY[š]ÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê[š]šY
+JNÂˆYˆ
+˜[YHOOH™\ÞKXÚ\\ˆˆ˜[YHOOHœXÚËXÚ\\ˆŠHÂˆÙ[XÝY[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH˜Ú\\ˆŠK™›Ü‘XXÚ
+
+[š]
+HOˆÂˆÛÛœÝ[ÙHH[š]˜Ú\\“[ÙH›[Øš[HŽÂˆYˆ
+˜[YHOOH™\ÞKXÚ\\ˆˆ	‰ˆ[ÙHOOH›[Øš[HŠHÂˆ[š]˜Ú\\“[ÙHH™\ÞZ[™ÈŽÂˆ[š]˜Ú\\”›ÙÜ™\ÜÈHÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ]›ÛH[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆH[ÙHYˆ
+˜[YHOOHœXÚËXÚ\\ˆˆ	‰ˆ[ÙHOOH™\ÞYYŠHÂˆ[š]˜Ú\\“[ÙHHœXÚÚ[™ÈŽÂˆ[š]˜Ú\\”›ÙÜ™\ÜÈHÂˆBˆJNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH˜]]Ë\™\Z\ˆŠHÂˆÛÛœÝÛÜšÙ\œÈHÙ[XÝY[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠNÂˆÛÛœÝ[˜X›HHÛÜšÙ\œËœÛÛYJ
+ÛÜšÙ\ŠHOˆ]ÛÜšÙ\‹˜]]Ô™\Z\ŠNÂˆÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛÜšÙ\‹˜]]Ô™\Z\ˆH[˜X›NÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹[˜X›HÈšÛˆˆ›Z[™HŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆYˆ
+Y[˜X›JHÂˆÛÜšÙ\‹œ]›ÛH[™Yš[™YÂˆYˆ
+ÛÜšÙ\‹œÝ[˜ÙHOOHœ]›ÛŠHÛÜšÙ\‹œÝ[˜ÙHHœ\œÝYHŽÂˆBˆJNÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™\Z\ˆˆ˜[YHOOHœ]›Ûˆ˜[YHOOH›[Ý™Hˆ˜[YHOOH›[Ý™KY[™ØYÙHˆ˜[YHOOH›[Ý™KZHŠH™]\›ŽÂˆYˆ
+˜[YHOOHšÛˆ˜[YHOOHœ\œÝYHŠHÂˆÙ[XÝY[š]Ë™š[\Š
+[š]
+HO‚ˆ\ÐÛÛX˜][š]
+[š]
+H	‰ˆ
+˜[YHOOHœ\œÝYHˆ[š]\HOOH›ÛÜ\ˆŠKˆ
+K™›Ü‘XXÚ
+
+[š]
+HOˆÂˆ[š]œÝ[˜ÙHH˜[YNÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]œ]›ÛH[™Yš[™YÂˆYˆ
+˜[YHOOHšÛŠHÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆBˆJNÂˆ™]\›ŽÂˆBˆÛÛœÝ\HH˜[YH\È[š]È\H—NÂˆYˆ
+VÈÛÜšÙ\ˆ‹›ÛÜ\ˆ‹[šÈ‹™›Û™H‹˜Ú\\ˆ—Kš[˜ÛY\Ê\JJH™]\›ŽÂˆÛÛœÝØ[YH\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆˆÈšHˆˆ˜˜\œ˜XÚÜÈŽÂˆZ[[™ÈHË˜Z[[™ÜË™š[™
+
+ŠHO‚ˆ‹X[HOOH™[™[^Hˆ	‰ˆÙ[XÝYYËš[˜ÛY\Ê‹šY
+H	‰ˆ‹\HOOHØ[Y	‰ˆZ[[™ÓÜ\˜][Û˜[
+ŠJNÂˆYˆ
+XZ[[™È
+
+\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆŠH	‰ˆ
+Ë™[™[^Q›ÜYžT›ÙXÝ[ÛˆË™[™[^QØÝš[™T›ÙXÝ[ÛˆË™[™[^U˜YS™]ÛÜšÔ›ÙXÝ[ÛŠJJH™]\›ŽÂˆYˆ
+\HOOH˜Ú\\ˆˆ	‰ˆ
+YË™[™[^U˜YS™]ÛÜšÈÚ\\ÛÝ[›Ü•X[JË™[™[^HŠHHÒTT—ÓPV
+JH™]\›ŽÂˆYˆ
+XZ[[™Ëœ›ÙXÝ[Ûˆ	‰ˆ
+Z[[™Ë˜ÛÛÛÝÛˆ
+Hˆ
+H™]\›ŽÂˆÛÛœÝ[™[™ÈH
+Z[[™Ëœ›ÙXÝ[ÛËœ]Y]YOË›[™Ý
+H
+È
+Z[[™Ëœ›ÙXÝ[ÛˆÈHˆ
+NÂˆYˆ
+[™[™ÈHPVÔUQUQHË™[™[^PÜ™Y]È[š]ÛÜÝÝ\WJH™]\›ŽÂˆË™[™[^PÜ™Y]ÈOH[š]ÛÜÝÝ\WNÂˆYˆ
+XZ[[™Ëœ›ÙXÝ[ÛŠHÂˆZ[[™Ëœ›ÙXÝ[ÛˆHÈ\K[\ÙYˆ\˜][ÛŽˆ›ÙXÝ[Û‘\˜][Û‘›ÜŠË™[™[^H‹\JK]Y]YNˆ×HNÂˆH[ÙHÂˆZ[[™Ëœ›ÙXÝ[Û‹œ]Y]YHHË‹‹ŠZ[[™Ëœ›ÙXÝ[Û‹œ]Y]YH×JK\WNÂˆBˆB‚ˆ[˜Ý[ÛˆÙ[™ÝY\ÝÚ[
+Þˆ[X™\‹ÞNˆ[X™\ŠHÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆYˆ
+Ë›Ý™\ŠH™]\›ŽÂˆÛÛœÝ[ÙHHË›[ÙNÂˆY\”Ù[™
+È\Nˆ˜ÛÛ[X[™‹Ú[™ˆœÚ[‹ˆÞNˆÞK[ÙKÙ[XÝYˆËœÙ[XÝYJNÂˆYˆ
+[ÙHOOHœÙ]\]›ÛXHŠHÂˆË›[ÙHHœÙ]\]›ÛXˆŽÂˆË›Y\ÜØYÙHH”U“Óˆ›ÝÈÚÛÜÙHHÙXÛÛ™]›ÛÚ[ˆŽÂˆH[ÙHÂˆYˆ
+[ÙHOOHœÙ[XÝˆ	‰ˆ[[ÙKœÝ\ÕÚ]
+˜Z[HŠJHË›[ÙHHœÙ[XÝŽÂˆË›Y\ÜØYÙHH[ÙKœÝ\ÕÚ]
+˜Z[HŠBˆÈÛÛœÝXÝ[Ûˆ]Y]YYˆ\[›Ý\ˆÚ]HÜˆ™\ÜÈØ[˜Ù[ˆ‚ˆˆ[ÙHOOHœÙ]\˜[HˆÈ”˜[HÚ[˜[œÛZ]Yˆ‚ˆˆ[ÙHOOH›[Ý™KZHˆÈÛÛ[X[™Ü˜]Û\ˆ\Ý[˜][Ûˆ˜[œÛZ]Yˆ‚ˆˆ[ÙHOOH›[Ý™KY[™ØYÙHˆÈ“[Ý™H
+È[™ØYÙH˜[œÛZ]Y8 %\Ý[˜][Ûˆ™[XZ[œÈØÚÙYˆ‚ˆˆ[ÙHOOH›[Ý™HˆÈ‘\™XÝ[Ý™H˜[œÛZ]Y8 %[š]Èš\™H[ˆ˜[™ÙHÚ]Ý]Ú\Ú[™Ëˆ‚ˆˆ“Ü™\ˆ˜[œÛZ]YˆŽÂˆBˆÞ[˜Ê
+NÂˆB‚ˆ[˜Ý[ÛˆÝY\ÝXÝ[ÛŠ˜[YNˆÝš[™ÊHÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆYˆ
+˜[YHOOH™\Ù[XÝŠHÂˆËœÙ[XÝYH×NÂˆË›[ÙHHœÙ[XÝŽÂˆË›Y\ÜØYÙHH”Ù[XÝ[ÛˆÛX\™YˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YKœÝ\ÕÚ]
+˜Z[HŠJHÂˆÛÛœÝ\ÕÛÜšÙ\ˆHË[š]ËœÛÛYJ
+[š]
+HO‚ˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ[š]\HOOHÛÜšÙ\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+JNÂˆYˆ
+Z\ÕÛÜšÙ\ŠHÂˆË›Y\ÜØYÙHH”Ù[XÝHÛÜšÙ\‹[ˆÜ[ˆÛÛœÝXÝ[Û‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆË›[ÙHH˜[YH\ÈØ[YVÈ›[ÙH—NÂˆË›Y\ÜØYÙHH	Û˜[YKœ™\XÙJ˜Z[H‹ˆŠKÕ\\Ø\ÙJ
+_HPÑSQS•ˆÚÛÜÙHHÛX\ˆØØ][Û‹˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ˜[HŠHÂˆÛÛœÝZ[[™ÈHË˜Z[[™ÜË™š[™
+
+ŠHOˆ‹X[HOOHœ^Y\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê‹šY
+H	‰ˆÈšH‹˜˜\œ˜XÚÜÈ—Kš[˜ÛY\Ê‹\JJNÂˆYˆ
+XZ[[™ÈXZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊJHÂˆË›Y\ÜØYÙHH”Ù[XÝ[Ý\ˆHÜˆH˜\œ˜XÚÜÈš\œÝˆŽÂˆH[ÙHÂˆË›[ÙHHœÙ]\˜[HŽÂˆË›Y\ÜØYÙHH”SHÒS•ˆÚÛÜÙHHØØ][Û‹ˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH›[Ý™KZHŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Z[[™ÊHO‚ˆZ[[™ËX[HOOHœ^Y\ˆˆ	‰ˆZ[[™Ë\HOOHšHˆ	‰ˆZ[[™ËœXÚÙY	‰ˆËœÙ[XÝYš[˜ÛY\ÊZ[[™ËšY
+JNÂˆYˆ
+ZJHË›Y\ÜØYÙHH”XÚÈ[™Ù[XÝ[Ý\ˆXY]X\\œÈ™Y›Ü™H[Ýš[™È]ˆŽÂˆ[ÙHÂˆË›[ÙHH›[Ý™KZHŽÂˆË›Y\ÜØYÙHHÓÓSPS‘ÔUÓTŽˆÚÛÜÙHH\Ý[˜][Û‹ˆ][Ý™\È^™[Y[HÛÝÛKˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH›[Ý™Hˆ˜[YHOOH›[Ý™KY[™ØYÙHˆ˜[YHOOHœ™\Z\ˆˆ˜[YHOOHœ]›ÛŠHÂˆÛÛœÝØ[Y[ÙNˆØ[YVÈ›[ÙH—HH˜[YHOOH›[Ý™Hˆ˜[YHOOH›[Ý™KY[™ØYÙHˆÈ˜[YHˆ˜[YHOOHœ™\Z\ˆˆÈœ™\Z\ˆˆˆœÙ]\]›ÛXHŽÂˆË›[ÙHHØ[Y[ÙNÂˆË›Y\ÜØYÙHH˜[YHOOH›[Ý™Hˆ˜[YHOOH›[Ý™KY[™ØYÙH‚ˆÈ˜[YHOOH›[Ý™KY[™ØYÙH‚ˆÈ“SÕ‘H
+ÈS‘ÐQÑNˆÚÛÜÙHH\Ý[˜][Û‹ˆ‚ˆˆ‘T‘PÕSÕ‘NˆÚÛÜÙHH\Ý[˜][Ûˆ0­È[š]Èš\™H[ˆ˜[™ÙHÚ]Ý]Ú\Ú[™Ëˆ‚ˆˆ˜[YHOOHœ™\Z\ˆ‚ˆÈ”‘TRTˆÔ‘TŽˆÚÛÜÙHH[XYÙYœšY[™H[š]ÜˆÝXÝ\™Kˆ‚ˆˆ”U“ÓˆÚÛÜÙHHš\œÝ]›ÛÚ[ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™\Ù]ŠH™]\›ŽÂˆY\”Ù[™
+È\Nˆ˜ÛÛ[X[™‹Ú[™ˆ˜XÝ[Ûˆ‹˜[YKÙ[XÝYˆËœÙ[XÝYJNÂˆË›Y\ÜØYÙHH	Û˜[YKÕ\\Ø\ÙJ
+_HÜ™\ˆ˜[œÛZ]Y˜ÂˆÞ[˜Ê
+NÂˆB‚ˆ[˜Ý[Ûˆ[™TY\“Y\ÜØYÙJY\ÜØYÙNˆ[šÛ›ÝÛŠHÂˆYˆ
+[Y\ÜØYÙH\[ÙˆY\ÜØYÙHOOH›Øš™XÝŠH™]\›ŽÂˆÛÛœÝ^[ØYHY\ÜØYÙH\È™XÛÜ™Ýš[™Ë[šÛ›ÝÛŽÂˆYˆ
+][\^Y\”›ÛK˜Ý\œ™[OOHšÜÝˆ	‰ˆ^[ØY\HOOH˜ÛÛ[X[™ŠHÂˆYˆ
+^[ØYšÚ[™OOHœÚ[ŠH\T™[[ÝTÚ[
+^[ØY
+NÂˆYˆ
+^[ØYšÚ[™OOH˜XÝ[ÛˆŠH\T™[[ÝPXÝ[ÛŠ^[ØY
+NÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+][\^Y\”›ÛK˜Ý\œ™[OOH™ÝY\Ýˆ	‰ˆ^[ØY\HOOHœÝ]Hˆ	‰ˆ^[ØY™Ø[YJHÂˆÛÛœÝš\œÝHYÝY\ÝÛ˜\ÚÝ™XYK˜Ý\œ™[ÂˆØ[YK˜Ý\œ™[HÝY\Ý\œÜXÝ]™J^[ØY™Ø[YH\ÈØ[YKš\œÝÈ[ˆØ[YK˜Ý\œ™[š\œÝ
+NÂˆÝY\ÝÛ˜\ÚÝ™XYK˜Ý\œ™[HYNÂˆÙ]ÛYSÜ[Š˜[ÙJNÂˆ]\ÙY™Y‹˜Ý\œ™[H˜[ÙNÂˆÙ]]\ÙY
+˜[ÙJNÂˆÞ[˜Ê
+NÂˆBˆB‚ˆ[˜Ý[ÛˆY\’[™\œÊ›ÛNˆšÜÝˆ™ÝY\Ý‹›ÛÛQ›ÙÈHš]˜]SX]Ú›ÙË˜Ý\œ™[
+HÂˆ™]\›ˆÂˆÛ“Ü[Žˆ
+
+HOˆÂˆÙ]™]ÛÜšÊ
+Ý\œ™[
+HOˆ
+È‹‹˜Ý\œ™[›ÛKÝ]\Îˆ˜ÛÛ›™XÝY‹]Z[ˆ”š]˜]H[šÈ\ÝX›\ÚYˆˆJJNÂˆYˆ
+›ÛHOOHšÜÝŠHÂˆØ[YK˜Ý\œ™[H[š]X[][\^Y\ŠÈ›ÙÑ[˜X›Yˆ›ÛÛQ›ÙÈJNÂˆ][\^Y\”›ÛK˜Ý\œ™[HšÜÝŽÂˆX]ÚÝ\Y˜Ý\œ™[H˜[ÙNÂˆÙ]ÛYSÜ[Š˜[ÙJNÂˆÙ]]\ÙJ˜[ÙJNÂˆÞ[˜Ê
+NÂˆÚ[™ÝËœÙ][Y[Ý]
+
+
+HOˆY\”Ù[™
+È\NˆœÝ]H‹Ø[YNˆØ[YK˜Ý\œ™[JK
+NÂˆBˆKˆÛ“Y\ÜØYÙNˆ[™TY\“Y\ÜØYÙKˆÛ”Ý]\Îˆ
+Ý]\ÎˆY\”Ý]\Ë]Z[HˆŠHOˆÂˆÙ]™]ÛÜšÊ
+Ý\œ™[
+HOˆ
+È‹‹˜Ý\œ™[›ÛKÝ]\Ë]Z[JJNÂˆKˆNÂˆB‚ˆ\Þ[˜È[˜Ý[ÛˆÜ™X]Tš]˜]SX]Ú
+
+HÂˆY\‹˜Ý\œ™[Ë˜ÛÜÙJ
+NÂˆ][\^Y\”›ÛK˜Ý\œ™[HšÜÝŽÂˆÝY\ÝÛ˜\ÚÝ™XYK˜Ý\œ™[H˜[ÙNÂˆÙ]™]ÛÜšÊÈ›ÛNˆšÜÝ‹Ý]\Îˆ˜Ü™X][™È‹ÛÙNˆˆ‹]Z[ˆ”™\\š[™ÈHš]˜]H›ÛÛx )ˆˆJNÂˆžHÂˆÛÛœÝ›ÛÛQ›ÙÈHš]˜]SX]Ú›ÙË˜Ý\œ™[ÂˆÛÛœÝÙ\ÜÚ[ÛˆH]ØZ]ÜÝ›ÛÛJ›ÛÛQ›ÙËY\’[™\œÊšÜÝ‹›ÛÛQ›ÙÊJNÂˆY\‹˜Ý\œ™[HÙ\ÜÚ[ÛŽÂˆÙ]™]ÛÜšÊ
+Ý\œ™[
+HOˆ
+È‹‹˜Ý\œ™[›ÛNˆšÜÝ‹ÛÙNˆÙ\ÜÚ[Û‹˜ÛÙKÝ]\ÎˆÝ\œ™[œÝ]\ÈOOH˜Ü™X][™ÈˆÈØZ][™ÈˆˆÝ\œ™[œÝ]\ÈJJNÂˆHØ]Ú
+\œ›ÜŠHÂˆ][\^Y\”›ÛK˜Ý\œ™[HœÛÛÈŽÂˆÙ]™]ÛÜšÊÈ›ÛNˆœÛÛÈ‹Ý]\Îˆ™\œ›Üˆ‹ÛÙNˆˆ‹]Z[ˆ\œ›Üˆ[œÝ[˜Ù[Ùˆ\œ›ÜˆÈ\œ›Ü‹›Y\ÜØYÙHˆÛÝ[›ÝÜ™X]HH›ÛÛKˆˆJNÂˆBˆB‚ˆ\Þ[˜È[˜Ý[Ûˆ›Ú[”š]˜]SX]Ú
+
+HÂˆYˆ
+K×–ÐKVŒ‹NW^ÍŸIË\Ý
+›Ú[ÛÙKš[J
+KÕ\\Ø\ÙJ
+JJHÂˆÙ]™]ÛÜšÊÈ›ÛNˆœÛÛÈ‹Ý]\Îˆ™\œ›Üˆ‹ÛÙNˆˆ‹]Z[ˆ‘[\ˆHÚ^XÚ\˜XÝ\ˆ›ÛÛHÛÙKˆˆJNÂˆ™]\›ŽÂˆBˆY\‹˜Ý\œ™[Ë˜ÛÜÙJ
+NÂˆ][\^Y\”›ÛK˜Ý\œ™[H™ÝY\ÝŽÂˆÝY\ÝÛ˜\ÚÝ™XYK˜Ý\œ™[H˜[ÙNÂˆÛÛœÝÛÙHH›Ú[ÛÙKš[J
+KÕ\\Ø\ÙJ
+NÂˆÙ]™]ÛÜšÊÈ›ÛNˆ™ÝY\Ý‹Ý]\Îˆš›Ú[š[™È‹ÛÙK]Z[ˆ‘š[™[™ÈHš]˜]H›ÛÛx )ˆˆJNÂˆžHÂˆÛÛœÝ›Ú[™YH]ØZ]›Ú[”›ÛÛJÛÙKY\’[™\œÊ™ÝY\ÝŠJNÂˆY\‹˜Ý\œ™[H›Ú[™YœÙ\ÜÚ[ÛŽÂˆš]˜]SX]Ú›ÙË˜Ý\œ™[H›Ú[™Y™›ÙÑ[˜X›YÂˆÙ]™]ÓX]Ú›ÙÊ›Ú[™Y™›ÙÑ[˜X›Y
+NÂˆÙ]™]ÛÜšÊ
+Ý\œ™[
+HOˆ
+È‹‹˜Ý\œ™[›ÛNˆ™ÝY\Ý‹ÛÙHJJNÂˆHØ]Ú
+\œ›ÜŠHÂˆ][\^Y\”›ÛK˜Ý\œ™[HœÛÛÈŽÂˆÙ]™]ÛÜšÊÈ›ÛNˆœÛÛÈ‹Ý]\Îˆ™\œ›Üˆ‹ÛÙK]Z[ˆ\œ›Üˆ[œÝ[˜Ù[Ùˆ\œ›ÜˆÈ\œ›Ü‹›Y\ÜØYÙHˆÛÝ[›Ý›Ú[ˆH›ÛÛKˆˆJNÂˆBˆB‚ˆ[˜Ý[ÛˆX]™S][\^Y\Š
+HÂˆY\‹˜Ý\œ™[Ë˜ÛÜÙJ
+NÂˆY\‹˜Ý\œ™[H[Âˆ][\^Y\”›ÛK˜Ý\œ™[HœÛÛÈŽÂˆÝY\ÝÛ˜\ÚÝ™XYK˜Ý\œ™[H˜[ÙNÂˆÙ]™]ÛÜšÊÈ›ÛNˆœÛÛÈ‹Ý]\ÎˆšYH‹ÛÙNˆˆ‹]Z[ˆˆˆJNÂˆB‚ˆÛÛœÝÛÛ[X[™H
+Þˆ[X™\‹ÞNˆ[X™\ŠHOˆÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆYˆ
+Ë›Ý™\ŠH™]\›ŽÂˆYˆ
+][\^Y\”›ÛK˜Ý\œ™[OOH™ÝY\ÝŠHÂˆÙ[™ÝY\ÝÚ[
+ÞÞJNÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙHOOH›[Ý™KZHŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Z[[™ÊHO‚ˆZ[[™ËX[HOOHœ^Y\ˆˆ	‰ˆZ[[™Ë\HOOHšHˆ	‰ˆZ[[™ËœXÚÙY	‰ˆËœÙ[XÝYš[˜ÛY\ÊZ[[™ËšY
+JNÂˆYˆ
+ZHKœ™[ØØ][ÛŠHÂˆË›[ÙHHœÙ[XÝŽÂˆË›Y\ÜØYÙHHÜ˜]Û\ˆ[Ý™HØ[˜Ù[Y8 %Ù[XÝH[HXÚÙYXY]X\\œËˆŽÂˆH[ÙHÂˆK›[Øš[U\™Ù]HÈˆX]›X^
+X]›Z[ŠÈHÞ
+JKNˆX]›X^
+X]›Z[ŠHÞJJHNÂˆK›[Øš[Q˜XÚ[™ÈHX]˜][ŒŠÞHHKžKÞHKž
+NÂˆË›[ÙHHœÙ[XÝŽÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHHÓÓSPS‘ÔUÓTˆ[Ýš[™È8 %^™[Y[HÛÝÎÈ›ÙXÝ[Û‹Ý\K[™™\ÙX\˜Ú™[XZ[ˆÙ™›[™KˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙHOOHœÙ]\˜[HŠHÂˆÛÛœÝˆHË˜Z[[™ÜË™š[™
+ˆ
+
+HO‚ˆX[HOOHœ^Y\ˆˆ	‰‚ˆËœÙ[XÝYš[˜ÛY\ÊšY
+H	‰‚ˆÈšH‹˜˜\œ˜XÚÜÈ—Kš[˜ÛY\Ê\JH	‰‚ˆZ[[™ÓÜ\˜][Û˜[
+
+Kˆ
+NÂˆYˆ
+XŠHÂˆË›[ÙHHœÙ[XÝŽÂˆË›Y\ÜØYÙHBˆ”˜[HÚ[Ø[˜Ù[Y8 %Ù[XÝH›ÙXÝ[ÛˆZ[[™Èš\œÝˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆ‹œ˜[HHÂˆˆX]›X^
+ÌX]›Z[ŠÈHÌÞ
+JKˆNˆX]›X^
+ÌX]›Z[ŠHÌÞJJKˆNÂˆË›[ÙHHœÙ[XÝŽÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHH	Ø‹\KÕ\\Ø\ÙJ
+_H˜[HÚ[Ù]˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝÙ[XÝYÛÜšÙ\œÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ[š]\HOOHÛÜšÙ\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+JNÂˆÛÛœÝÙ[XÝYÛÛX˜]HË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ\ÐÛÛX˜][š]
+[š]
+H	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+JNÂˆÛÛœÝÙ[XÝY]›Û\œÈHË‹‹œÙ[XÝYÛÛX˜]‹‹œÙ[XÝYÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹˜]]Ô™\Z\ŠWNÂˆÛÛœÝ™\ÛÝ\˜ÙR]HË˜Üž\Ý[Âˆ›X\
+
+™\ÛÝ\˜ÙK[™^
+HOˆ
+È™\ÛÝ\˜ÙK[™^JJBˆ™š[\Š
+È™\ÛÝ\˜ÙHJHOˆ™\ÛÝ\˜ÙK˜[[Ý[ˆ	‰ˆ\Õš\ÚX›JË™\ÛÝ\˜ÙK
+JBˆœÛÜ
+
+KŠHOˆX]š\Ý
+Kœ™\ÛÝ\˜ÙKžHÞKœ™\ÛÝ\˜ÙKžHHÞJHHX]š\Ý
+‹œ™\ÛÝ\˜ÙKžHÞ‹œ™\ÛÝ\˜ÙKžHHÞJJVÌNÂˆYˆ
+ˆË›[ÙHOOHœÙ[XÝˆ	‰‚ˆÙ[XÝYÛÜšÙ\œË›[™Ý	‰‚ˆ™\ÛÝ\˜ÙR]	‰‚ˆX]š\Ý
+™\ÛÝ\˜ÙR]œ™\ÛÝ\˜ÙKžHÞ™\ÛÝ\˜ÙR]œ™\ÛÝ\˜ÙKžHHÞJHˆ
+HÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™\ÛÝ\˜ÙJËÙ[XÝYÛÜšÙ\œË™\ÛÝ\˜ÙR]š[™^
+NÂˆÛÛœÝÚ[™H™\ÛÝ\˜ÙR]œ™\ÛÝ\˜ÙKšÚ[™OOH˜[ÞHˆÈ˜[ÞHˆˆ˜Ü™Y]ÈŽÂˆÛÛœÝ\Ô™Yš[™\žHHË˜Z[[™ÜËœÛÛYJ
+Z[[™ÊHO‚ˆZ[[™ËX[HOOHœ^Y\ˆˆ	‰ˆZ[[™Ë\HOOHœ™Yš[™\žHˆ	‰ˆZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊJNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHH\Ô™Yš[™\žBˆÈ	ÜÙ[XÝYÛÜšÙ\œË›[™ÝHÛÜšÙ\‰ÜÙ[XÝYÛÜšÙ\œË›[™ÝOOHHÈˆˆˆœÈŸH\ÜÚYÛ™YÈ\È	ÚÚ[™H\ÜÚ]˜ˆˆ	ÚÚ[™Õ\\Ø\ÙJ
+_H\ÜÚ]\ÜÚYÛ™Y0­ÈÛÛ\]HH™Yš[™\žHÈ™YÚ[ˆZ[š[™Ë˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙHOOHœ™\Z\ˆŠHÂˆÛÛœÝ™[^HH™\Z\˜X›T™[^S™X\ŠËœ^Y\ˆ‹ÞÞJNÂˆYˆ
+™[^H	‰ˆX]š\Ý
+™[^KžHÞ™[^KžHHÞJHÍŠHÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™[^T™\Z\ŠÙ[XÝYÛÜšÙ\œË™[^JNÂˆË›[ÙHHœÙ[XÝŽÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHH	ÜÙ[XÝYÛÜšÙ\œË›[™ÝHÛÜšÙ\‰ÜÙ[XÝYÛÜšÙ\œË›[™ÝOOHHÈˆˆˆœÈŸH™\Z\š[™È[[™[^H0­È™\Z\œÈÛÛœÝ[YH[ÞK˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝ™\Z\˜X›HHË‹‹™Ë˜Z[[™ÜË‹‹™Ë[š]×Bˆ™š[\Š
+Øš™XÝ
+HOˆØš™XÝX[HOOHœ^Y\ˆˆ	‰ˆØš™XÝšˆ	‰ˆØš™XÝšØš™XÝ›X^	‰ˆ
+\Õ[š]
+Øš™XÝ
+HZ[[™ÓÜ\˜][Û˜[
+Øš™XÝ
+JJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+\™\Z\˜X›HX]š\Ý
+™\Z\˜X›KžHÞ™\Z\˜X›KžHHÞJHHÌ
+HÂˆË›Y\ÜØYÙHH”‘TRTˆÔ‘TŽˆÚÛÜÙHH[XYÙYœšY[™H[š]ÜˆÝXÝ\™KˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝ\ÜÚYÛ™YÛÜšÙ\œÈHÙ[XÝYÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹šYOOH™\Z\˜X›KšY
+NÂˆ\ÜÚYÛ™YÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹œ™\Z\ˆŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H™\Z\˜X›KšYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHHœ™\Z\ˆŽÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆJNÂˆË›[ÙHHœÙ[XÝŽÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHH\ÜÚYÛ™YÛÜšÙ\œË›[™ÝˆÈ	Ø\ÜÚYÛ™YÛÜšÙ\œË›[™ÝHÛÜšÙ\‰Ø\ÜÚYÛ™YÛÜšÙ\œË›[™ÝOOHHÈˆˆˆœÈŸH™\Z\š[™È	Ú\Õ[š]
+™\Z\˜X›JHÈ[š]˜[YJ™\Z\˜X›K\JHˆ™\Z\˜X›K\KÕ\\Ø\ÙJ
+_H0­È™\Z\œÈÛÛœÝ[YH[ÞK˜ˆˆHÛÜšÙ\ˆØ[››Ý™\Z\ˆ]Ù[ˆ8 %\ÜÚYÛˆ[›Ý\ˆÛÜšÙ\‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙHOOHœÙ]\]›ÛXHŠHÂˆÙ[XÝY]›Û\œË™›Ü‘XXÚ
+
+[š]
+HOˆÂˆ[š]œ]›ÛHÈNˆÈˆÞNˆÞHKŽˆÈˆÞNˆÞHK™^ˆ˜HˆNÂˆJNÂˆË›[ÙHHœÙ]\]›ÛXˆŽÂˆË›Y\ÜØYÙHH”U“Óˆ›ÝÈÚÛÜÙHHÙXÛÛ™]›ÛÚ[ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙHOOHœÙ]\]›ÛXˆŠHÂˆÙ[XÝY]›Û\œË™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆÛÛœÝHH[š]œ]›ÛË˜HÈˆ[š]žNˆ[š]žHNÂˆ[š]œ]›ÛHÈKŽˆÈˆÞNˆÞHK™^ˆ˜ˆˆNÂˆ[š]œÝ[˜ÙHHœ]›ÛŽÂˆYˆ
+[š]\HOOHÛÜšÙ\ˆŠH[š]ÛÜšÙ\“[ÙHHšÛŽÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]\™Ù]HÈˆKž
+È
+[™^	HÊH
+ˆŒ‹NˆKžH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆŒˆNÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆJNÂˆË›[ÙHHœÙ[XÝŽÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHHÙ[XÝY]›Û\œËœÛÛYJ
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠBˆÈ“PRS•SSÑHU“ÓPÕU‘H8 %ÛÜšÙ\œÈ™\Z\ˆ™X\˜žH[Y\Ë[ˆ™\Ý[YHZ\ˆ›Ý]Kˆ‚ˆˆ”U“Ó“ÕUHPÕU‘H8 %[š]È[™ØYÙH™X]Ë[ˆ™\Ý[YHZ\ˆ›Ý]KˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë›[ÙKœÝ\ÕÚ]
+˜Z[ŠJHÂˆÛÛœÝ\HHË›[ÙHOOH˜Z[\™Yš[™\žHˆÈœ™Yš[™\žHˆˆË›[ÙHOOH˜Z[X˜\œ˜XÚÜÈˆÈ˜˜\œ˜XÚÜÈˆˆ\œ™]‹ˆÛÜÝH•RSÐÓÔÕÝ\WKˆˆHZ[[™ÔÝ]ÖÝ\WKœŽÂˆÛÛœÝ›ØÚÙYBˆË˜Z[[™ÜËœÛÛYJˆ
+ŠHO‚ˆX]š\Ý
+‹žHÞ‹žHHÞJHZ[[™ÔÝ]ÖØ‹\WKœˆ
+Èˆ
+ÈNˆ
+HˆË˜Üž\Ý[ËœÛÛYJˆ
+ÊHOˆË˜[[Ý[ˆ	‰ˆX]š\Ý
+ËžHÞËžHHÞJHˆ
+ÈÍ‹ˆ
+HˆT”RS—Ô’QÑTËœÛÛYJ
+šYÙJHOˆX]š\Ý
+šYÙKžHÞšYÙKžHHÞJHšYÙKœˆ
+Èˆ
+ÈN
+HˆÞˆ
+ÈŒˆÞˆÈHˆHŒˆÞHˆ
+ÈŒˆÞHˆHˆHŒÂˆYˆ
+›ØÚÙY
+HÂˆË›Y\ÜØYÙHHØ[‰ÝZ[\™H8 %ÚÛÜÙHHÛX\ˆØØ][Û‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Ë˜[ÞHÛÜÝ
+HÂˆË›Y\ÜØYÙHH’[œÝY™šXÚY[[ÞKˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆË˜[ÞHOHÛÜÝÂˆË›X]ÚÝ]ËÝ[Ü™Y]ÔÜ[
+ÏHÛÜÝÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆÛÛœÝZ[[™ÒYHË›™^Y
+ÊÎÂˆË˜Z[[™ÜËœ\Ú
+ÂˆYˆZ[[™ÒYˆX[Nˆœ^Y\ˆ‹ˆ\KˆˆÞˆNˆÞKˆˆKˆX^ˆZ[[™ÒX[Ý\WKˆ›ÙÜ™\ÜÎˆˆÛÛœÝXÝ[Û‘\˜][ÛŽˆZ[[™ÐZ[[YVÝ\WKˆÛÛœÝXÝ[Û”Ý\Yˆ˜[ÙKˆJNÂˆÙ[XÝYÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆ]Y]YUÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹Z[[™ÒY
+NÂˆJNÂˆË›Y\ÜØYÙHH	Ý\KÕ\\Ø\ÙJ
+_H]Y]YY8 %\ÜÚYÛ™YÛÜšÙ\‰ÜÙ[XÝYÛÜšÙ\œË›[™ÝOOHHÈˆˆˆœÈŸHÚ[Z[][ˆÜ™\‹ˆ\[›Ý\ˆÚ]HÜˆ™\ÜÈØ[˜Ù[˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝÝ\œÈHË[š]Ë™š[\Š
+JHOˆËœÙ[XÝYš[˜ÛY\ÊKšY
+H	‰ˆ
+K\HOOH˜Ú\\ˆˆ
+K˜Ú\\“[ÙH›[Øš[HŠHOOH›[Øš[HŠJNÂˆYˆ
+[Ý\œË›[™Ý
+H™]\›ŽÂˆÛÛœÝ™[^HH
+Ë›Øš™XÝ]™\È×JBˆ™š[\Š
+Øš™XÝ]™JHOˆØš™XÝ]™R[[
+ËØš™XÝ]™JKš\ÚX›JBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+™[^H	‰ˆX]š\Ý
+™[^KžHÞ™[^KžHHÞJHÌŠHÂˆYˆ
+ˆÙ[XÝYÛÜšÙ\œË›[™ÝOOHÝ\œË›[™Ý	‰‚ˆ™[^K›ÝÛ™\ˆOOHœ^Y\ˆˆ	‰‚ˆ[[™[^SÜ\˜][Û˜[
+™[^JH	‰‚ˆ™[^Kš™[^K›X^ˆ
+HÂˆ\ÜÚYÛ•ÛÜšÙ\œÕÔ™[^T™\Z\ŠÙ[XÝYÛÜšÙ\œË™[^JNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHH	ÜÙ[XÝYÛÜšÙ\œË›[™ÝHÛÜšÙ\‰ÜÙ[XÝYÛÜšÙ\œË›[™ÝOOHHÈˆˆˆœÈŸH™\Z\š[™È[[™[^H0­È™\Z\œÈÛÛœÝ[YH[ÞK˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+Z[[™[^SÜ\˜][Û˜[
+™[^JJHÂˆÛÛœÝÛÛÛ[™ÑÝÛˆH™[^Kœ™XZ[]OOH[™Yš[™Y	‰ˆË[YH™[^Kœ™XZ[]ÂˆË›Y\ÜØYÙHHÛÛÛ[™ÑÝÛ‚ˆÈS•S‘SVHÑ‘“S‘H0­È™XÛÛœÝXÝ[Ûˆ™YÚ[œÈ[ˆ	ÓX]›X^
+KX]˜ÙZ[
+™[^Kœ™XZ[]HHË[YJJ_\Ë˜ˆˆS•S‘SVH‘P•RSS‘È0­È	ÓX]œ›Ý[™
+
+™[^Kœ™XZ[›ÙÜ™\ÜÈ
+H
+ˆL
+_IHÛÛ\]K˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝÜÝ[SØØÝ\[ÈH™[^SØØÝ\[ÊË™[^JK™š[\Š
+[š]
+HOˆ[š]X[HOOH™[™[^HŠNÂˆYˆ
+ÜÝ[SØØÝ\[Ë›[™Ý
+HÂˆÛÛœÝ]XÚÙ\œÈHÝ\œË™š[\Š\ÐÛÛX˜][š]
+NÂˆ]XÚÙ\œË™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]™[™[^HHÜÝ[SØØÝ\[ÖÚ[™^	HÜÝ[SØØÝ\[Ë›[™ÝKšYÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]›˜]ˆH[™Yš[™YÂˆYˆ
+][š]™Ø\œš\ÛÛ™Y]
+H[š]™Ø\œš\ÛÛ•\™Ù]H™[^KšYÂˆYˆ
+[š]œÝ[˜ÙHOOHšÛˆ[š]œÝ[˜ÙHOOHœ]›ÛŠH[š]œÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆË›Y\ÜØYÙHH]XÚÙ\œË›[™ÝˆÈS•S‘SVHÐÐÕTQQ0­ÈÛX\ˆ	ÚÜÝ[SØØÝ\[Ë›[™ÝKÉÔ‘SVWÑÐT”’TÓÓ—ÐÐTPÒU_HY™[™\œÈ™Y›Ü™HØ\\™K˜ˆˆ“Û›HÛÛX˜][š]ÈØ[ˆÛX\ˆ[ˆØØÝ\YY[[™[^KˆŽÂˆH[ÙHÂˆÛÛœÝ]˜Z[X›HHX]›X^
+‘SVWÑÐT”’TÓÓ—ÐÐTPÒUHH™[^SØØÝ\[ÊË™[^Kœ^Y\ˆŠK›[™Ý
+NÂˆÛÛœÝ›ÛÜ\œÈHÝ\œË™š[\Š
+[š]
+HOˆ[š]\HOOH›ÛÜ\ˆˆ	‰ˆ[š]™Ø\œš\ÛÛ™Y]OOH™[^KšY
+KœÛXÙJ]˜Z[X›JNÂˆ›ÛÜ\œË™›Ü‘XXÚ
+
+[š]
+HOˆÂˆYˆ
+[š]™Ø\œš\ÛÛ™Y]
+HZ™XÝœ›ÛR[[™[^JË[š]
+NÂˆ[š]™Ø\œš\ÛÛ•\™Ù]H™[^KšYÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]\™Ù]HÈˆ™[^KžNˆ™[^KžHNÂˆ[š]›[Ý™Q[™ØYÙHH™[^K›ÝÛ™\ˆOOH™[™[^HŽÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆË›Y\ÜØYÙHH›ÛÜ\œË›[™ÝˆÈ	Ý›ÛÜ\œË›[™ÝH›ÛÜ\‰Ý›ÛÜ\œË›[™ÝOOHHÈˆˆˆœÈŸHÜ™\™Y[ÈH[[™[^H0­È	Ø]˜Z[X›HH›ÛÜ\œË›[™ÝHÛÝ	Ø]˜Z[X›HH›ÛÜ\œË›[™ÝOOHHÈˆˆˆœÈŸH™[XZ[‹˜ˆˆ]˜Z[X›HHÈ’S•S‘SVHÐT”’TÓÓˆ•S0­È\]Ú]Ý]HÙ[XÝ[ÛˆÈÛÛ[X[™HØØÝ\[Ëˆˆˆ“Û›H›ÛÜ\œÈØ[ˆØ\œš\ÛÛˆ[ˆ[[™[^KˆŽÂˆBˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝœšY[™T™\Z\˜X›HHË‹‹™Ë˜Z[[™ÜË‹‹™Ë[š]×Bˆ™š[\Š
+Øš™XÝ
+HOˆØš™XÝX[HOOHœ^Y\ˆˆ	‰ˆØš™XÝšˆ	‰ˆØš™XÝšØš™XÝ›X^	‰ˆ
+\Õ[š]
+Øš™XÝ
+HZ[[™ÓÜ\˜][Û˜[
+Øš™XÝ
+JJBˆœÛÜ
+
+KŠHOˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJJVÌNÂˆYˆ
+ˆÙ[XÝYÛÜšÙ\œË›[™ÝOOHÝ\œË›[™Ý	‰‚ˆœšY[™T™\Z\˜X›H	‰‚ˆX]š\Ý
+œšY[™T™\Z\˜X›KžHÞœšY[™T™\Z\˜X›KžHHÞJHBˆ
+HÂˆÛÛœÝ\ÜÚYÛ™YÛÜšÙ\œÈHÙ[XÝYÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹šYOOHœšY[™T™\Z\˜X›KšY
+NÂˆ\ÜÚYÛ™YÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹œ™\Z\ˆŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]HœšY[™T™\Z\˜X›KšYÂˆÛÜšÙ\‹ÛÜšÙ\“[ÙHHœ™\Z\ˆŽÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆJNÂˆË›Y\ÜØYÙHH\ÜÚYÛ™YÛÜšÙ\œË›[™ÝˆÈ™\Z\ˆÜ™\ˆÛÛ™š\›YY›Üˆ	Ú\Õ[š]
+œšY[™T™\Z\˜X›JHÈ[š]˜[YJœšY[™T™\Z\˜X›K\JHˆœšY[™T™\Z\˜X›K\KÕ\\Ø\ÙJ
+_H0­È™\Z\œÈÛÛœÝ[YH[ÞK˜ˆˆHÛÜšÙ\ˆØ[››Ý™\Z\ˆ]Ù[ˆ8 %\ÜÚYÛˆ[›Ý\ˆÛÜšÙ\‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝšXÝ[HHË‹‹™Ë[š]Ë‹‹™Ë˜Z[[™Ü×Bˆ™š[\Š
+ÊHOˆËX[HOOH™[™[^Hˆ	‰ˆ\Õš\ÚX›JËËØš™XÝ˜Y]\ÊÊJJBˆœÛÜ
+ˆ
+KŠHO‚ˆX]š\Ý
+KžHÞKžHHÞJHHX]š\Ý
+‹žHÞ‹žHHÞJKˆ
+VÌNÂˆÛÛœÝ›Ü˜ÙY˜]™[HË›[ÙHOOH›[Ý™HˆË›[ÙHOOH›[Ý™KY[™ØYÙHŽÂˆÛÛœÝ]XÚÚ[™ÈHY›Ü˜ÙY˜]™[	‰ˆ›ÛÛX[ŠšXÝ[H	‰ˆX]š\Ý
+šXÝ[KžHÞšXÝ[KžHHÞJHJNÂˆÛÛœÝ›Ü›X][ÛˆH›Ü›X][Û‘\Ý[˜][ÛœÊÝ\œËÈˆÞNˆÞHJNÂˆÛÛœÝ›Ü›X][Û”ÜYYHÝ\œË›[™ÝˆH	‰ˆÝ\œË™]™\žJ\ÐÛÛX˜][š]
+BˆÈX]›Z[Š‹‹›Ý\œË›X\
+
+[š]
+HOˆÝ]ÖÝ[š]\WKœÜYY
+ˆ
+X[QØÝš[™JË[š]X[JHOOH˜Z\ˆˆ	‰ˆ[š]\HOOH™›Û™HˆÈKŒMHˆJJJBˆˆ[™Yš[™YÂˆYˆ
+]XÚÚ[™ÊBˆÝ\œË™›Ü‘XXÚ
+
+K[™^
+HOˆÂˆYˆ
+Z\ÐÛÛX˜][š]
+JJHÂˆK™[™[^HH[™Yš[™YÂˆK\™Ù]HÈˆÞ
+È
+[™^	HÊH
+ˆ‹NˆÞH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆˆNÂˆK›[Ý™Q[™ØYÙHH˜[ÙNÂˆK™›Ü›X][Û”ÜYYH[™Yš[™YÂˆK›˜]ˆH[™Yš[™YÂˆ™]\›ŽÂˆBˆKœ™]™X][™ÈH˜[ÙNÂˆK™[™[^HHšXÝ[HKšYÂˆK\™Ù]H[™Yš[™YÂˆK›[Ý™Q[™ØYÙHH˜[ÙNÂˆK™›Ü›X][Û”ÜYYH[™Yš[™YÂˆK›˜]ˆH[™Yš[™YÂˆKœ™\Z\•\™Ù]H[™Yš[™YÂˆYˆ
+K\HOOHÛÜšÙ\ˆŠHÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠKšÛŠNÂˆBˆKœ]›ÛH[™Yš[™YÂˆYˆ
+KœÝ[˜ÙHOOHœ]›ÛˆKœÝ[˜ÙHOOHšÛŠHKœÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆ[ÙBˆÝ\œË™›Ü‘XXÚ
+
+KJHOˆÂˆYˆ
+K™Ø\œš\ÛÛ™Y]
+HZ™XÝœ›ÛR[[™[^JËJNÂˆKœ™]™X][™ÈH˜[ÙNÂˆK™[™[^HH[™Yš[™YÂˆK\™Ù]H›Ü›X][Û‹™Ù]
+KšY
+HÈˆÞ
+È
+H	HÊH
+ˆ‹NˆÞH
+ÈX]™›ÛÜŠHÈÊH
+ˆˆNÂˆK›[Ý™Q[™ØYÙHH\ÐÛÛX˜][š]
+JH	‰ˆË›[ÙHOOH›[Ý™KY[™ØYÙHŽÂˆK™›Ü›X][Û”ÜYYH›Ü›X][Û”ÜYYÂˆYˆ
+K›[Ý™Q[™ØYÙJHKœÝ[˜ÙHHœ\œÝYHŽÂˆK›˜]ˆH[™Yš[™YÂˆKœ™\Z\•\™Ù]H[™Yš[™YÂˆYˆ
+K\HOOHÛÜšÙ\ˆŠHÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠKšÛŠNÂˆBˆKœ]›ÛH[™Yš[™YÂˆYˆ
+KœÝ[˜ÙHOOHœ]›ÛˆKœÝ[˜ÙHOOHšÛŠHKœÝ[˜ÙHHœ\œÝYHŽÂˆJNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›X]ÚÝ]Ë›Ü™\œÊÊÎÂˆË›Y\ÜØYÙHBˆ]XÚÚ[™ÂˆÈ]XÚÈÜ™\ˆÛÛ™š\›YYˆ‚ˆˆ›Ü˜ÙY˜]™[ˆÈË›[ÙHOOH›[Ý™KY[™ØYÙHˆÈ“SÕ‘H
+ÈS‘ÐQÑH8 %\Ý[˜][ÛˆØÚÙYÈ[š]ÈÚ[™\Ý[YHY\ˆ™X\˜žH™X]Ëˆˆˆ‘T‘PÕSÕ‘H8 %\Ý[˜][ÛˆØÚÙYÈ[š]Èš\™H[ˆ˜[™ÙHÚ]Ý]Ú\Ú[™Ëˆ‚ˆˆ“[Ýš[™ÈÝ]ˆŽÂˆYˆ
+›Ü˜ÙY˜]™[
+HË›[ÙHHœÙ[XÝŽÂˆÞ[˜Ê
+NÂˆNÂˆÛÛœÝÙ]]\ÙHH
+˜[YNˆ›ÛÛX[ŠHOˆÂˆ]\ÙY™Y‹˜Ý\œ™[H][\^Y\”›ÛK˜Ý\œ™[OOHœÛÛÈˆÈ˜[YHˆ˜[ÙNÂˆÙ]]\ÙY
+˜[YJNÂˆ\Ý˜Ý\œ™[H\™›Ü›X[˜ÙK››ÝÊ
+NÂˆNÂˆÛÛœÝÝ\™]ÓX]ÚH
+›ÙÑ[˜X›YH™]ÓX]Ú›ÙÊHOˆÂˆX]™S][\^Y\Š
+NÂˆØØ[ÝÜ˜YÙKœ™[[Ý™R][JÐU‘WÒÑVJNÂˆØ[YK˜Ý\œ™[H[š]X[
+È›ÙÑ[˜X›YJNÂˆ]XÚÕ[Y\œË˜Ý\œ™[HßNÂˆX]ÚÝ\Y˜Ý\œ™[HYNÂˆÙ]Ø]™TÝ]\Ê“‘UÈPUÒŠNÂˆÙ]\Ð]]ÜØ]™JYJNÂˆÙ]ÛYSÜ[Š˜[ÙJNÂˆÙ]]\ÙJ˜[ÙJNÂˆÞ[˜Ê
+NÂˆNÂˆÛÛœÝÛÛ[YSX]ÚH
+
+HOˆÂˆØ[YK˜Ý\œ™[HØYØ[YJ
+NÂˆ]XÚÕ[Y\œË˜Ý\œ™[HßNÂˆX]ÚÝ\Y˜Ý\œ™[HYNÂˆÙ]ÛYSÜ[Š˜[ÙJNÂˆÙ]]\ÙJ˜[ÙJNÂˆÞ[˜Ê
+NÂˆNÂˆÛÛœÝÜ[’ÛYHH
+
+HOˆÂˆÛÛœÝØ\ÔÛÛÈH][\^Y\”›ÛK˜Ý\œ™[OOHœÛÛÈŽÂˆYˆ
+Ø\ÔÛÛÊHÂˆØ]™J
+NÂˆÙ]\Ð]]ÜØ]™JYJNÂˆH[ÙHÂˆX]™S][\^Y\Š
+NÂˆBˆÙ]]\ÙJ˜[ÙJNÂˆ]\ÙY™Y‹˜Ý\œ™[HYNÂˆÙ]ÛYSÜ[ŠYJNÂˆNÂˆÛÛœÝÙÙÛU]ÜšX[ÈH
+
+HOˆÂˆÛÛœÝ™^H]]ÜšX[Ñ[˜X›YÂˆØØ[ÝÜ˜YÙKœÙ]][JUÔ’PS×ÒÑVK™^È›Ûˆˆˆ›Ù™ˆŠNÂˆYˆ
+™^
+HÂˆÙ]\ÛZ\ÜÙY\Ê×JNÂˆØØ[ÝÜ˜YÙKœ™[[Ý™R][JTÓRTÔÑQÕT×ÒÑVJNÂˆBˆÙ]]ÜšX[Ñ[˜X›Y
+™^
+NÂˆNÂˆÛÛœÝ\ÛZ\ÜÕ\H
+\ˆÝš[™ÊHOˆÂˆÙ]\ÛZ\ÜÙY\Ê
+Ý\œ™[
+HOˆÂˆÛÛœÝ™^HË‹‹›™]ÈÙ]
+Ë‹‹˜Ý\œ™[\JWNÂˆØØ[ÝÜ˜YÙKœÙ]][JTÓRTÔÑQÕT×ÒÑVK”ÓÓ‹œÝš[™ÚYžJ™^
+JNÂˆ™]\›ˆ™^ÂˆJNÂˆNÂˆÛÛœÝØ]™HH\ÙPØ[˜XÚÊ
+
+HOˆÂˆYˆ
+[X]ÚÝ\Y˜Ý\œ™[][\^Y\”›ÛK˜Ý\œ™[OOHœÛÛÈŠH™]\›ŽÂˆžHÂˆØØ[ÝÜ˜YÙKœÙ]][JÐU‘WÒÑVK”ÓÓ‹œÝš[™ÚYžJØ[YK˜Ý\œ™[
+JNÂˆÙ]Ø]™TÝ]\ÊUUÔÐU‘QŠNÂˆHØ]ÚÂˆÙ]Ø]™TÝ]\Ê”ÐU‘HRSQŠNÂˆBˆK×JNÂˆÛÛœÝØ]™SX[X[H
+
+HOˆÂˆžHÂˆÛÛœÝÛ˜\ÚÝH”ÓÓ‹œÝš[™ÚYžJØ[YK˜Ý\œ™[
+NÂˆØØ[ÝÜ˜YÙKœÙ]][JPS•PSÔÐU‘WÒÑVKÛ˜\ÚÝ
+NÂˆØØ[ÝÜ˜YÙKœÙ]][JÐU‘WÒÑVKÛ˜\ÚÝ
+NÂˆÙ]Ø]™TÝ]\Ê‘ÐSQHÐU‘QŠNÂˆHØ]ÚÂˆÙ]Ø]™TÝ]\Ê”ÐU‘HRSQŠNÂˆBˆNÂˆÛÛœÝØYX[X[H
+
+HOˆÂˆžHÂˆÛÛœÝØ]™YHØØ[ÝÜ˜YÙK™Ù]][JPS•PSÔÐU‘WÒÑVJNÂˆYˆ
+\Ø]™Y
+HÂˆÙ]Ø]™TÝ]\Ê““ÈPS•PSÐU‘HŠNÂˆ™]\›ŽÂˆBˆÛÛœÝ\œÙYH”ÓÓ‹œ\œÙJØ]™Y
+H\ÈØ[YNÂˆØ[YK˜Ý\œ™[HY˜]QØ[YJ\œÙY“X[X[Ø]™HØYYˆŠNÂˆ]XÚÕ[Y\œË˜Ý\œ™[HßNÂˆØØ[ÝÜ˜YÙKœÙ]][JÐU‘WÒÑVK”ÓÓ‹œÝš[™ÚYžJØ[YK˜Ý\œ™[
+JNÂˆÙ]Ø]™TÝ]\Ê‘ÐSQHÐQQŠNÂˆÙ]]\ÙJ˜[ÙJNÂˆÞ[˜Ê
+NÂˆHØ]ÚÂˆÙ]Ø]™TÝ]\Ê“ÐQRSQŠNÂˆBˆNÂˆÛÛœÝXÝ[ÛˆH
+˜[YNˆÝš[™ÊHOˆÂˆÛÛœÝÈHØ[YK˜Ý\œ™[ÂˆYˆ
+][\^Y\”›ÛK˜Ý\œ™[OOH™ÝY\ÝŠHÂˆÝY\ÝXÝ[ÛŠ˜[YJNÂˆ™]\›ŽÂˆBˆË›X]ÚÝ]Ëœ^Y\XÝ[ÛœÊÊÎÂˆYˆ
+˜[YHOOH™\Ù[XÝŠHÂˆËœÙ[XÝYH×NÂˆË›[ÙHHœÙ[XÝŽÂˆË›Y\ÜØYÙHH”Ù[XÝ[ÛˆÛX\™YˆŽÂˆ\Ý\˜Ý\œ™[H[ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™\Ù]ŠHÂˆØØ[ÝÜ˜YÙKœ™[[Ý™R][JÐU‘WÒÑVJNÂˆÙ]\Ð]]ÜØ]™J˜[ÙJNÂˆØ[YK˜Ý\œ™[H[š]X[
+È›ÙÑ[˜X›YˆË™›ÙÑ[˜X›YJNÂˆ]XÚÕ[Y\œË˜Ý\œ™[HßNÂˆÙ]Ø]™TÝ]\Ê“‘UÈPUÒŠNÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YKœÝ\ÕÚ]
+˜Z[ŠJHÂˆÛÛœÝ\ÕÛÜšÙ\ˆHË[š]ËœÛÛYJ
+[š]
+HO‚ˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ[š]\HOOHÛÜšÙ\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+JNÂˆYˆ
+Z\ÕÛÜšÙ\ŠHÂˆË›Y\ÜØYÙHH”Ù[XÝHÛÜšÙ\‹[ˆÜ[ˆÛÛœÝXÝ[Û‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆË›[ÙHH˜[YH\ÈØ[YVÈ›[ÙH—NÂˆË›Y\ÜØYÙHBˆ˜[YHOOH˜Z[\™Yš[™\žH‚ˆÈ”‘Q’S‘T–HPÑSQS•ˆ\HÛX\ˆØØ][ÛˆÛˆH˜]YšY[ˆ‚ˆˆ˜[YHOOH˜Z[X˜\œ˜XÚÜÈ‚ˆÈT”PÒÔÈPÑSQS•ˆ\HÛX\ˆØØ][ÛˆÛˆH˜]YšY[ˆ‚ˆˆ”ÑS•–HT”‘UPÑSQS•ˆ\HÛX\ˆØØ][ÛˆÈÛÝ™\ˆ[ˆ\›ØXÚˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆ]ˆHË˜Z[[™ÜË™š[™
+ˆ
+
+HOˆËœÙ[XÝYš[˜ÛY\ÊšY
+H	‰ˆX[HOOHœ^Y\ˆ‹ˆ
+NÂˆYˆ
+˜[YHOOHœXÚËZHˆ˜[YHOOH™\ÞKZHˆ˜[YHOOH›[Ý™KZHŠHÂˆÙ]ÛÛ[X[™XŠ[š]ÈŠNÂˆYˆ
+Xˆ‹\HOOHšHŠHÂˆË›Y\ÜØYÙHH”Ù[XÝ[Ý\ˆXY]X\\œÈš\œÝˆŽÂˆH[ÙHYˆ
+˜[YHOOH›[Ý™KZHŠHÂˆYˆ
+X‹œXÚÙY‹œ™[ØØ][ÛŠHË›Y\ÜØYÙHH‘š[š\ÚXÚÚ[™ÈHXY]X\\œÈ™Y›Ü™H[Ýš[™È]ˆŽÂˆ[ÙHÂˆË›[ÙHH›[Ý™KZHŽÂˆË›Y\ÜØYÙHHÓÓSPS‘ÔUÓTŽˆÚÛÜÙHH\Ý[˜][Û‹ˆ][Ý™\È^™[Y[HÛÝÛKˆŽÂˆBˆH[ÙHYˆ
+‹œ™[ØØ][ÛŠHÂˆË›Y\ÜØYÙHH	Ø‹œ™[ØØ][Û‹›[ÙHOOHœXÚÈˆÈ”XÚÚ[™Èˆˆ‘\Þ[Y[ŸH\È[™XYH[ˆ›ÙÜ™\ÜË˜ÂˆH[ÙHYˆ
+˜[YHOOHœXÚËZHŠHÂˆYˆ
+‹œXÚÙY
+HË›Y\ÜØYÙHH’XY]X\\œÈ\È[™XYHXÚÙYˆŽÂˆ[ÙHYˆ
+‹œ›ÙXÝ[ÛˆË™›ÜYžT›ÙXÝ[ÛˆË™ØÝš[™T›ÙXÝ[ÛˆË˜YS™]ÛÜšÔ›ÙXÝ[ÛŠHË›Y\ÜØYÙHH’H\È\ÞH8 %š[š\Ú›ÙXÝ[ÛˆÜˆ™\ÙX\˜Ú™Y›Ü™HXÚÚ[™ËˆŽÂˆ[ÙHÂˆ‹œ™[ØØ][ÛˆHÈ[ÙNˆœXÚÈ‹[\ÙYˆ\˜][ÛŽˆHNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH”PÒÒS‘ÈPQUPT•T”È8 %ÛÛ[X[™Þ\Ý[\ÈÛÈÙ™›[™H[ˆHÙXÛÛ™ËˆŽÂˆBˆH[ÙHYˆ
+X‹œXÚÙY
+HÂˆË›Y\ÜØYÙHH’XY]X\\œÈ\È[™XYH\ÞYYˆŽÂˆH[ÙHYˆ
+P›ØÚÙY]
+Ë‹‹ž‹žKYJJHÂˆË›Y\ÜØYÙHH‘TÖSQS•“ÐÒÑQ8 %[Ý™HHÜ˜]Û\ˆÈÛX\ˆ]™[Ü›Ý[™]Ø^Hœ›ÛHÛY™œË\ÜÚ]Ë[™ÝXÝ\™\ËˆŽÂˆH[ÙHÂˆ‹›[Øš[U\™Ù]H[™Yš[™YÂˆ‹œ™[ØØ][ÛˆHÈ[ÙNˆ™\ÞH‹[\ÙYˆ\˜][ÛŽˆˆNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH‘TÖRS‘ÈPQUPT•T”È8 %ÛÛ[X[™Þ\Ý[\È™\ÝÜ™H[ˆˆÙXÛÛ™ËˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ˜[HŠHÂˆYˆ
+XˆJÈšH‹˜˜\œ˜XÚÜÈ—H\ÈÝš[™Ö×JKš[˜ÛY\Ê‹\JHXZ[[™ÓÜ\˜][Û˜[
+ŠJHÂˆË›Y\ÜØYÙHBˆ”Ù[XÝ[Ý\ˆHÜˆH˜\œ˜XÚÜÈš\œÝ[ˆÙ]]È˜[HÚ[ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆË›[ÙHHœÙ]\˜[HŽÂˆË›Y\ÜØYÙHHSHÒS•ˆ\Ú\™H™]È	Ø‹\HOOHšHˆÈ’H[š]Èˆˆ˜ÛÛX˜][š]ÈŸHÚÝ[ÛË˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœÙ[ŠHÂˆYˆ
+Xˆ‹\HOOHšHŠHÂˆË›Y\ÜØYÙHBˆ”Ù[XÝH™Yš[™\žK˜\œ˜XÚÜËÜˆ\œ™]š\œÝ[ˆ\Ù[Ù[XÝYˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝ™Y[™HX]™›ÛÜŠ•RSÐÓÔÕØ‹\WHÈŠNÂˆÛÛœÝÛÛYH‹šYÂˆË˜Z[[™ÜÈHË˜Z[[™ÜË™š[\Š
+
+HOˆšYOOHÛÛY
+NÂˆËœÙ[XÝYH×NÂˆYˆ
+‹\HOOH˜˜\œ˜XÚÜÈŠHË˜Ü™Y]È
+ÏH™Y[™Âˆ[ÙHË˜[ÞH
+ÏH™Y[™ÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆYˆ
+‹œ›ÙÜ™\ÜÈOOHH	‰ˆ‹\HOOH\œ™]ŠBˆËœÝÙ\ˆHX]›X^
+ËœÝÙ\ˆH
+‹\HOOHœ™Yš[™\žHˆÈˆŠJNÂˆË›Y\ÜØYÙHH	Ø‹\_HÛÛ›Üˆ	Ü™Y[™H	Ø‹\HOOH˜˜\œ˜XÚÜÈˆÈ˜Ü™Y]Èˆˆ˜[ÞHŸK˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH˜Ø[˜Ù[XÛÛœÝXÝ[ÛˆŠHÂˆYˆ
+Xˆ
+‹œ›ÙÜ™\ÜÈÏÈJHHJHÂˆË›Y\ÜØYÙHH”Ù[XÝ[ˆ[™š[š\ÚYÛÛœÝXÝ[ÛˆÚ\™Yœ˜[YHš\œÝˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝ™Y[™H‹˜ÛÛœÝXÝ[Û”Ý\YÈX]™›ÛÜŠ•RSÐÓÔÕØ‹\WHÈŠHˆ•RSÐÓÔÕØ‹\WNÂˆÛÛœÝØ[˜Ù[YYH‹šYÂˆË˜Z[[™ÜÈHË˜Z[[™ÜË™š[\Š
+Z[[™ÊHOˆZ[[™ËšYOOHØ[˜Ù[YY
+NÂˆ›Üˆ
+ÛÛœÝÛÜšÙ\ˆÙˆË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆ[š]\HOOHÛÜšÙ\ˆŠJHÂˆÛÛœÝ]Y]YHH
+ÛÜšÙ\‹˜Z[]Y]YH
+ÛÜšÙ\‹˜Z[\™Ù]ÈÝÛÜšÙ\‹˜Z[\™Ù]Hˆ×JJK™š[\Š
+Y
+HOˆYOOHØ[˜Ù[YY
+NÂˆÛÜšÙ\‹˜Z[]Y]YHH]Y]YNÂˆÛÜšÙ\‹˜Z[\™Ù]H]Y]YVÌNÂˆYˆ
+\]Y]YK›[™Ý	‰ˆÛÜšÙ\‹ÛÜšÙ\“[ÙHOOH˜ÛÛœÝXÝŠHÛÜšÙ\‹ÛÜšÙ\“[ÙHH›Z[™HŽÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆBˆËœÙ[XÝYH×NÂˆË›[ÙHHœÙ[XÝŽÂˆË˜[ÞH
+ÏH™Y[™ÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH	Ø‹\KÕ\\Ø\ÙJ
+_HÛÛœÝXÝ[ÛˆØ[˜Ù[Y0­È	Ü™Y[™H[ÞH™Y[™Yˆ™[XZ[š[™ÈÚ]\È™[[X™\™Y˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH™›ÜYžHŠHÂˆYˆ
+Xˆ‹\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+ŠJHÂˆË›Y\ÜØYÙHH”Ù[XÝ[Ý\ˆHš\œÝÈ[ˆH›ÜYžH˜\ÙH\Ü˜YKˆŽÂˆH[ÙHYˆ
+Ë™›ÜYšYY
+HÂˆË›Y\ÜØYÙHH‘›ÜYžH˜\ÙH\È[™XYHÛÛ\]KˆŽÂˆH[ÙHYˆ
+Ë™›ÜYžT›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH›ÜYžH˜\ÙH\È[™XYH[ˆ›ÙÜ™\ÜÈ8 %	ÓX]›X^
+X]˜ÙZ[
+Ë™›ÜYžT›ÙXÝ[Û‹™\˜][ÛˆHË™›ÜYžT›ÙXÝ[Û‹™[\ÙY
+J_HÙXÛÛ™È™[XZ[š[™Ë˜ÂˆH[ÙHYˆ
+Ëš[[“Ô•Q–WÒS•SÐÓÔÕ
+HÂˆË›Y\ÜØYÙHH›ÜYžH˜\ÙH™\]Z\™\È	Ñ“Ô•Q–WÒS•SÐÓÔÕH[[˜ÂˆH[ÙHYˆ
+Ë™ØÝš[™T›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH’H\È™\ÙX\˜Ú[™ÈHØÝš[™H8 %ØZ]›Üˆ]ÈÛÛ\]KˆŽÂˆH[ÙHYˆ
+Ë˜YS™]ÛÜšÔ›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH’H\È™\ÙX\˜Ú[™È˜YH™]ÛÜšÈ8 %ØZ]›Üˆ]ÈÛÛ\]KˆŽÂˆH[ÙHYˆ
+‹œ›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH’H\È›ÙXÚ[™ÈH[š]8 %š[š\Ú]È]Y]YH™Y›Ü™HÝ\[™È›ÜYžH˜\ÙKˆŽÂˆH[ÙHÂˆËš[[OH“Ô•Q–WÒS•SÐÓÔÕÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË™›ÜYžT›ÙXÝ[ÛˆHÈ[\ÙYˆ\˜][ÛŽˆ“Ô•Q–WÑTUSÓˆNÂˆË›Y\ÜØYÙHH‘“Ô•Q–HTÑHÝ\Y8 %H\Ü˜YHÛÛ\]\È[ˆÙXÛÛ™ËˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH™ØÝš[™KXZ\ˆˆ˜[YHOOH™ØÝš[™KX\›[ÜˆŠHÂˆÛÛœÝØÝš[™NˆØÝš[™HH˜[YHOOH™ØÝš[™KXZ\ˆˆÈ˜Z\ˆˆˆ˜\›[ÜˆŽÂˆYˆ
+Xˆ‹\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+ŠJHÂˆË›Y\ÜØYÙHH”Ù[XÝ[Ý\ˆHš\œÝÈÛÛ[Z]ÈHØÝš[™KˆŽÂˆH[ÙHYˆ
+Ë™ØÝš[™JHÂˆË›Y\ÜØYÙHH	ÙË™ØÝš[™HOOH˜Z\ˆˆÈZ\ˆÝ\\š[Üš]Hˆˆ\›[Ü™YÛÛ[X[™ŸH\ÈØÚÙY[ˆ›Üˆ\ÈX]Ú˜ÂˆH[ÙHYˆ
+Ë™ØÝš[™T›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH‘ØÝš[™H™\ÙX\˜Ú\È[™XYH[ˆ›ÙÜ™\ÜËˆŽÂˆH[ÙHYˆ
+Ë™›ÜYžT›ÙXÝ[ÛˆË˜YS™]ÛÜšÔ›ÙXÝ[Ûˆ‹œ›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH’H\È\ÞH8 %š[š\Ú]ÈÝ\œ™[Ü\˜][Ûˆš\œÝˆŽÂˆH[ÙHYˆ
+Ëš[[ÐÕ’S‘WÒS•SÐÓÔÕ
+HÂˆË›Y\ÜØYÙHH	ÙØÝš[™HOOH˜Z\ˆˆÈZ\ˆÝ\\š[Üš]Hˆˆ\›[Ü™YÛÛ[X[™ŸH™\]Z\™\È	ÑÐÕ’S‘WÒS•SÐÓÔÕH[[˜ÂˆH[ÙHÂˆËš[[OHÐÕ’S‘WÒS•SÐÓÔÕÂˆË™ØÝš[™T›ÙXÝ[ÛˆHÈ\NˆØÝš[™K[\ÙYˆ\˜][ÛŽˆÐÕ’S‘WÑTUSÓˆNÂˆË›Y\ÜØYÙHH	ÙØÝš[™HOOH˜Z\ˆˆÈRTˆÕTT’SÔ’UHˆˆT“SÔ‘QÓÓSPS‘ŸH™\ÙX\˜ÚÝ\Y8 %ÚÚXÙH™XÛÛY\È\›X[™[[ˆ	ÑÐÕ’S‘WÑTUSÓŸHÙXÛÛ™Ë˜ÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH˜YK[™]ÛÜšÈŠHÂˆYˆ
+Xˆ‹\HOOHšHˆXZ[[™ÓÜ\˜][Û˜[
+ŠJHÂˆË›Y\ÜØYÙHH”Ù[XÝ[Ý\ˆHš\œÝÈ™\ÙX\˜Ú˜YH™]ÛÜšËˆŽÂˆH[ÙHYˆ
+Ë˜YS™]ÛÜšÊHÂˆË›Y\ÜØYÙHH•˜YH™]ÛÜšÈ\È[™XYHÛ›[™KˆŽÂˆH[ÙHYˆ
+Ë˜YS™]ÛÜšÔ›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH˜YH™]ÛÜšÈ™\ÙX\˜Ú\È[™XYH[ˆ›ÙÜ™\ÜÈ8 %	ÓX]›X^
+X]˜ÙZ[
+Ë˜YS™]ÛÜšÔ›ÙXÝ[Û‹™\˜][ÛˆHË˜YS™]ÛÜšÔ›ÙXÝ[Û‹™[\ÙY
+J_HÙXÛÛ™È™[XZ[š[™Ë˜ÂˆH[ÙHYˆ
+Ë™›ÜYžT›ÙXÝ[ÛˆË™ØÝš[™T›ÙXÝ[Ûˆ‹œ›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHH’H\È\ÞH8 %š[š\Ú]ÈÝ\œ™[Ü\˜][Ûˆš\œÝˆŽÂˆH[ÙHYˆ
+Ëš[[QWÓ‘UÓÔ’×ÒS•SÐÓÔÕ
+HÂˆË›Y\ÜØYÙHH˜YH™]ÛÜšÈ™\]Z\™\È	ÕQWÓ‘UÓÔ’×ÒS•SÐÓÔÕH[[˜ÂˆH[ÙHÂˆËš[[OHQWÓ‘UÓÔ’×ÒS•SÐÓÔÕÂˆË˜YS™]ÛÜšÔ›ÙXÝ[ÛˆHÈ[\ÙYˆ\˜][ÛŽˆQWÓ‘UÓÔ’×ÑTUSÓˆNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHHQH‘UÓÔ’È™\ÙX\˜ÚÝ\Y8 %Ú\\ˆXØÙ\ÜÈ[ˆ	ÕQWÓ‘UÓÔ’×ÑTUSÓŸHÙXÛÛ™Ë˜ÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝÙ[XÝY[š]ÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+JNÂˆÛÛœÝÙ[XÝYÛÜšÙ\œÈHÙ[XÝY[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠNÂˆÛÛœÝÙ[XÝYÛÛX˜]HÙ[XÝY[š]Ë™š[\Š\ÐÛÛX˜][š]
+NÂˆÛÛœÝÙ[XÝYÚ\\œÈHÙ[XÝY[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH˜Ú\\ˆŠNÂˆYˆ
+˜[YHOOH™\ÞKXÚ\\ˆˆ˜[YHOOHœXÚËXÚ\\ˆŠHÂˆÛÛœÝ[YÚX›HHÙ[XÝYÚ\\œË™š[\Š
+[š]
+HO‚ˆ˜[YHOOH™\ÞKXÚ\\ˆˆÈ
+[š]˜Ú\\“[ÙH›[Øš[HŠHOOH›[Øš[Hˆˆ[š]˜Ú\\“[ÙHOOH™\ÞYY‹ˆ
+NÂˆYˆ
+Y[YÚX›K›[™Ý
+HÂˆË›Y\ÜØYÙHH˜[YHOOH™\ÞKXÚ\\ˆˆÈ”Ù[XÝH[Øš[HÚ\\ˆš\œÝˆˆˆ”Ù[XÝH\ÞYYÚ\\ˆš\œÝˆŽÂˆH[ÙHÂˆ[YÚX›K™›Ü‘XXÚ
+
+[š]
+HOˆÂˆ[š]˜Ú\\“[ÙHH˜[YHOOH™\ÞKXÚ\\ˆˆÈ™\ÞZ[™ÈˆˆœXÚÚ[™ÈŽÂˆ[š]˜Ú\\”›ÙÜ™\ÜÈHÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ]›ÛH[™Yš[™YÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆJNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH˜[YHOOH™\ÞKXÚ\\ˆ‚ˆÈÒTTˆTÖRS‘È8 %[˜ÛÛYH[šÈÜ[œÈ[ˆ	ÐÒTT—ÑTÖWÑTUSÓŸHÙXÛÛ™Ë˜ˆˆÒTTˆPÒÒS‘È8 %[Øš[H[ˆ	ÐÒTT—ÔPÒ×ÑTUSÓŸHÙXÛÛ™Ë˜ÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH›[Ý™Hˆ˜[YHOOH›[Ý™KY[™ØYÙHŠHÂˆÛÛœÝ[Ý˜X›U[š]ÈHÙ[XÝY[š]Ë™š[\Š
+[š]
+HOˆ[š]\HOOH˜Ú\\ˆˆ
+[š]˜Ú\\“[ÙH›[Øš[HŠHOOH›[Øš[HŠNÂˆYˆ
+\Ù[XÝY[š]Ë›[™Ý
+HË›Y\ÜØYÙHH”Ù[XÝ[š]È™Y›Ü™H\ÜÝZ[™ÈH[Ý™HÜ™\‹ˆŽÂˆ[ÙHYˆ
+[[Ý˜X›U[š]Ë›[™Ý
+HË›Y\ÜØYÙHH”XÚÈH\ÞYYÚ\\ˆ™Y›Ü™H[Ýš[™È]ˆŽÂˆ[ÙHÂˆË›[ÙHH˜[YNÂˆË›Y\ÜØYÙHH˜[YHOOH›[Ý™KY[™ØYÙH‚ˆÈ“SÕ‘H
+ÈS‘ÐQÑNˆÚÛÜÙHH\Ý[˜][Û‹ˆ‚ˆˆ‘T‘PÕSÕ‘NˆÚÛÜÙHH\Ý[˜][Ûˆ0­È[š]Èš\™H[ˆ˜[™ÙHÚ]Ý]Ú\Ú[™ËˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™\Z\ˆŠHÂˆYˆ
+\Ù[XÝYÛÜšÙ\œË›[™Ý
+HË›Y\ÜØYÙHH”Ù[XÝÛ™HÜˆ[Ü™HÛÜšÙ\œÈš\œÝˆŽÂˆ[ÙHÂˆË›[ÙHHœ™\Z\ˆŽÂˆË›Y\ÜØYÙHH”‘TRTˆÔ‘TŽˆÚÛÜÙHH[XYÙYœšY[™H[š]ÜˆÝXÝ\™KˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOH˜]]Ë\™\Z\ˆŠHÂˆYˆ
+\Ù[XÝYÛÜšÙ\œË›[™Ý
+HË›Y\ÜØYÙHH”Ù[XÝÛ™HÜˆ[Ü™HÛÜšÙ\œÈš\œÝˆŽÂˆ[ÙHÂˆÛÛœÝ[˜X›HHÙ[XÝYÛÜšÙ\œËœÛÛYJ
+ÛÜšÙ\ŠHOˆ]ÛÜšÙ\‹˜]]Ô™\Z\ŠNÂˆÙ[XÝYÛÜšÙ\œË™›Ü‘XXÚ
+
+ÛÜšÙ\ŠHOˆÂˆÛÜšÙ\‹˜]]Ô™\Z\ˆH[˜X›NÂˆÛX\•ÛÜšÙ\ÛÛœÝXÝ[ÛŠÛÜšÙ\‹[˜X›HÈšÛˆˆ›Z[™HŠNÂˆÛÜšÙ\‹œ™\Z\•\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹™[™[^HH[™Yš[™YÂˆÛÜšÙ\‹\™Ù]H[™Yš[™YÂˆÛÜšÙ\‹›˜]ˆH[™Yš[™YÂˆYˆ
+Y[˜X›JHÂˆÛÜšÙ\‹œ]›ÛH[™Yš[™YÂˆYˆ
+ÛÜšÙ\‹œÝ[˜ÙHOOHœ]›ÛŠHÛÜšÙ\‹œÝ[˜ÙHHœ\œÝYHŽÂˆBˆJNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH[˜X›BˆÈUUÈ‘TRTˆÓˆ8 %Ù[XÝYÛÜšÙ\œÈÝÜZ[š[™È[™™\Z\ˆ[XYÙYœšY[™H[š]È[™ÝXÝ\™\Ëˆ‚ˆˆUUÈ‘TRTˆÑ‘ˆ8 %Ù[XÝYÛÜšÙ\œÈ™]\›ˆÈ›Ü›X[Z[š[™È]KˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHšÛˆ˜[YHOOHœ\œÝYHŠHÂˆÛÛœÝ[YÚX›U[š]ÈH˜[YHOOHšÛ‚ˆÈÙ[XÝYÛÛX˜]™š[\Š
+[š]
+HOˆ[š]\HOOH›ÛÜ\ˆŠBˆˆÙ[XÝYÛÛX˜]ÂˆYˆ
+Y[YÚX›U[š]Ë›[™Ý
+HË›Y\ÜØYÙHH˜[YHOOHšÛ‚ˆÈ”Ù[žH[ÙH\È]˜Z[X›HÛ›HÈ›ÛÜ\œËˆ‚ˆˆ”Ù[XÝÛÛX˜][š]È™Y›Ü™HÚ[™Ú[™È[™ØYÙ[Y[™Z]š[Ü‹ˆŽÂˆ[ÙHÂˆ[YÚX›U[š]Ë™›Ü‘XXÚ
+
+[š]
+HOˆÂˆ[š]œÝ[˜ÙHH˜[YNÂˆ[š]œ™]™X][™ÈH˜[ÙNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]œ]›ÛH[™Yš[™YÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆYˆ
+˜[YHOOHšÛŠHÂˆ[š]\™Ù]H[™Yš[™YÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆBˆJNÂˆË›X]ÚÝ]Ë›YX[š[™Ù[XÝ[ÛœÊÊÎÂˆË›Y\ÜØYÙHH˜[YHOOHšÛ‚ˆÈ”ÑS•–HSÑH8 %›ÛÜ\œÈ\ÞH\ÈÝ][Û˜\žH\œ™]ÈÚ]ÍIHÜ™X]\ˆ˜[™ÙKˆ‚ˆˆ”T”ÕQH8 %[š]ÈX^HÚ\ÙHš\ÚX›H[™[ZY\ÈÚ][ˆZ\ˆÚYÚ˜[™ÙKˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ]›ÛŠHÂˆÛÛœÝÙ[XÝY]›Û\œÈHË‹‹œÙ[XÝYÛÛX˜]‹‹œÙ[XÝYÛÜšÙ\œË™š[\Š
+ÛÜšÙ\ŠHOˆÛÜšÙ\‹˜]]Ô™\Z\ŠWNÂˆYˆ
+\Ù[XÝY]›Û\œË›[™Ý
+HË›Y\ÜØYÙHH”Ù[XÝÛÛX˜][š]ÈÜˆ]]È™\Z\ˆÛÜšÙ\œÈ™Y›Ü™HÜ™X][™ÈH]›Û›Ý]KˆŽÂˆ[ÙHÂˆË›[ÙHHœÙ]\]›ÛXHŽÂˆË›Y\ÜØYÙHHÙ[XÝY]›Û\œËœÛÛYJ
+[š]
+HOˆ[š]\HOOHÛÜšÙ\ˆŠBˆÈ“PRS•SSÑHU“ÓˆÚÛÜÙHHš\œÝ]›ÛÚ[ˆ‚ˆˆ”U“ÓˆÚÛÜÙHHš\œÝ]›ÛÚ[ˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+˜[YHOOHœ™]™X]ŠHÂˆÛÛœÝHHË˜Z[[™ÜË™š[™
+
+Z[[™ÊHOˆZ[[™ËX[HOOHœ^Y\ˆˆ	‰ˆZ[[™Ë\HOOHšHˆ	‰ˆZ[[™ÓÜ\˜][Û˜[
+Z[[™ÊJNÂˆÛÛœÝ[š]ÈHË[š]Ë™š[\Š
+[š]
+HOˆ[š]X[HOOHœ^Y\ˆˆ	‰ˆËœÙ[XÝYš[˜ÛY\Ê[š]šY
+H	‰ˆ\ÐÛÛX˜][š]
+[š]
+JNÂˆYˆ
+ZH][š]Ë›[™Ý
+HÂˆË›Y\ÜØYÙHH”Ù[XÝÛÛX˜][š]È[™ÙY\[Ý\ˆH\ÞYY™Y›Ü™H\ÜÝZ[™ÈH™]™X]ˆŽÂˆH[ÙHÂˆ[š]Ë™›Ü‘XXÚ
+
+[š][™^
+HOˆÂˆ[š]™[™[^HH[™Yš[™YÂˆ[š]›˜]ˆH[™Yš[™YÂˆ[š]œ™]™X][™ÈHYNÂˆ[š]›[Ý™Q[™ØYÙHH˜[ÙNÂˆ[š]™›Ü›X][Û”ÜYYH[™Yš[™YÂˆ[š]\™Ù]HÈˆKž
+È
+[™^	HÊH
+ˆŽHŽNˆKžH
+ÈMH
+ÈX]™›ÛÜŠ[™^ÈÊH
+ˆNÂˆJNÂˆË›Y\ÜØYÙHH”‘U‘PUÔ‘Tˆ8 %[š]È[Ý™HŒ	H˜\Ý\ˆ[™™Z[™›Ü˜ÙH]K]Ú[›Ý[™ØYÙH[ˆ›Ý]KˆŽÂˆBˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆÛÛœÝ\HH˜[YH\È[š]È\H—NÂˆYˆ
+VÈÛÜšÙ\ˆ‹›ÛÜ\ˆ‹[šÈ‹™›Û™H‹˜Ú\\ˆ—Kš[˜ÛY\Ê\JJH™]\›ŽÂˆÛÛœÝØ[YH\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆˆÈšHˆˆ˜˜\œ˜XÚÜÈŽÂˆÛÛœÝÙ[XÝY›ÙXÝ[ÛˆHË˜Z[[™ÜË™š[™
+ˆ
+
+HO‚ˆX[HOOHœ^Y\ˆˆ	‰‚ˆËœÙ[XÝYš[˜ÛY\ÊšY
+H	‰‚ˆ\HOOHØ[Y	‰‚ˆZ[[™ÓÜ\˜][Û˜[
+
+Kˆ
+NÂˆYˆ
+\Ù[XÝY›ÙXÝ[ÛŠHÂˆË›Y\ÜØYÙHBˆ\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆ‚ˆÈÙ[XÝ[Ý\ˆHš\œÝÈÚÝÈ[™˜Z[ˆ	Ý\HOOHÛÜšÙ\ˆˆÈ•ÛÜšÙ\œÈˆˆÚ\\œÈŸK˜ˆˆË˜Z[[™ÜËœÛÛYJ
+
+HOˆX[HOOHœ^Y\ˆˆ	‰ˆ\HOOH˜˜\œ˜XÚÜÈŠBˆÈ”Ù[XÝHÛÛ\]Y˜\œ˜XÚÜÈš\œÝÈÚÝÈ[™˜Z[ˆÛÛX˜][š]Ëˆ‚ˆˆZ[[™ÛÛ\]HH˜\œ˜XÚÜÈš\œÝÈ[›ØÚÈ›ÛÜ\œË[šÜË[™›Û™\ËˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+
+\HOOHÛÜšÙ\ˆˆ\HOOH˜Ú\\ˆŠH	‰ˆ
+Ë™›ÜYžT›ÙXÝ[ÛˆË™ØÝš[™T›ÙXÝ[ÛˆË˜YS™]ÛÜšÔ›ÙXÝ[ÛŠJHÂˆË›Y\ÜØYÙHHH\È\ÞHÚ]™\ÙX\˜Ú8 %	Ý[š]˜[YJ\J_H›ÙXÝ[Ûˆ\È]\ÙY˜ÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+\HOOH˜Ú\\ˆˆ	‰ˆYË˜YS™]ÛÜšÊHÂˆË›Y\ÜØYÙHH”™\ÙX\˜Ú˜YH™]ÛÜšÈ]HH™Y›Ü™H˜Z[š[™ÈHÚ\\‹ˆŽÂˆÞ[˜Ê
+NÂˆ™]\›ŽÂˆBˆYˆ
+\HOOH˜Ú\\ˆˆ	‰ˆÚ\\ÛÝwóMí¢G§²ÚîÆ­yÓ’’°¢–b†‡ç&VÆö6F–öâ’°¢‡ç&VÆö6F–öâæVÆ6VBÒÖF‚æÖ–â†‡ç&VÆö6F–öâæGW&F–öâÂ‡ç&VÆö6F–öâæVÆ6VB²GB“°¢–b†‡ç&VÆö6F–öâæVÆ6VBãÒ‡ç&VÆö6F–öâæGW&F–öâ’°¢6öç7BÖöFRÒ‡ç&VÆö6F–öâæÖöFS°¢‡ç&VÆö6F–öâÒVæFVf–æVC°¢‡ç6¶VBÒÖöFRÓÓÒ'6²#°¢–b†ÖöFRÓÓÒ&FWÆ÷’"’‡æÖö&–ÆUF&vWBÒVæFVf–æVC°¢–b†‡çFVÒÓÓÒ'Æ–W""’°¢ræÖW76vRÒÖöFRÓÓÒ'6² ¢ò$4ôÔÔäB5$tÄU"&VG’(	BÖ÷fR—B6Æ÷vÇ’ÂF†VâFWÆ÷’öâ6ÆV"FW'&–ââ ¢¢$„TET%DU%2FWÆ÷–VB(	B&öGV7F–öâÂ7WÇ’Â&W6V&6‚ÂæB&V–æf÷&6VÖVçB&W7F÷&VBâ#°¢7–æ2‚“°¢Ð¢Ð¢Ð¢–b†‡ç6¶VB’Ö÷fU6¶VD‡†rÂ‡ÂGB“°¢Ð¢f÷"†6öç7BVæ—BöbrçVæ—G2’°¢Væ—BæÖ÷f–ærÒfÇ6S°¢Væ—BæÖ–æ–ærÒfÇ6S°¢Væ—Bæ'V–ÆF–ærÒfÇ6S°¢Væ—Bç&W—&–ærÒfÇ6S°¢6öç7B–å7WÇ’ÒVæ—D–å7WÇ•&ævR†rÂVæ—B“°¢Væ—Bç7WÇ’Ò–å7WÇ¢òÖF‚æÖ–â…5UÅ•ô44•E’Â‡Væ—Bç7WÇ’óò5UÅ•ô44•E’’²GB¢2¢¢ÖF‚æÖ‚ƒÂ‡Væ—Bç7WÇ’óò5UÅ•ô44•E’’ÒGB“°¢6öç7B†öÖT‡Òræ'V–ÆF–æw2æf–æB‚†'V–ÆF–ær’Óâ'V–ÆF–ærçFVÒÓÓÒVæ—BçFVÒbb'V–ÆF–ærçG—RÓÓÒ&‡"bb'V–ÆF–æt÷W&F–öæÂ†'V–ÆF–ær’“°¢–b††öÖT‡bbÖF‚æ‡—÷B††öÖT‡ç‚ÒVæ—Bç‚Â†öÖT‡ç’ÒVæ—Bç’’ÃÒSR’°¢Væ—Bæ‡ÒÖF‚æÖ–â‡Væ—BæÖ‚ÂVæ—Bæ‡²‡Væ—Bç&WG&VF–ærò"¢B’¢GB“°¢–b‡Væ—Bç&WG&VF–ærbbÖF‚æ‡—÷B††öÖT‡ç‚ÒVæ—Bç‚Â†öÖT‡ç’ÒVæ—Bç’’ÃÒ#’°¢Væ—Bç&WG&VF–ærÒfÇ6S°¢Væ—BçF&vWBÒVæFVf–æVC°¢Væ—BææbÒVæFVf–æVC°¢Ð¢Ð¢–b‡Væ—Bç&WG&VF–ær’Væ—BæVæV×’ÒVæFVf–æVC°¢6öç7B&VvVå&FRÒfWFW&å&VvVå&FR‡Væ—B“°¢–b‡&VvVå&FRâ’°¢Væ—Bæ‡ÒÖF‚æÖ–â‡Væ—BæÖ‚ÂVæ—Bæ‡²Væ—BæÖ‚¢&VvVå&FR¢GB“°¢Ð¢Ð¢&WfVÄför†r“°¢6öç7BVæV×”‡Òræ'V–ÆF–æw2æf–æB‚†'V–ÆF–ær’Óâ'V–ÆF–ærçFVÒÓÓÒ&VæV×’"bb'V–ÆF–ærçG—RÓÓÒ&‡"“°¢–b†VæV×”‡bb—5f—6–&ÆR†rÂVæV×”‡Â'V–ÆF–æu7FG2æ‡ç"’’°¢6öç7BF—66÷fW&VBÒræVæV×”Fö7G&–æRÇÂ&æöæR#°¢–b†rç66÷WFVDVæV×”Fö7G&–æRÓÒF—66÷fW&VB’°¢rç66÷WFVDVæV×”Fö7G&–æRÒF—66÷fW&VC°¢ræVæV×”Fö7G&–æT¶æ÷vâÒG'VS°¢ræÖW76vRÒF—66÷fW&VBÓÓÒ&æöæR ¢ò%44õUB$Uõ%C¢æò6ö×ÆWFVBVæV×’Fö7G&–æRFWFV7FVBâ ¢¢44õUB$Uõ%C¢VæV×’G¶F—66÷fW&VBÓÓÒ&—""ò$—"7WW&–÷&—G’"¢$&Ö÷&VB6öÖÖæB'ÒFö7G&–æRFWFV7FVBæ°¢7–æ2‚“°¢Ð¢Ð¢rç6†÷G2Ò†rç6†÷G2ÇÂµÒ¢æÖ‚‡2’Óâ‡²ââç2ÂÆ–fS¢2æÆ–fRÒGBÒ’¢æf–ÇFW"‚‡2’Óâ2æÆ–fRâ“°¢ræFÖvTçVÖ&W'2Ò†ræFÖvTçVÖ&W'2ÇÂµÒ¢æÖ‚†â’Óâ‡²ââæâÂÆ–fS¢âæÆ–fRÒGBÂ“¢âç’Ò‚¢GBÒ’¢æf–ÇFW"‚†â’ÓââæÆ–fRâ“°¢f÷"†6öç7Bö&¦V7F—fRöbræö&¦V7F—fW2ÇÂµÒ’°¢–b‚–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR’’°¢ö&¦V7F—fRæ÷væW"Ò&æWWG&Â#°¢ö&¦V7F—fRæ6GW&RÒ°¢6öç7B&V'V–ÆDBÒö&¦V7F—fRç&V'V–ÆDBóòrçF–ÖR²$TÄ•õ$T%T”ÄEô4ôôÄDõtã°¢ö&¦V7F—fRç&V'V–ÆDBÒ&V'V–ÆDC°¢–b†rçF–ÖRãÒ&V'V–ÆDB’°¢ö&¦V7F—fRç&V'V–ÆE&öw&W72ÒÖF‚æÖ–âƒÂ†ö&¦V7F—fRç&V'V–ÆE&öw&W72ÇÂ’²GBò$TÄ•õ$T%T”ÄEôEU$D”ôâ“°¢ö&¦V7F—fRæ‡ÒÖF‚ç&÷VæB†ö&¦V7F—fRæÖ‚¢ö&¦V7F—fRç&V'V–ÆE&öw&W72“°¢–b†ö&¦V7F—fRç&V'V–ÆE&öw&W72ãÒ’°¢ö&¦V7F—fRæ‡Òö&¦V7F—fRæÖƒ°¢ö&¦V7F—fRç&V'V–ÆDBÒVæFVf–æVC°¢ö&¦V7F—fRç&V'V–ÆE&öw&W72ÒVæFVf–æVC°¢–b†—5f—6–&ÆR†rÂö&¦V7F—fRÂ„”t…ôu$õTäEõ$D•U2’’°¢ræÖW76vRÒ$”åDTÂ$TÄ’$T%T”ÅB(	Bv'&—6öâ66W72&W7F÷&VBâ#°¢7–æ2‚“°¢Ð¢Ð¢Ð¢6öçF–çVS°¢Ð¢6öç7BöÆD÷væW"Òö&¦V7F—fRæ÷væW#°¢6öç7Bö67WçG2Ò&VÆ”ö67WçG2†rÂö&¦V7F—fR“°¢6öç7Bv'&—6öåFVÒÒö67WçG5³ÓòçFVÓ°¢6öç7BÆ–W%&W6Væ6RÒrçVæ—G2æf–ÇFW"€¢‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bbVæ—Bæ‡âbbÖF‚æ‡—÷B‡Væ—Bç‚Òö&¦V7F—fRç‚ÂVæ—Bç’Òö&¦V7F—fRç’’ÃÒô$¤T5D•dUô4EU$Uõ$D•U2À¢’æÆVæwFƒ°¢6öç7BVæV×•&W6Væ6RÒrçVæ—G2æf–ÇFW"€¢‡Væ—B’ÓâVæ—BçFVÒÓÓÒ&VæV×’"bbVæ—Bæ‡âbbÖF‚æ‡—÷B‡Væ—Bç‚Òö&¦V7F—fRç‚ÂVæ—Bç’Òö&¦V7F—fRç’’ÃÒô$¤T5D•dUô4EU$Uõ$D•U2À¢’æÆVæwFƒ°¢–b†v'&—6öåFVÒ’°¢òòâö67W–VB&VÆ’6ææ÷B&R6GW&VB'’7FæF–ær&W6–FR—Bâ6ÆV ¢òòWfW'’FVfVæFW"f—'7C²F†R7W'f—f–ærv'&—6öâ¶VW2gVÆÂ6öçG&öÂà¢ö&¦V7F—fRæ6GW&RÒv'&—6öåFVÒÓÓÒ'Æ–W""òô$¤T5D•dUô4EU$UõD”ÔR¢Ôô$¤T5D•dUô4EU$UõD”ÔS°¢ÒVÇ6R–b‡Æ–W%&W6Væ6RâbbVæV×•&W6Væ6RÓÓÒ’°¢ö&¦V7F—fRæ6GW&RÒÖF‚æÖ–â„ô$¤T5D•dUô4EU$UõD”ÔRÂö&¦V7F—fRæ6GW&R²GB¢ÖF‚æÖ–âƒ"ÂÆ–W%&W6Væ6R’“°¢ÒVÇ6R–b†VæV×•&W6Væ6RâbbÆ–W%&W6Væ6RÓÓÒ’°¢ö&¦V7F—fRæ6GW&RÒÖF‚æÖ‚‚Ôô$¤T5D•dUô4EU$UõD”ÔRÂö&¦V7F—fRæ6GW&RÒGB¢ÖF‚æÖ–âƒ"ÂVæV×•&W6Væ6R’“°¢Ð¢–b†ö&¦V7F—fRæ6GW&RãÒô$¤T5D•dUô4EU$UõD”ÔR’ö&¦V7F—fRæ÷væW"Ò'Æ–W"#°¢VÇ6R–b†ö&¦V7F—fRæ6GW&RÃÒÔô$¤T5D•dUô4EU$UõD”ÔR’ö&¦V7F—fRæ÷væW"Ò&VæV×’#°¢VÇ6R–b‚†ö&¦V7F—fRæ÷væW"ÓÓÒ'Æ–W""bbö&¦V7F—fRæ6GW&RÃÒ’ÇÂ†ö&¦V7F—fRæ÷væW"ÓÓÒ&VæV×’"bbö&¦V7F—fRæ6GW&RãÒ’’ö&¦V7F—fRæ÷væW"Ò&æWWG&Â#°¢–b†ö&¦V7F—fRæ÷væW"ÓÓÒ'Æ–W""’ræ–çFVÂ³Òô$¤T5D•dUô”åDTÅõ$DR¢GC°¢–b†ö&¦V7F—fRæ÷væW"ÓÓÒ&VæV×’"’ræVæV×”–çFVÂ³Òô$¤T5D•dUô”åDTÅõ$DR¢GC°¢–b†ö&¦V7F—fRæ÷væW"ÓÒöÆD÷væW"’°¢–b†ö&¦V7F—fRæ÷væW"ÓÒ&VæV×’"ÇÂ—5f—6–&ÆR†rÂö&¦V7F—fRÂ„”t…ôu$õTäEõ$D•U2’’°¢ræÖW76vRÒö&¦V7F—fRæ÷væW"ÓÓÒ&æWWG&Â ¢ò$”åDTÂ$TÄ’4ôåDU5DTB(	BfVVB–çFW''WFVBâ ¢¢G¶ö&¦V7F—fRæ÷væW"ÓÓÒ'Æ–W""ò$”åDTÂ$TÄ’4T5U$TB"¢$TäTÕ’$TÄ’4T5U$TB'Ò(	B–çFVÂ–æ6öÖR7F—fRæ°¢7–æ2‚“°¢Ð¢Ð¢Ð¢6öç7BÆ–W$&×”6÷VçBÒrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bb—46öÖ&EVæ—B‡Væ—B’’æÆVæwFƒ°¢6öç7BVæV×”&×”6÷VçBÒrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ&VæV×’"bb—46öÖ&EVæ—B‡Væ—B’’æÆVæwFƒ°¢ræ7&VF—G2ÒÖF‚æÖ‚ƒÂræ7&VF—G2ÒW¶VWW%6V6öæB‡Æ–W$&×”6÷VçB’¢GB“°¢ræVæV×”7&VF—G2ÒÖF‚æÖ‚ƒÂræVæV×”7&VF—G2ÒW¶VWW%6V6öæB†VæV×”&×”6÷VçB’¢GB“°¢f÷"†6öç7B'V–ÆF–æröbræ'V–ÆF–æw2’°¢–b‚†'V–ÆF–æræ6ööÆF÷vâÇÂ’â’'V–ÆF–æræ6ööÆF÷vâÒÖF‚æÖ‚ƒÂ†'V–ÆF–æræ6ööÆF÷vâÇÂ’ÒGB“°¢Ð¢6öç7B‡VEF–6²ÒÖF‚æfÆö÷"†rçF–ÖR¢"“°¢–b†‡VEF–6²ÓÒÆ7D‡VEF–6²æ7W'&VçB’°¢Æ7D‡VEF–6²æ7W'&VçBÒ‡VEF–6³°¢7–æ2‚“°¢Ð¢6öç7B2Ò6çf2æ7W'&VçB°¢–b†¶W—2æ7W'&VçBæ†2‚&"’ÇÂ¶W—2æ7W'&VçBæ†2‚&'&÷vÆVgB"’’ræ6ÖW&ç‚ÓÒ3S¢GC°¢–b†¶W—2æ7W'&VçBæ†2‚&B"’ÇÂ¶W—2æ7W'&VçBæ†2‚&'&÷w&–v‡B"’’ræ6ÖW&ç‚³Ò3S¢GC°¢–b†¶W—2æ7W'&VçBæ†2‚'r"’ÇÂ¶W—2æ7W'&VçBæ†2‚&'&÷wW"’’ræ6ÖW&ç’ÓÒ3S¢GC°¢–b†¶W—2æ7W'&VçBæ†2‚'2"’ÇÂ¶W—2æ7W'&VçBæ†2‚&'&÷vF÷vâ"’’ræ6ÖW&ç’³Ò3S¢GC°¢6öç7B†ÆerÒ2æ6Æ–VçEv–GF‚òƒ"¢rç¦ööÒ’À¢†Æd‚Ò2æ6Æ–VçD†V–v‡Bòƒ"¢rç¦ööÒ“°¢ræ6ÖW&ç‚ÒÖF‚æÖ‚††ÆerÂÖF‚æÖ–â…rÒ†ÆerÂræ6ÖW&ç‚’“°¢ræ6ÖW&ç’ÒÖF‚æÖ‚††Æd‚ÂÖF‚æÖ–â„‚Ò†Æd‚Âræ6ÖW&ç’’“°¢f÷"†6öç7BFVÒöb²'Æ–W""Â&VæV×’%Ò26öç7B’°¢6öç7B&öGV7F–öâÒFVÒÓÓÒ'Æ–W""òræf÷'F–g•&öGV7F–öâ¢ræVæV×”f÷'F–g•&öGV7F–öã°¢–b‚&öGV7F–öâ’6öçF–çVS°¢&öGV7F–öâæVÆ6VBÒÖF‚æÖ–â‡&öGV7F–öâæGW&F–öâÂ&öGV7F–öâæVÆ6VB²GB“°¢–b‡&öGV7F–öâæVÆ6VBãÒ&öGV7F–öâæGW&F–öâ’°¢f÷"†6öç7B7G'V7GW&Röbræ'V–ÆF–æw2æf–ÇFW"‚‡‚’Óâ‚çFVÒÓÓÒFVÒ’’°¢6öç7BöÆDÖ‚Ò7G'V7GW&RæÖƒ°¢7G'V7GW&RæÖ‚ÒÖF‚ç&÷VæB†öÆDÖ‚¢ã#R“°¢7G'V7GW&Ræ‡ÒÖF‚æÖ–â‡7G'V7GW&RæÖ‚Â7G'V7GW&Ræ‡²ÖF‚ç&÷VæB†öÆDÖ‚¢ã#R’“°¢Ð¢–b‡FVÒÓÓÒ'Æ–W""’°¢ræf÷'F–f–VBÒG'VS°¢ræf÷'F–g•&öGV7F–öâÒVæFVf–æVC°¢ræÖW76vRÒ$dõ%D”e’$4R6ö×ÆWFR(	BÆÂ7W'&VçB7G'V7GW&W2v–æVB#RR–çFVw&—G’â#°¢ÒVÇ6R°¢ræVæV×”f÷'F–f–VBÒG'VS°¢ræVæV×”f÷'F–g•&öGV7F–öâÒVæFVf–æVC°¢Ð¢7–æ2‚“°¢Ð¢Ð¢f÷"†6öç7BFVÒöb²'Æ–W""Â&VæV×’%Ò26öç7B’°¢6öç7B&öGV7F–öâÒFVÒÓÓÒ'Æ–W""òræFö7G&–æU&öGV7F–öâ¢ræVæV×”Fö7G&–æU&öGV7F–öã°¢–b‚&öGV7F–öâ’6öçF–çVS°¢&öGV7F–öâæVÆ6VBÒÖF‚æÖ–â‡&öGV7F–öâæGW&F–öâÂ&öGV7F–öâæVÆ6VB²GB“°¢–b‡&öGV7F–öâæVÆ6VBãÒ&öGV7F–öâæGW&F–öâ’°¢–b‡FVÒÓÓÒ'Æ–W""’°¢ræFö7G&–æRÒ&öGV7F–öâçG—S°¢ræFö7G&–æU&öGV7F–öâÒVæFVf–æVC°¢ræÖW76vRÒG·&öGV7F–öâçG—RÓÓÒ&—""ò$•"5UU$”õ$•E’"¢$$Ôõ$TB4ôÔÔäB'Ò7F—fR(	BF†RÇFW&æFRFö7G&–æR—2W&ÖæVçFÇ’Æö6¶VBæ°¢ÒVÇ6R°¢ræVæV×”Fö7G&–æRÒ&öGV7F–öâçG—S°¢ræVæV×”Fö7G&–æU&öGV7F–öâÒVæFVf–æVC°¢Ð¢–b‡&öGV7F–öâçG—RÓÓÒ&&Ö÷""’°¢f÷"†6öç7BFæ²öbrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒFVÒbbVæ—BçG—RÓÓÒ'Fæ²"’’°¢6öç7B&öçW2ÒÖF‚ç&÷VæB‡Fæ²æÖ‚¢ã‚“°¢Fæ²æÖ‚³Ò&öçW3°¢Fæ²æ‡³Ò&öçW3°¢Ð¢Ð¢7–æ2‚“°¢Ð¢Ð¢f÷"†6öç7BFVÒöb²'Æ–W""Â&VæV×’%Ò26öç7B’°¢6öç7B&öGV7F–öâÒFVÒÓÓÒ'Æ–W""òrçG&FTæWGv÷&µ&öGV7F–öâ¢ræVæV×•G&FTæWGv÷&µ&öGV7F–öã°¢–b‚&öGV7F–öâ’6öçF–çVS°¢&öGV7F–öâæVÆ6VBÒÖF‚æÖ–â‡&öGV7F–öâæGW&F–öâÂ&öGV7F–öâæVÆ6VB²GB“°¢–b‡&öGV7F–öâæVÆ6VBãÒ&öGV7F–öâæGW&F–öâ’°¢–b‡FVÒÓÓÒ'Æ–W""’°¢rçG&FTæWGv÷&²ÒG'VS°¢rçG&FTæWGv÷&µ&öGV7F–öâÒVæFVf–æVC°¢ræÖW76vRÒ%E$DRäUEtõ$²öæÆ–æR(	B6—†W"&öGV7F–öâVæÆö6¶VBB†VGV'FW'2â#°¢ÒVÇ6R°¢ræVæV×•G&FTæWGv÷&²ÒG'VS°¢ræVæV×•G&FTæWGv÷&µ&öGV7F–öâÒVæFVf–æVC°¢Ð¢7–æ2‚“°¢Ð¢Ð¢f÷"†6öç7B"öbræ'V–ÆF–æw2’°¢–b†"ç&öw&W72ÓÓÒVæFVf–æVBÇÂ"ç&öw&W72ãÒ’6öçF–çVS°¢6öç7B'V–ÆFW'2ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’Óâ°¢6öç7BVWVT†VBÒVæ—Bæ'V–ÆEVWVSòå³ÒóòVæ—Bæ'V–ÆEF&vWC°¢&WGW&âVæ—BçG—RÓÓÒ'v÷&¶W""bbVæ—BçFVÒÓÓÒ"çFVÒbbVæ—Bæ‡âbbVWVT†VBÓÓÒ"æ–Bb`¢ÖF‚æ‡—÷B‡Væ—Bç‚Ò"ç‚ÂVæ—Bç’Ò"ç’’ÃÒ'V–ÆF–æu7FG5¶"çG—UÒç"²3°¢Ò“°¢–b‚'V–ÆFW'2æÆVæwF‚’6öçF–çVS°¢"æ6öç7G'V7F–öå7F'FVBÒG'VS°¢6öç7BöÆE&öw&W72Ò"ç&öw&W73°¢6öç7BGW&F–öâÒ"æ6öç7G'V7F–öäGW&F–öâÇÂ†"çG—RÓÓÒ'GW'&WB"ò'V–ÆF–æt'V–ÆEF–ÖRçGW'&WB¢b“°¢6öç7B'V–ÆE7VVBÒÖF‚æÖ–âƒãbÂ²†'V–ÆFW'2æÆVæwF‚Ò’¢ã#R“°¢"ç&öw&W72ÒÖF‚æÖ–âƒÂ"ç&öw&W72²†GBòGW&F–öâ’¢'V–ÆE7VVB“°¢"æ‡ÒÖF‚æÖ–â†"æÖ‚Â"æ‡²"æÖ‚¢†"ç&öw&W72ÒöÆE&öw&W72’“°¢–b†"ç&öw&W72Â’6öçF–çVS°¢"æ‡Ò"æÖƒ°¢f÷"†6öç7Bv÷&¶W"öbrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçG—RÓÓÒ'v÷&¶W""bbVæ—BçFVÒÓÓÒ"çFVÒ’’°¢6öç7B&VÖ–æ–ærÒ‡v÷&¶W"æ'V–ÆEVWVRÇÂ‡v÷&¶W"æ'V–ÆEF&vWBò·v÷&¶W"æ'V–ÆEF&vWEÒ¢µÒ’¢æf–ÇFW"‚†'V–ÆF–æt–B’Óâ'V–ÆF–æt–BÓÒ"æ–B“°¢v÷&¶W"æ'V–ÆEVWVRÒ&VÖ–æ–æs°¢v÷&¶W"æ'V–ÆEF&vWBÒ&VÖ–æ–æu³Ó°¢–b‚&VÖ–æ–æræÆVæwF‚bbv÷&¶W"çv÷&¶W$ÖöFRÓÓÒ&6öç7G'V7B"’v÷&¶W"çv÷&¶W$ÖöFRÒ&Ö–æR#°¢v÷&¶W"ææbÒVæFVf–æVC°¢Ð¢–b†"çG—RÓÒ'GW'&WB"’°¢–b†"çFVÒÓÓÒ'Æ–W""’rç÷vW"³Ò"çG—RÓÓÒ'&Vf–æW'’"òB¢#°¢VÇ6RræVæV×•÷vW"Ò†ræVæV×•÷vW"óò"’²†"çG—RÓÓÒ'&Vf–æW'’"òB¢"“°¢Ð¢–b†"çFVÒÓÓÒ'Æ–W""ÇÂ—5f—6–&ÆR†rÂ"Â'V–ÆF–æu7FG5¶"çG—UÒç"’’°¢ræÖW76vRÒG¶"çFVÒÓÓÒ&VæV×’"ò$VæV×’"¢"'ÒG¶"çG—WÒ÷W&F–öæÂæ°¢7–æ2‚“°¢Ð¢Ð¢f÷"†6öç7B"öbræ'V–ÆF–æw2¢–b€¢"ç&öGV7F–öâb`¢'V–ÆF–æt÷W&F–öæÂ†"’b`¢†"çG—RÓÓÒ&‡"bb‚†"çFVÒÓÓÒ'Æ–W""bb†ræf÷'F–g•&öGV7F–öâÇÂræFö7G&–æU&öGV7F–öâÇÂrçG&FTæWGv÷&µ&öGV7F–öâ’’ÇÂ†"çFVÒÓÓÒ&VæV×’"bb†ræVæV×”f÷'F–g•&öGV7F–öâÇÂræVæV×”Fö7G&–æU&öGV7F–öâÇÂræVæV×•G&FTæWGv÷&µ&öGV7F–öâ’’’¢’°¢"ç&öGV7F–öâæVÆ6VB³ÒGC°¢–b†"ç&öGV7F–öâæVÆ6VBãÒ"ç&öGV7F–öâæGW&F–öâ’°¢6öç7BG—RÒ"ç&öGV7F–öâçG—RÀ¢76–ærÒG—RÓÓÒ'Fæ²"òC‚¢3C°¢ÆWB7vâÒ²ƒ¢"ç‚²†"çFVÒÓÓÒ'Æ–W""òs¢Ós’Â“¢"ç’Ó°¢f÷"†ÆWB&–ærÒ²&–ærÂS²&–ær²²’°¢6öç7B&F—W2Òs²&–ær¢76–ærÀ¢7÷G2Ò‚²&–ær¢C°¢6öç7Bf÷VæBÒ'&’æg&öÒ‡²ÆVæwFƒ¢7÷G2ÒÂ…òÂ’’Óâ‡°¢ƒ¢"ç‚²ÖF‚æ6÷2‚†’ò7÷G2’¢ÖF‚å’¢"’¢&F—W2À¢“¢"ç’²ÖF‚ç6–â‚†’ò7÷G2’¢ÖF‚å’¢"’¢&F—W2À¢Ò’’æf–æB‚‡’Óà¢rçVæ—G2æWfW'’‚‡R’ÓâÖF‚æ‡—÷B‡Rç‚Òç‚ÂRç’Òç’’â76–ær’À¢“°¢–b†f÷VæB’°¢7vâÒf÷VæC°¢'&V³°¢Ð¢Ð¢6öç7B–BÒrææW‡D–B²³°¢6öç7BFWÆ÷–VD†VÇF‚ÒÖF‚ç&÷VæB‡Væ—D†VÇF…·G—UÒ¢‡G—RÓÓÒ'Fæ²"bbFVÔFö7G&–æR†rÂ"çFVÒ’ÓÓÒ&&Ö÷""òã‚¢’“°¢6öç7B&ÆÇ•F&vWBÒ"ç&ÆÇ¢ò°¢ƒ¢"ç&ÆÇ’ç‚²ÖF‚æ6÷2†–B¢"ã3“’’¢C"À¢“¢"ç&ÆÇ’ç’²ÖF‚ç6–â†–B¢"ã3“’’¢C"À¢Ð¢¢VæFVf–æVC°¢rçVæ—G2çW6‚‡°¢–BÀ¢FVÓ¢"çFVÒÀ¢G—RÀ¢ââç7vâÀ¢F&vWC¢&ÆÇ•F&vWBÀ¢‡¢FWÆ÷–VD†VÇF‚À¢Öƒ¢FWÆ÷–VD†VÇF‚À¢‡¢À¢ÆWfVÃ¢À¢7WÇ“¢5UÅ•ô44•E’À¢6—†W$ÖöFS¢G—RÓÓÒ&6—†W""ò&Öö&–ÆR"¢VæFVf–æVBÀ¢Ò“°¢6öç7BæW‡BÒ"ç&öGV7F–öâçVWVSòç6†–gB‚“°¢–b†æW‡B¢"ç&öGV7F–öâÒ°¢G—S¢æW‡BÀ¢VÆ6VC¢Õ$ôET5D”ôåô4ôôÄDõtâÀ¢GW&F–öã¢&öGV7F–öäGW&F–öäf÷"†rÂ"çFVÒÂæW‡B’À¢VWVS¢"ç&öGV7F–öâçVWVRÇÂµÒÀ¢Ó°¢VÇ6R°¢"ç&öGV7F–öâÒVæFVf–æVC°¢"æ6ööÆF÷vâÒ$ôET5D”ôåô4ôôÄDõtã°¢Ð¢–b†"çFVÒÓÓÒ'Æ–W""¢ræÖW76vRÒæW‡@¢òG·Væ—DæÖR‡G—R—ÒFWÆ÷–VB+rG·Væ—DæÖR†æW‡B—Ò&öGV7F–öâ7F'FVBæ ¢¢G·Væ—DæÖR‡G—R—Ò&VG’æBFWÆ÷–VBæ°¢7–æ2‚“°¢Ð¢Ð¢6öç7Bö&§2Ò‚’Óâ²ââærçVæ—G2Âââæræ'V–ÆF–æw5Ó°¢f÷"†6öç7BRöbrçVæ—G2’°¢–b‡Ræ‡ÃÒ’6öçF–çVS°¢–b‡RçG—RÓÓÒ&6—†W""’°¢6öç7BÖöFRÒRæ6—†W$ÖöFRÇÂ&Öö&–ÆR#°¢RæVæV×’ÒVæFVf–æVC°¢–b†ÖöFRÓÒ&Öö&–ÆR"’°¢RçF&vWBÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢RçG&öÂÒVæFVf–æVC°¢RæÖ÷fTVævvRÒfÇ6S°¢Ræf÷&ÖF–öå7VVBÒVæFVf–æVC°¢RæÖ÷f–ærÒfÇ6S°¢–b†ÖöFRÓÓÒ&FWÆ÷––ær"ÇÂÖöFRÓÓÒ'6¶–ær"’°¢6öç7BGW&F–öâÒÖöFRÓÓÒ&FWÆ÷––ær"ò4•„U%ôDUÄõ•ôEU$D”ôâ¢4•„U%õ4µôEU$D”ôã°¢Ræ6—†W%&öw&W72ÒÖF‚æÖ–â†GW&F–öâÂ‡Ræ6—†W%&öw&W72ÇÂ’²GB“°¢–b‡Ræ6—†W%&öw&W72ãÒGW&F–öâ’°¢Ræ6—†W$ÖöFRÒÖöFRÓÓÒ&FWÆ÷––ær"ò&FWÆ÷–VB"¢&Öö&–ÆR#°¢Ræ6—†W%&öw&W72ÒVæFVf–æVC°¢–b‡RçFVÒÓÓÒ'Æ–W""’°¢ræÖW76vRÒÖöFRÓÓÒ&FWÆ÷––ær ¢ò$4•„U"ôäÄ”äR(	BvVæW&F–ærc7&VF—G2W"Ö–çWFRv†–ÆRVæF—7GW&&VBâ ¢¢$4•„U"Ôô$”ÄR(	B–æ6öÖRÆ–æ²6Æ÷6VBâ#°¢7–æ2‚“°¢Ð¢Ð¢ÒVÇ6R–b†ÖöFRÓÓÒ&FWÆ÷–VB"bbrçF–ÖRÒ‡RæÆ7D6öÖ&DBóòÔ–æf–æ—G’’ãÒ4•„U%ô4ôÔ$EôÄô4´õUB’°¢–b‡RçFVÒÓÓÒ'Æ–W""’ræ7&VF—G2³Ò4•„U%ô”ä4ôÔUõ$DR¢GC°¢VÇ6RræVæV×”7&VF—G2³Ò4•„U%ô”ä4ôÔUõ$DR¢GC°¢Ð¢6öçF–çVS°¢Ð¢Ð¢–b‡Ræv'&—6öåF&vWBbbRæv'&—6öæVDB’°¢6öç7B&VÆ’Ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚†ö&¦V7F—fR’Óâö&¦V7F—fRæ–BÓÓÒRæv'&—6öåF&vWB“°¢–b‚&VÆ’ÇÂRçG—RÓÒ'G&ö÷W""ÇÂ–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ’’’°¢Ræv'&—6öåF&vWBÒVæFVf–æVC°¢ÒVÇ6R–b€¢ÖF‚æ‡—÷B‡&VÆ’ç‚ÒRç‚Â&VÆ’ç’ÒRç’’ÃÒcBb`¢&VÆ”ö67WçG2†rÂ&VÆ’’ç6öÖR‚†ö67WçB’Óâö67WçBçFVÒÓÒRçFVÒ¢’°¢VçFW$–çFVÅ&VÆ’†rÂRÂ&VÆ’“°¢Ð¢Ð¢–b‡Ræv'&—6öæVDB’°¢6öç7B&VÆ’Ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚†ö&¦V7F—fR’Óâö&¦V7F—fRæ–BÓÓÒRæv'&—6öæVDB“°¢–b‚&VÆ’ÇÂ–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ’’’V¦V7Dg&öÔ–çFVÅ&VÆ’†rÂR“°¢VÇ6R°¢RçF&vWBÒVæFVf–æVC°¢Ræv'&—6öåF&vWBÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢RçÆFVU&÷WFRÒVæFVf–æVC°¢RæÖ÷f–ærÒfÇ6S°¢Ð¢Ð¢ÆWBF&vWBÒö&§2‚’æf–æB€¢†ò’Óà¢òæ–BÓÓÒRæVæV×’b`¢òçFVÒÓÒRçFVÒb`¢çVÖ&W"æ—4f–æ—FR†òæ‡’b`¢òæ‡âÀ¢“°¢–b‚F&vWBbbRæVæV×’ÓÒVæFVf–æVB’°¢RæVæV×’ÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢Ð¢6öç7B”ö&¦V7F—fUG&fVÂÒRçFVÒÓÓÒ&VæV×’"bb—46öÖ&EVæ—B‡R’bbRçF&vW@¢ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚†ö&¦V7F—fR’ÓâÖF‚æ‡—÷B†ö&¦V7F—fRç‚ÒRçF&vWBç‚Âö&¦V7F—fRç’ÒRçF&vWBç’’ÃÒS¢¢VæFVf–æVC°¢6öç7Bö&¦V7F—fTFVfVæFVBÒ&ööÆVâ†”ö&¦V7F—fUG&fVÂbb€¢”ö&¦V7F—fUG&fVÂæ÷væW"ÓÓÒ'Æ–W""ÇÀ¢rçVæ—G2ç6öÖR‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""b`¢Væ—Bæ‡âb`¢ÖF‚æ‡—÷B‡Væ—Bç‚Ò”ö&¦V7F—fUG&fVÂç‚ÂVæ—Bç’Ò”ö&¦V7F—fUG&fVÂç’’ÃÒô$¤T5D•dUô4EU$Uõ$D•U2²ƒb`¢—5f—6–&ÆTf÷"†rÂ&VæV×’"ÂVæ—BÂö&¦V7E&F—W2‡Væ—B’¢¢’“°¢òò'W6†–ærâVæwV&FVBæWWG&ÂWÆ–æ²—2fÆ–BF—&V7BÖÖ÷fR7G&FVw’à¢òòöæ6RF†RFW7F–æF–öâ—2†÷7F–ÆRÖ÷væVB÷"f—6–&Ç’FVfVæFVBÂF†R6ÖP¢òò7VB7v—F6†W2FòÖ÷fRÖæBÖVævvRv—F†÷WB&æFöæ–ær—G2ö&¦V7F—fRà¢–b†”ö&¦V7F—fUG&fVÂ’°¢RæÖ÷fTVævvRÒö&¦V7F—fTFVfVæFVC°¢–b†ö&¦V7F—fTFVfVæFVB’Rç7Fæ6RÒ'W'7VR#°¢Ð¢–b‡F&vWBbbRæÖ÷fTVævvRbbRçF&vWB’°¢6öç7BG&fVÅ6–v‡BÒRçG—RÓÓÒ&G&öæR"ò3#¢RçG—RÓÓÒ'Fæ²"ò#ƒ¢#3°¢–b„ÖF‚æ‡—÷B‡F&vWBç‚ÒRç‚ÂF&vWBç’ÒRç’’âG&fVÅ6–v‡B¢ã3R’°¢RæVæV×’ÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢F&vWBÒVæFVf–æVC°¢Ð¢Ð¢–b‡RçG—RÓÓÒ'v÷&¶W""bbRæWFõ&W—"bb‚RçF&vWBÇÂRç7Fæ6RÓÓÒ'G&öÂ"’’°¢ÆWB&W—%&VÆ’Ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚‡&VÆ’’Óà¢&VÆ’æ–BÓÓÒRç&W—%&VÆ•F&vWBb`¢&VÆ’æ÷væW"ÓÓÒRçFVÒb`¢–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ’’b`¢&VÆ’æ‡Â&VÆ’æÖ‚À¢“°¢ÆWB&W—&&ÆRÒ²ââæræ'V–ÆF–æw2ÂââærçVæ—G5Òæf–æB‚†ö&¦V7B’Óà¢ö&¦V7Bæ–BÓÓÒRç&W—%F&vWBb`¢ö&¦V7Bæ–BÓÒRæ–Bb`¢ö&¦V7BçFVÒÓÓÒRçFVÒb`¢ö&¦V7Bæ‡âb`¢ö&¦V7Bæ‡Âö&¦V7BæÖ‚b`¢†—5Væ—B†ö&¦V7B’ÇÂ'V–ÆF–æt÷W&F–öæÂ†ö&¦V7B’’À¢“°¢–b‚&W—&&ÆRbb&W—%&VÆ’’°¢Rç&W—%F&vWBÒVæFVf–æVC°¢Rç&W—%&VÆ•F&vWBÒVæFVf–æVC°¢6öç7B66å&F—W2ÒRç7Fæ6RÓÓÒ'G&öÂ"òÔ”åDTää4UõE$ôÅõ44â¢–æf–æ—G“°¢6öç7BæV&W7E&W—&&ÆRÒ²ââæræ'V–ÆF–æw2ÂââærçVæ—G5Ð¢æf–ÇFW"‚†ö&¦V7B’Óà¢ö&¦V7Bæ–BÓÒRæ–Bb`¢ö&¦V7BçFVÒÓÓÒRçFVÒb`¢ö&¦V7Bæ‡âb`¢ö&¦V7Bæ‡Âö&¦V7BæÖ‚b`¢†—5Væ—B†ö&¦V7B’ÇÂ'V–ÆF–æt÷W&F–öæÂ†ö&¦V7B’’b`¢ÖF‚æ‡—÷B†ö&¦V7Bç‚ÒRç‚Âö&¦V7Bç’ÒRç’’ÃÒ66å&F—W2À¢¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚ÒRç‚Âç’ÒRç’’ÒÖF‚æ‡—÷B†"ç‚ÒRç‚Â"ç’ÒRç’’•³Ó°¢6öç7BæV&W7E&VÆ’Ò†ræö&¦V7F—fW2ÇÂµÒ¢æf–ÇFW"‚‡&VÆ’’Óà¢&VÆ’æ÷væW"ÓÓÒRçFVÒb`¢–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ’’b`¢&VÆ’æ‡Â&VÆ’æÖ‚b`¢ÖF‚æ‡—÷B‡&VÆ’ç‚ÒRç‚Â&VÆ’ç’ÒRç’’ÃÒ66å&F—W2À¢¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚ÒRç‚Âç’ÒRç’’ÒÖF‚æ‡—÷B†"ç‚ÒRç‚Â"ç’ÒRç’’•³Ó°¢–b€¢æV&W7E&VÆ’b`¢‚æV&W7E&W—&&ÆRÇÂÖF‚æ‡—÷B†æV&W7E&VÆ’ç‚ÒRç‚ÂæV&W7E&VÆ’ç’ÒRç’’ÂÖF‚æ‡—÷B†æV&W7E&W—&&ÆRç‚ÒRç‚ÂæV&W7E&W—&&ÆRç’ÒRç’’¢’°¢&W—%&VÆ’ÒæV&W7E&VÆ“°¢Rç&W—%&VÆ•F&vWBÒæV&W7E&VÆ’æ–C°¢ÒVÇ6R–b†æV&W7E&W—&&ÆR’°¢&W—&&ÆRÒæV&W7E&W—&&ÆS°¢Rç&W—%F&vWBÒæV&W7E&W—&&ÆRæ–C°¢Ð¢Ð¢–b‡&W—&&ÆRÇÂ&W—%&VÆ’’°¢RæVæV×’ÒVæFVf–æVC°¢RçF&vWBÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢F&vWBÒVæFVf–æVC°¢Ð¢Ð¢–b‡Rç7Fæ6RÓÓÒ'G&öÂ"bbRçG&öÂbbF&vWBbbRçF&vWBbbRç&W—%F&vWBbbRç&W—%&VÆ•F&vWB’°¢6öç7BF—7Fæ6RÒÖF‚æ‡—÷B‡RçG&öÂæç‚ÒRç‚ÂRçG&öÂæç’ÒRç’“°¢6öç7B$F—7Fæ6RÒÖF‚æ‡—÷B‡RçG&öÂæ"ç‚ÒRç‚ÂRçG&öÂæ"ç’ÒRç’“°¢6öç7B&W7VÖTBÒF—7Fæ6RÃÒ$F—7Fæ6Rò&"¢&"#°¢RçF&vWBÒ²âââ‡&W7VÖTBÓÓÒ&"òRçG&öÂæ¢RçG&öÂæ"’Ó°¢RçG&öÂææW‡BÒ&W7VÖTBÓÓÒ&"ò&""¢&#°¢Ð¢òòF—&V7BG&fVÂæWfW"6†6W3¢—Bf—&W2öæÇ’BF&vWG2Ç&VG’–ç6–FP¢òòvVöâ&ævRv†–ÆR6öçF–çV–ærF÷v&BF†RÆö6¶VBFW7F–æF–öââVævvP¢òòG&fVÂÖ’'&V²6÷W'6RFòf–v‡BæV&'’F&vWG2ÂF†Vâ&W7VÖW2à¢6öç7BVævv–æuv†–ÆUG&fVÆ–ærÒ&ööÆVâ‡RæÖ÷fTVævvRbbRçF&vWB“°¢6öç7Bf—&–æuv†–ÆTF—&V7EG&fVÂÒ&ööÆVâ‚RæÖ÷fTVævvRbbRçF&vWBbbRç7Fæ6RÓÒ'G&öÂ"“°¢–b†—46öÖ&EVæ—B‡R’bbRç&WG&VF–ærbb‚RçF&vWBÇÂRç7Fæ6RÓÓÒ'G&öÂ"ÇÂVævv–æuv†–ÆUG&fVÆ–ærÇÂf—&–æuv†–ÆTF—&V7EG&fVÂ’’°¢6öç7B6–v‡BÒf—&–æuv†–ÆTF—&V7EG&fVÀ¢òVæ—D6öÖ&E&ævR‡R¢¢Rç7Fæ6RÓÓÒ&†öÆB ¢òVæ—D6öÖ&E&ævR‡R¢¢RçG—RÓÓÒ&G&öæR"ò3#¢RçG—RÓÓÒ'Fæ²"ò#ƒ¢#3°¢6öç7BæV&'’Òö&§2‚¢æf–ÇFW"€¢†ò’Óà¢òçFVÒÓÒRçFVÒb`¢çVÖ&W"æ—4f–æ—FR†òæ‡’b`¢òæ‡âb`¢ÖF‚æ‡—÷B†òç‚ÒRç‚Âòç’ÒRç’’ÃÒ6–v‡BÀ¢¢ç6÷'B€¢†Â"’Óà¢ÖF‚æ‡—÷B†ç‚ÒRç‚Âç’ÒRç’’Ð¢ÖF‚æ‡—÷B†"ç‚ÒRç‚Â"ç’ÒRç’’À¢•³Ó°¢6öç7BF&vWD–BÒF&vWCòæ–C°¢6öç7BF&vWD—4'V–ÆF–ærÒF&vWD–BÓÒVæFVf–æVBbbræ'V–ÆF–æw2ç6öÖR‚†"’Óâ"æ–BÓÓÒF&vWD–B“°¢–b†æV&'’bb‚F&vWBÇÂF&vWD—4'V–ÆF–ær’’°¢F&vWBÒæV&'“°¢RæVæV×’ÒæV&'’æ–C°¢–b‚Vævv–æuv†–ÆUG&fVÆ–ærbbf—&–æuv†–ÆTF—&V7EG&fVÂ’RçF&vWBÒVæFVf–æVC°¢–b‚f—&–æuv†–ÆTF—&V7EG&fVÂ’RææbÒVæFVf–æVC°¢Ð¢Ð¢–b‡F&vWB’°¢6öç7B6öÖ&EF&vWBÒF&vWC°¢6öç7BBÒÖF‚æ‡—÷B†6öÖ&EF&vWBç‚ÒRç‚Â6öÖ&EF&vWBç’ÒRç’’À¢2Ò7FG5·RçG—UÒÀ¢&ævRÒVæ—D6öÖ&E&ævR‡R“°¢–b†f—&–æuv†–ÆTF—&V7EG&fVÂbbRçF&vWB’°¢6öç7BG&fVÄF—7Fæ6RÒÖF‚æ‡—÷B‡RçF&vWBç‚ÒRç‚ÂRçF&vWBç’ÒRç’“°¢6öç7B'&—fÄF—7Fæ6RÒ”ö&¦V7F—fUG&fVÂòS‚¢C°¢–b‡G&fVÄF—7Fæ6RÂ'&—fÄF—7Fæ6R’°¢RçF&vWBÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢RæÖ÷fTVævvRÒfÇ6S°¢Ræf÷&ÖF–öå7VVBÒVæFVf–æVC°¢ÒVÇ6R°¢Ö÷fUVæ—EF÷v&B†rÂRÂRçF&vWBÂGB“°¢Ð¢Ð¢–b†Bâ&ævR’°¢–b†f—&–æuv†–ÆTF—&V7EG&fVÂ’°¢RæVæV×’ÒVæFVf–æVC°¢F&vWBÒVæFVf–æVC°¢ÒVÇ6R–b‡Rç7Fæ6RÓÓÒ&†öÆB"ÇÂRæv'&—6öæVDB’°¢RæVæV×’ÒVæFVf–æVC°¢ÒVÇ6R°¢6öç7BF&vWD'V–ÆF–ærÒræ'V–ÆF–æw2æf–æB‚†"’Óâ"æ–BÓÓÒ6öÖ&EF&vWBæ–B“°¢Ö÷fUVæ—EF÷v&B†rÂRÂ6öÖ&EF&vWBÂGBÂF&vWD'V–ÆF–æsòæ–B“°¢Ð¢ÒVÇ6R°¢Ræf6–ærÒÖF‚æFã"†6öÖ&EF&vWBç’ÒRç’Â6öÖ&EF&vWBç‚ÒRç‚“°¢GF6µF–ÖW'2æ7W'&VçE·Ræ–EÒÐ¢„çVÖ&W"æ—4f–æ—FR†GF6µF–ÖW'2æ7W'&VçE·Ræ–EÒ¢òGF6µF–ÖW'2æ7W'&VçE·Ræ–EÐ¢¢’ÒGC°¢–b†GF6µF–ÖW'2æ7W'&VçE·Ræ–EÒÃÒ’°¢6öç7Bv4Æ—fRÒ6öÖ&EF&vWBæ‡âÀ¢ÆWfVÂÒRæÆWfVÂÇÂÀ¢FÖvRÒÖF‚æÖ‚ƒÂ2æFÖvR¢ƒ²†ÆWfVÂÒ’¢ã‚’¢7WÇ”×VÇF—Æ–W"‡R’¢Fö7G&–æT×VÇF—Æ–W"†rÂR’¢6÷VçFW$×VÇF—Æ–W"‡RÂ6öÖ&EF&vWB’¢7G'V7GW&T×VÇF—Æ–W"‡RÂ6öÖ&EF&vWB’¢FW'&–ä×VÇF—Æ–W"†rÂRÂ6öÖ&EF&vWB’“°¢6öç7B&VÆ•6†–VÆBÒ—5Væ—B†6öÖ&EF&vWB’bb6öÖ&EF&vWBæv'&—6öæVD@¢ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚†ö&¦V7F—fR’Óâö&¦V7F—fRæ–BÓÓÒ6öÖ&EF&vWBæv'&—6öæVDBbb–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR’¢¢VæFVf–æVC°¢6öç7B7GVÄFÖvRÒÖF‚æÖ–â‡&VÆ•6†–VÆCòæ‡óò6öÖ&EF&vWBæ‡ÂFÖvR“°¢6öç7B—4'V–ÆF–ærÒræ'V–ÆF–æw2ç6öÖR‚†"’Óâ"æ–BÓÓÒ6öÖ&EF&vWBæ–B“°¢6öç7B†—E‚Ò&VÆ•6†–VÆCòç‚óò6öÖ&EF&vWBçƒ°¢6öç7B†—E’Ò&VÆ•6†–VÆCòç’óò6öÖ&EF&vWBç“°¢–b‡&VÆ•6†–VÆB’°¢&VÆ•6†–VÆBæ‡ÒÖF‚æÖ‚ƒÂ&VÆ•6†–VÆBæ‡Ò7GVÄFÖvR“°¢&V6÷&E&VÆ”GF6´ÆW'B†rÂ&VÆ•6†–VÆBÂ6öÖ&EF&vWBçFVÒ“°¢ÒVÇ6R°¢6öÖ&EF&vWBæ‡ÒÖF‚æÖ‚ƒÂ6öÖ&EF&vWBæ‡Ò7GVÄFÖvR“°¢&V6÷&DGF6´ÆW'B†rÂ6öÖ&EF&vWB“°¢Ð¢RæÆ7D6öÖ&DBÒrçF–ÖS°¢–b‚&VÆ•6†–VÆBbb—4'V–ÆF–ærbb—5Væ—B†6öÖ&EF&vWB’’6öÖ&EF&vWBæÆ7D6öÖ&DBÒrçF–ÖS°¢–b†—4'V–ÆF–ærbb6öÖ&EF&vWBçFVÒÓÓÒ'Æ–W""’°¢ræÖF6…7FG2æ&6TFÖvR³Ò7GVÄFÖvS°¢Ð¢ræFÖvTçVÖ&W'2çW6‚‡²ƒ¢†—E‚Â“¢†—E’Ò‚ÂÖ÷VçC¢ÖF‚ç&÷VæB†7GVÄFÖvR’ÂÆ–fS¢ã’ÂFVÓ¢RçFVÒÒ“°¢rç6†÷G2çW6‚‡°¢ƒ¢Rç‚À¢“¢Rç’À¢Gƒ¢†—E‚À¢G“¢†—E’À¢FVÓ¢RçFVÒÀ¢¶–æC¢RçG—RÓÓÒ'Fæ²"ò'6†VÆÂ"¢&'VÆÆWB"À¢Æ–fS¢RçG—RÓÓÒ'Fæ²"òã#"¢ãÀ¢Ö„Æ–fS¢RçG—RÓÓÒ'Fæ²"òã#"¢ãÀ¢Ò“°¢–b‡RçG—RÓÓÒ'G&ö÷W""ÇÂRçG—RÓÓÒ'Fæ²"ÇÂRçG—RÓÓÒ&G&öæR"’°¢RæGF6µVçF–ÂÒrçF–ÖR²‡RçG—RÓÓÒ'Fæ²"òã3¢ã‚“°¢Ð¢–b‡&VÆ•6†–VÆBbb&VÆ•6†–VÆBæ‡ÃÒ’FW7G&÷”–çFVÅ&VÆ’†rÂ&VÆ•6†–VÆBÂ6öÖ&EF&vWBçFVÒ“°¢–b‡v4Æ—fRbb6öÖ&EF&vWBæ‡ÃÒ’°¢–b‚—4'V–ÆF–ærbb—5Væ—B†6öÖ&EF&vWB’’°¢6öç7B÷våfÇVRÒrçVæ—G0¢æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒRçFVÒbb—46öÖ&EVæ—B‡Væ—B’bbVæ—Bæ‡â¢ç&VGV6R‚‡7VÒÂVæ—B’Óâ7VÒ²Væ—D6÷7E·Væ—BçG—UÒÂ“°¢6öç7B÷÷6–æufÇVRÒrçVæ—G0¢æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÒRçFVÒbb—46öÖ&EVæ—B‡Væ—B’bbVæ—Bæ‡â¢ç&VGV6R‚‡7VÒÂVæ—B’Óâ7VÒ²Væ—D6÷7E·Væ—BçG—UÒÂ“°¢–b†÷våfÇVRÂ÷÷6–æufÇVR¢ã‚’°¢6öç7B&÷VçG’ÒÖF‚æÖ‚ƒ#ÂÖF‚ç&÷VæB‡Væ—D6÷7E¶6öÖ&EF&vWBçG—UÒ¢ã#"’“°¢–b‡RçFVÒÓÓÒ'Æ–W""’ræ7&VF—G2³Ò&÷VçG“°¢VÇ6RræVæV×”7&VF—G2³Ò&÷VçG“°¢ræÖW76vRÒG·RçFVÒÓÓÒ'Æ–W""ò$4ôÔT$4²$õTåE’"¢$VæV×’6öÖV&6²&÷VçG’'Ó¢²G¶&÷VçG—Ò7&VF—G2f÷"VÆ–Ö–æF–ær7WW&–÷"f÷&6Ræ°¢Ð¢Ð¢Rç‡Ð¢‡Rç‡ÇÂ’°¢†—4'V–ÆF–æròSR¢6öÖ&EF&vWBçG—RÓÓÒ'Fæ²"òCR¢#R“°¢6öç7BöÆBÒRæÆWfVÂÇÂ°¢RæÆWfVÂÒ‡Rç‡ÇÂ’ãÒƒò2¢‡Rç‡ÇÂ’ãÒsRò"¢°¢–b‡RæÆWfVÂâöÆB’°¢RæÖ‚ÒÖF‚ç&÷VæB‡RæÖ‚¢ã"“°¢Ræ‡ÒÖF‚æÖ–â‡RæÖ‚ÂRæ‡²ÖF‚ç&÷VæB‡RæÖ‚¢ã#R’“°¢ræÖW76vRÒG·RçFVÒÓÓÒ&VæV×’"ò$VæV×’"¢"'ÒG·RçG—RçFõWW$66R‚—Ò&öÖ÷FVBFò&æ²G·RæÆWfVÇÒ(	B³‚RFÖvRÂ³"RÖ‚…ÂG²‡fWFW&å&VvVå&FR‡R’¢’çFôf—†VBƒ—ÒR…÷26öçF–çV÷W2fWFW&â&VvVæW&F–öâæ°¢7–æ2‚“°¢Ð¢Ð¢GF6µF–ÖW'2æ7W'&VçE·Ræ–EÒÒ2ç&FS°¢Ð¢Ð¢ÒVÇ6R–b‡RçF&vWB’°¢6öç7BBÒÖF‚æ‡—÷B‡RçF&vWBç‚ÒRç‚ÂRçF&vWBç’ÒRç’“°¢òòF†RGvòö&¦V7F—fRVæ—G2Ç&VG’†fR÷÷6—FRf÷&ÖF–öâöfg6WG2à¢òò7F÷F†VÒv—F†–â6GW&R&ævR&F†W"F†â7F6¶–æröâöæR—†VÂà¢6öç7B'&—fÄF—7Fæ6RÒ”ö&¦V7F—fUG&fVÂòS‚¢C°¢–b†BÂ'&—fÄF—7Fæ6R’°¢–b‡Rç7Fæ6RÓÓÒ'G&öÂ"bbRçG&öÂ’°¢6öç7BFW7F–æF–öâÒRçG&öÂææW‡BÓÓÒ&"òRçG&öÂæ¢RçG&öÂæ#°¢RçG&öÂææW‡BÒRçG&öÂææW‡BÓÓÒ&"ò&""¢&#°¢RçF&vWBÒ²ââæFW7F–æF–öâÓ°¢RææbÒVæFVf–æVC°¢ÒVÇ6R°¢RçF&vWBÒVæFVf–æVC°¢RææbÒVæFVf–æVC°¢RæÖ÷fTVævvRÒfÇ6S°¢Ræf÷&ÖF–öå7VVBÒVæFVf–æVC°¢Ð¢ÒVÇ6RÖ÷fUVæ—EF÷v&B†rÂRÂRçF&vWBÂGB“°¢Ð¢–b‡RçG—RÓÓÒ'v÷&¶W""bbRçF&vWBbbF&vWB’°¢6öç7B'V–ÆEVWVRÒ²âââ‡Ræ'V–ÆEVWVRÇÂ‡Ræ'V–ÆEF&vWBò·Ræ'V–ÆEF&vWEÒ¢µÒ’•Ó°¢ÆWB6öç7G'V7F–öã¢'V–ÆF–ærÂVæFVf–æVC°¢v†–ÆR†'V–ÆEVWVRæÆVæwF‚bb6öç7G'V7F–öâ’°¢6öç7G'V7F–öâÒræ'V–ÆF–æw2æf–æB€¢†'V–ÆF–ær’Óâ'V–ÆF–æræ–BÓÓÒ'V–ÆEVWVU³Òbb'V–ÆF–ærçFVÒÓÓÒRçFVÒbb'V–ÆF–æræ‡âbb†'V–ÆF–ærç&öw&W72óò’ÂÀ¢“°¢–b‚6öç7G'V7F–öâ’'V–ÆEVWVRç6†–gB‚“°¢Ð¢Ræ'V–ÆEVWVRÒ'V–ÆEVWVS°¢Ræ'V–ÆEF&vWBÒ'V–ÆEVWVU³Ó°¢–b‚6öç7G'V7F–öâbbRçv÷&¶W$ÖöFRÓÓÒ&6öç7G'V7B"’°¢Rçv÷&¶W$ÖöFRÒ&Ö–æR#°¢RææbÒVæFVf–æVC°¢Ð¢–b†6öç7G'V7F–öâ’°¢6öç7B'V–ÆDF—7Fæ6RÒÖF‚æ‡—÷B†6öç7G'V7F–öâç‚ÒRç‚Â6öç7G'V7F–öâç’ÒRç’“°¢–b†'V–ÆDF—7Fæ6Râ'V–ÆF–æu7FG5¶6öç7G'V7F–öâçG—UÒç"²#R’°¢Ö÷fUVæ—EF÷v&B†rÂRÂ6öç7G'V7F–öâÂGBÂ6öç7G'V7F–öâæ–B“°¢ÒVÇ6R°¢Ræf6–ærÒÖF‚æFã"†6öç7G'V7F–öâç’ÒRç’Â6öç7G'V7F–öâç‚ÒRç‚“°¢Ræ'V–ÆF–ærÒG'VS°¢6öç7G'V7F–öâæ6öç7G'V7F–öå7F'FVBÒG'VS°¢Ð¢6öçF–çVS°¢Ð¢6öç7B&VÆ•&W—%F&vWBÒ†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚‡&VÆ’’Óà¢&VÆ’æ–BÓÓÒRç&W—%&VÆ•F&vWBb`¢&VÆ’æ÷væW"ÓÓÒRçFVÒb`¢–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ’’b`¢&VÆ’æ‡Â&VÆ’æÖ‚À¢“°¢–b‚&VÆ•&W—%F&vWB’Rç&W—%&VÆ•F&vWBÒVæFVf–æVC°¢–b‡&VÆ•&W—%F&vWB’°¢6öç7B&W—$F—7Fæ6RÒÖF‚æ‡—÷B‡&VÆ•&W—%F&vWBç‚ÒRç‚Â&VÆ•&W—%F&vWBç’ÒRç’“°¢–b‡&W—$F—7Fæ6Râƒ’°¢Ö÷fUVæ—EF÷v&B†rÂRÂ&VÆ•&W—%F&vWBÂGB“°¢ÒVÇ6R°¢6öç7Bf–Æ&ÆTÆÆ÷’ÒRçFVÒÓÓÒ'Æ–W""òræÆÆ÷’¢ræVæV×”ÆÆ÷“°¢6öç7B&W—"ÒÖF‚æÖ–â€¢&VÆ•&W—%F&vWBæÖ‚Ò&VÆ•&W—%F&vWBæ‡À¢$U•%õ$DR¢GBÀ¢f–Æ&ÆTÆÆ÷’ò$U•%ôÄÄõ•õU%ô…À¢“°¢–b‡&W—"â’°¢&VÆ•&W—%F&vWBæ‡ÒÖF‚æÖ–â‡&VÆ•&W—%F&vWBæÖ‚Â&VÆ•&W—%F&vWBæ‡²&W—"“°¢–b‡RçFVÒÓÓÒ'Æ–W""’ræÆÆ÷’ÒÖF‚æÖ‚ƒÂræÆÆ÷’Ò&W—"¢$U•%ôÄÄõ•õU%ô…“°¢VÇ6RræVæV×”ÆÆ÷’ÒÖF‚æÖ‚ƒÂræVæV×”ÆÆ÷’Ò&W—"¢$U•%ôÄÄõ•õU%ô…“°¢Ræf6–ærÒÖF‚æFã"‡&VÆ•&W—%F&vWBç’ÒRç’Â&VÆ•&W—%F&vWBç‚ÒRç‚“°¢Rç&W—&–ærÒG'VS°¢Ð¢Ð¢6öçF–çVS°¢Ð¢6öç7B&W—%F&vWBÒ²ââæræ'V–ÆF–æw2ÂââærçVæ—G5Òæf–æB€¢†ö&¦V7B’Óà¢ö&¦V7Bæ–BÓÓÒRç&W—%F&vWBb`¢ö&¦V7Bæ–BÓÒRæ–Bb`¢ö&¦V7BçFVÒÓÓÒRçFVÒb`¢ö&¦V7Bæ‡âb`¢ö&¦V7Bæ‡Âö&¦V7BæÖ‚b`¢†—5Væ—B†ö&¦V7B’ÇÂ'V–ÆF–æt÷W&F–öæÂ†ö&¦V7B’’À¢“°¢–b‚&W—%F&vWB’°¢Rç&W—%F&vWBÒVæFVf–æVC°¢–b‡Rçv÷&¶W$ÖöFRÓÓÒ'&W—""bbRæWFõ&W—"’°¢Rçv÷&¶W$ÖöFRÒ&†öÆB#°¢RææbÒVæFVf–æVC°¢6öçF–çVS°¢Ð¢Ð¢–b‡&W—%F&vWB’°¢6öç7B&W—$F—7Fæ6RÒÖF‚æ‡—÷B‡&W—%F&vWBç‚ÒRç‚Â&W—%F&vWBç’ÒRç’“°¢–b‡&W—$F—7Fæ6Râö&¦V7E&F—W2‡&W—%F&vWB’²#B’°¢Ö÷fUVæ—EF÷v&B†rÂRÂ&W—%F&vWBÂGBÂ—5Væ—B‡&W—%F&vWB’òVæFVf–æVB¢&W—%F&vWBæ–B“°¢ÒVÇ6R°¢6öç7Bf–Æ&ÆTÆÆ÷’ÒRçFVÒÓÓÒ'Æ–W""òræÆÆ÷’¢ræVæV×”ÆÆ÷“°¢6öç7B&W—"ÒÖF‚æÖ–â€¢&W—%F&vWBæÖ‚Ò&W—%F&vWBæ‡À¢$U•%õ$DR¢GBÀ¢f–Æ&ÆTÆÆ÷’ò$U•%ôÄÄõ•õU%ô…À¢“°¢–b‡&W—"â’°¢&W—%F&vWBæ‡ÒÖF‚æÖ–â‡&W—%F&vWBæÖ‚Â&W—%F&vWBæ‡²&W—"“°¢–b‡RçFVÒÓÓÒ'Æ–W""’ræÆÆ÷’ÒÖF‚æÖ‚ƒÂræÆÆ÷’Ò&W—"¢$U•%ôÄÄõ•õU%ô…“°¢VÇ6RræVæV×”ÆÆ÷’ÒÖF‚æÖ‚ƒÂræVæV×”ÆÆ÷’Ò&W—"¢$U•%ôÄÄõ•õU%ô…“°¢Ræf6–ærÒÖF‚æFã"‡&W—%F&vWBç’ÒRç’Â&W—%F&vWBç‚ÒRç‚“°¢Rç&W—&–ærÒG'VS°¢Ð¢Ð¢6öçF–çVS°¢Ð¢–b‡RæWFõ&W—"’6öçF–çVS°¢–b‡Rçv÷&¶W$ÖöFRÓÓÒ&†öÆB"’6öçF–çVS°¢òò&RÖWfÇVFRF†RG&÷ÖöfbWfW'’Ö–æ–ærF–6²6òv÷&¶W'2W6RF†P¢òò6Æ÷6W7B6ö×ÆWFVB&Vf–æW'’–ç7FVBöb7F––ærF–VBFòv†–6†WfW"öæP¢òò†VæVBFò&R7&VFVBf—'7BâFW7G&÷–VBæBVæf–æ—6†VB&Vf–æW&–W0¢òòF—6V"g&öÒ6öç6–FW&F–öâ–ÖÖVF–FVÇ’à¢6öç7B&VbÒræ'V–ÆF–æw0¢æf–ÇFW"‚†"’Óâ"çFVÒÓÓÒRçFVÒbb"çG—RÓÓÒ'&Vf–æW'’"bb'V–ÆF–æt÷W&F–öæÂ†"’¢ç6÷'B€¢†Â"’Óà¢ÖF‚æ‡—÷B†ç‚ÒRç‚Âç’ÒRç’’Ð¢ÖF‚æ‡—÷B†"ç‚ÒRç‚Â"ç’ÒRç’’À¢•³Ó°¢–b‡&Vb’°¢6öç7B6&vô¶–æBÒRæ6''––æuG—RÇÂ&7&VF—G2#°¢6öç7B76–væVD7'—7FÂÒçVÖ&W"æ—4–çFVvW"‡Rç&W6÷W&6UF&vWB¢òræ7'—7FÇ5·Rç&W6÷W&6UF&vWBÐ¢¢VæFVf–æVC°¢–b„çVÖ&W"æ—4–çFVvW"‡Rç&W6÷W&6UF&vWB’bb‚76–væVD7'—7FÂÇÂ76–væVD7'—7FÂæÖ÷VçBÃÒ’’°¢Rç&W6÷W&6UF&vWBÒVæFVf–æVC°¢Ð¢6öç7B7F—fT76–væVD7'—7FÂÒ76–væVD7'—7FÂbb76–væVD7'—7FÂæÖ÷VçBâ ¢ò76–væVD7'—7FÀ¢¢VæFVf–æVC°¢6öç7B7'—7FÂÒ7F—fT76–væVD7'—7FÂÇÂræ7'—7FÇ0¢æf–ÇFW"‚‡‚’Óâ‚æÖ÷VçBâbb‚‡Ræ6''––ærÇÂ’ÇÂ‡‚æ¶–æBÇÂ&7&VF—G2"’ÓÓÒ6&vô¶–æB’¢ç6÷'B€¢†Â"’Óà¢„ÖF‚æ‡—÷B†ç‚ÒRç‚Âç’ÒRç’’²ÖF‚æ‡—÷B†ç‚Ò&Vbç‚Âç’Ò&Vbç’’¢ã3R’Ð¢„ÖF‚æ‡—÷B†"ç‚ÒRç‚Â"ç’ÒRç’’²ÖF‚æ‡—÷B†"ç‚Ò&Vbç‚Â"ç’Ò&Vbç’’¢ã3R’À¢•³Ó°¢6öç7B76–væVD¶–æBÒ7F—fT76–væVD7'—7FÃòæ¶–æBÇÂ&7&VF—G2#°¢6öç7BVæÆöD&Vf÷&T76–væVDÖ–æ–ærÒ&ööÆVâ€¢7F—fT76–væVD7'—7FÂbb‡Ræ6''––ærÇÂ’âbb6&vô¶–æBÓÒ76–væVD¶–æBÀ¢“°¢–b‚‡Ræ6''––ærÇÂ’ãÒÇÂVæÆöD&Vf÷&T76–væVDÖ–æ–ær’°¢6öç7BBÒÖF‚æ‡—÷B‡&Vbç‚ÒRç‚Â&Vbç’ÒRç’“°¢–b†BÂSR’°¢–b‡RçFVÒÓÓÒ'Æ–W""’°¢–b†6&vô¶–æBÓÓÒ&ÆÆ÷’"’ræÆÆ÷’³ÒRæ6''––ær°¢VÇ6Rræ7&VF—G2³ÒRæ6''––ær°¢ÒVÇ6R–b†6&vô¶–æBÓÓÒ&ÆÆ÷’"’ræVæV×”ÆÆ÷’³ÒRæ6''––ær°¢VÇ6RræVæV×”7&VF—G2³ÒRæ6''––ær°¢Ræ6''––ærÒ°¢Ræ6''––æuG—RÒVæFVf–æVC°¢7–æ2‚“°¢ÒVÇ6R°¢Ö÷fUVæ—EF÷v&B†rÂRÂ&VbÂGBÂ&Vbæ–B“°¢Ð¢ÒVÇ6R–b†7'—7FÂ’°¢6öç7BBÒÖF‚æ‡—÷B†7'—7FÂç‚ÒRç‚Â7'—7FÂç’ÒRç’“°¢–b†BÂ3R’°¢6öç7BF¶RÒÖF‚æÖ–â†7'—7FÂæÖ÷VçBÂ3"¢GB“°¢7'—7FÂæÖ÷VçBÓÒF¶S°¢Ræ6''––ærÒ‡Ræ6''––ærÇÂ’²F¶S°¢Ræ6''––æuG—RÒ7'—7FÂæ¶–æBÇÂ&7&VF—G2#°¢Ræf6–ærÒÖF‚æFã"†7'—7FÂç’ÒRç’Â7'—7FÂç‚ÒRç‚“°¢RæÖ–æ–ærÒG'VS°¢ÒVÇ6R°¢Ö÷fUVæ—EF÷v&B†rÂRÂ7'—7FÂÂGB“°¢Ð¢Ð¢Ð¢Ð¢Ð¢òò6VçG&–W2&RWFöÖF–2FVfVç6W2âF†W’6†ö÷BöæÇ’v†BF†W’6â6÷fW#°¢òòF†W’æWfW"&÷f–FR†–FFVâ6öÖ&B&öçW2FòF†RÆ–W"à¢f÷"†6öç7BGW'&WBöbræ'V–ÆF–æw2æf–ÇFW"€¢†"’Óâ"çG—RÓÓÒ'GW'&WB"bb†"ç&öw&W72ÓÓÒVæFVf–æVBÇÂ"ç&öw&W72ãÒ’bb"æ‡âÀ¢’’°¢6öç7BF&vWBÒrçVæ—G0¢æf–ÇFW"€¢‡R’Óà¢RçFVÒÓÒGW'&WBçFVÒb`¢Ræ‡âb`¢ÖF‚æ‡—÷B‡Rç‚ÒGW'&WBç‚ÂRç’ÒGW'&WBç’’ÃÒGW'&WE7FG2ç&ævRÀ¢¢ç6÷'B€¢†Â"’Óà¢ÖF‚æ‡—÷B†ç‚ÒGW'&WBç‚Âç’ÒGW'&WBç’’Ð¢ÖF‚æ‡—÷B†"ç‚ÒGW'&WBç‚Â"ç’ÒGW'&WBç’’À¢•³Ó°¢–b‚F&vWB’6öçF–çVS°¢GW'&WBçGW'&WDf6–ærÒÖF‚æFã"‡F&vWBç’ÒGW'&WBç’ÂF&vWBç‚ÒGW'&WBç‚“°¢GF6µF–ÖW'2æ7W'&VçE·GW'&WBæ–EÒÐ¢„çVÖ&W"æ—4f–æ—FR†GF6µF–ÖW'2æ7W'&VçE·GW'&WBæ–EÒ¢òGF6µF–ÖW'2æ7W'&VçE·GW'&WBæ–EÐ¢¢’ÒGC°¢–b†GF6µF–ÖW'2æ7W'&VçE·GW'&WBæ–EÒÃÒ’°¢6öç7B&VÆ•6†–VÆBÒF&vWBæv'&—6öæVD@¢ò†ræö&¦V7F—fW2ÇÂµÒ’æf–æB‚†ö&¦V7F—fR’Óâö&¦V7F—fRæ–BÓÓÒF&vWBæv'&—6öæVDBbb–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR’¢¢VæFVf–æVC°¢6öç7BFÖvRÒÖF‚æÖ–â‡&VÆ•6†–VÆCòæ‡óòF&vWBæ‡ÂGW'&WE7FG2æFÖvR“°¢6öç7B†—E‚Ò&VÆ•6†–VÆCòç‚óòF&vWBçƒ°¢6öç7B†—E’Ò&VÆ•6†–VÆCòç’óòF&vWBç“°¢–b‡&VÆ•6†–VÆB’°¢&VÆ•6†–VÆBæ‡ÒÖF‚æÖ‚ƒÂ&VÆ•6†–VÆBæ‡ÒFÖvR“°¢&V6÷&E&VÆ”GF6´ÆW'B†rÂ&VÆ•6†–VÆBÂF&vWBçFVÒ“°¢ÒVÇ6R°¢F&vWBæ‡ÒÖF‚æÖ‚ƒÂF&vWBæ‡ÒFÖvR“°¢&V6÷&DGF6´ÆW'B†rÂF&vWB“°¢F&vWBæÆ7D6öÖ&DBÒrçF–ÖS°¢Ð¢ræFÖvTçVÖ&W'2çW6‚‡²ƒ¢†—E‚Â“¢†—E’Ò‚ÂÖ÷VçC¢ÖF‚ç&÷VæB†FÖvR’ÂÆ–fS¢ã’ÂFVÓ¢GW'&WBçFVÒÒ“°¢rç6†÷G2çW6‚‡²ƒ¢GW'&WBç‚Â“¢GW'&WBç’ÂGƒ¢†—E‚ÂG“¢†—E’ÂFVÓ¢GW'&WBçFVÒÂ¶–æC¢&'VÆÆWB"ÂÆ–fS¢ã"ÂÖ„Æ–fS¢ã"Ò“°¢GW'&WBçGW'&WDf—&UVçF–ÂÒrçF–ÖR²ãc°¢–b‡&VÆ•6†–VÆBbb&VÆ•6†–VÆBæ‡ÃÒ’FW7G&÷”–çFVÅ&VÆ’†rÂ&VÆ•6†–VÆBÂF&vWBçFVÒ“°¢GF6µF–ÖW'2æ7W'&VçE·GW'&WBæ–EÒÒGW'&WE7FG2ç&FS°¢Ð¢Ð¢f÷"†ÆWB’Ò²’ÂrçVæ—G2æÆVæwFƒ²’²²¢f÷"†ÆWB¢Ò’²²¢ÂrçVæ—G2æÆVæwFƒ²¢²²’°¢6öç7BÒrçVæ—G5¶•ÒÂ"ÒrçVæ—G5¶¥Ó°¢–b†æv'&—6öæVDBÇÂ"æv'&—6öæVDB’6öçF–çVS°¢6öç7BBÒÖF‚æ‡—÷B†"ç‚Òç‚Â"ç’Òç’“°¢6öç7BÖ–âÒ‡7FG5¶çG—UÒç"²7FG5¶"çG—UÒç"’¢ãƒ°¢–b†BÂÖ–â’°¢6öç7BævÆRÒBâãòÖF‚æFã"†"ç’Òç’Â"ç‚Òç‚’¢†æ–B²"æ–B’¢"ã3““°¢6öç7B6†–gBÒ†Ö–âÒB’ò"²ãS°¢6öç7BG‚ÒÖF‚æ6÷2†ævÆR’¢6†–gBÂG’ÒÖF‚ç6–â†ævÆR’¢6†–gC°¢6öç7Bf—†VBÒçG—RÓÓÒ&6—†W""bb†æ6—†W$ÖöFRÇÂ&Öö&–ÆR"’ÓÒ&Öö&–ÆR#°¢6öç7B$f—†VBÒ"çG—RÓÓÒ&6—†W""bb†"æ6—†W$ÖöFRÇÂ&Öö&–ÆR"’ÓÒ&Öö&–ÆR#°¢–b‚f—†VBbb$f—†VB’°¢ç‚ÓÒGƒ²ç’ÓÒG“²"ç‚³ÒGƒ²"ç’³ÒG“°¢ÒVÇ6R–b‚f—†VB’°¢ç‚ÓÒG‚¢#²ç’ÓÒG’¢#°¢ÒVÇ6R–b‚$f—†VB’°¢"ç‚³ÒG‚¢#²"ç’³ÒG’¢#°¢Ð¢Ð¢Ð¢f÷"†6öç7BRöbrçVæ—G2¢f÷"†6öç7B"öbræ'V–ÆF–æw2’°¢–b‡RçG—RÓÓÒ&G&öæR"ÇÂRæv'&—6öæVDBÇÂ‡RçG—RÓÓÒ&6—†W""bb‡Ræ6—†W$ÖöFRÇÂ&Öö&–ÆR"’ÓÒ&Öö&–ÆR"’’6öçF–çVS°¢6öç7BBÒÖF‚æ‡—÷B‡Rç‚Ò"ç‚ÂRç’Ò"ç’“°¢6öç7BÖ–âÒ7FG5·RçG—UÒç"²'V–ÆF–æu7FG5¶"çG—UÒç"¢ãs#°¢–b†BÂÖ–â’°¢6öç7BævÆRÒBâãòÖF‚æFã"‡Rç’Ò"ç’ÂRç‚Ò"ç‚’¢Ræ–B¢"ã3““°¢6öç7B6†–gBÒÖ–âÒB²ãS°¢Rç‚³ÒÖF‚æ6÷2†ævÆR’¢6†–gC²Rç’³ÒÖF‚ç6–â†ævÆR’¢6†–gC°¢Ð¢Ð¢f÷"†6öç7BRöbrçVæ—G2’°¢–b‡RçG—RÓÓÒ&G&öæR"ÇÂRæv'&—6öæVDBÇÂ‡RçG—RÓÓÒ&6—†W""bb‡Ræ6—†W$ÖöFRÇÂ&Öö&–ÆR"’ÓÒ&Öö&–ÆR"’’6öçF–çVS°¢f÷"†6öç7Bö&¦V7F—fRöbræö&¦V7F—fW2ÇÂµÒ’°¢6öç7BBÒÖF‚æ‡—÷B‡Rç‚Òö&¦V7F—fRç‚ÂRç’Òö&¦V7F—fRç’“°¢6öç7BÖ–âÒ7FG5·RçG—UÒç"²3c°¢–b†BÂÖ–â’°¢6öç7BævÆRÒBâãòÖF‚æFã"‡Rç’Òö&¦V7F—fRç’ÂRç‚Òö&¦V7F—fRç‚’¢Ræ–B¢"ã3““°¢Rç‚³ÒÖF‚æ6÷2†ævÆR’¢†Ö–âÒB²ãR“°¢Rç’³ÒÖF‚ç6–â†ævÆR’¢†Ö–âÒB²ãR“°¢Ð¢Ð¢f÷"†6öç7B&–FvRöbDU%$”åõ$”DtU2’°¢6öç7BBÒÖF‚æ‡—÷B‡Rç‚Ò&–FvRç‚ÂRç’Ò&–FvRç’“°¢6öç7BÖ–âÒ7FG5·RçG—UÒç"²&–FvRç"¢ãƒ#°¢–b†BÂÖ–â’°¢6öç7BævÆRÒBâãòÖF‚æFã"‡Rç’Ò&–FvRç’ÂRç‚Ò&–FvRç‚’¢Ræ–B¢"ã3““°¢Rç‚³ÒÖF‚æ6÷2†ævÆR’¢†Ö–âÒB²ã"“°¢Rç’³ÒÖF‚ç6–â†ævÆR’¢†Ö–âÒB²ã"“°¢Ð¢Ð¢f÷"†6öç7B7'—7FÂöbræ7'—7FÇ2æf–ÇFW"‚†æöFR’ÓâæöFRæÖ÷VçBâ’’°¢òòFW÷6—G2F†BvVæW&FVB&W6–FR&×7F’6öÆÆV7F–&ÆRÂ'WBF†W’Fð¢òòæ÷Bæ'&÷rF†RöæÇ’ÆVvÂVçG&æ6R÷"–âVæ—G2v–ç7BF†R6Æ–fbà¢–b†–åÆFVU&×ÆæR†7'—7FÂÂ#‚’’6öçF–çVS°¢6öç7BBÒÖF‚æ‡—÷B‡Rç‚Ò7'—7FÂç‚ÂRç’Ò7'—7FÂç’“°¢6öç7BÖ–âÒ7FG5·RçG—UÒç"²ƒ°¢–b†BÂÖ–â’°¢6öç7BævÆRÒBâãòÖF‚æFã"‡Rç’Ò7'—7FÂç’ÂRç‚Ò7'—7FÂç‚’¢Ræ–B¢"ã3““°¢Rç‚³ÒÖF‚æ6÷2†ævÆR’¢†Ö–âÒB²ãR“°¢Rç’³ÒÖF‚ç6–â†ævÆR’¢†Ö–âÒB²ãR“°¢Ð¢Ð¢Ð¢6öç7BFVEVæ—G2ÒrçVæ—G2æf–ÇFW"‚‡R’ÓâRæ‡ÃÒ“°¢f÷"†6öç7BRöbFVEVæ—G2’°¢–b‡RçFVÒÓÓÒ'Æ–W""’ræÖF6…7FG2çVæ—G4Æ÷7B²³°¢VÇ6RræÖF6…7FG2æVæV×•Væ—G4FW7G&÷–VB²³°¢Ð¢rçVæ—G2ÒrçVæ—G2æf–ÇFW"‚‡R’ÓâRæ‡â“°¢ræÖF6…7FG2çV´&×’ÒÖF‚æÖ‚†ræÖF6…7FG2çV´&×’ÂrçVæ—G2æf–ÇFW"‚‡R’ÓâRçFVÒÓÓÒ'Æ–W""bb—46öÖ&EVæ—B‡R’’æÆVæwF‚“°¢ræ'V–ÆF–æw2Òræ'V–ÆF–æw2æf–ÇFW"‚†"’Óâ"æ‡â“°¢–b†×VÇF—Æ–W%&öÆRæ7W'&VçBÓÓÒ'6öÆò"bbrçF–ÖRãÒræ•F†–æ´B’°¢ræ•F†–æ´BÒrçF–ÖR²ã#°¢'Vä’†r“°¢Ð¢–b‚ræ'V–ÆF–æw2ç6öÖR‚†"’Óâ"çFVÒÓÓÒ'Æ–W""bb"çG—RÓÓÒ&‡"’’°¢ræ÷fW"Ò&Æ÷7B#°¢–b†×VÇF—Æ–W%&öÆRæ7W'&VçBÓÓÒ'6öÆò"bbrç&W7VÇE&V6÷&FVB’°¢6fU&W7VÇB‚&Æ÷7B"Âr“°¢6WD6öÖÖæE&öf–ÆR‡&VD6öÖÖæE&öf–ÆR‚’“°¢rç&W7VÇE&V6÷&FVBÒG'VS°¢Ð¢7–æ2‚“°¢Ð¢–b‚ræ'V–ÆF–æw2ç6öÖR‚†"’Óâ"çFVÒÓÓÒ&VæV×’"bb"çG—RÓÓÒ&‡"’’°¢ræ÷fW"Ò'vöâ#°¢–b†×VÇF—Æ–W%&öÆRæ7W'&VçBÓÓÒ'6öÆò"bbrç&W7VÇE&V6÷&FVB’°¢6fU&W7VÇB‚'vöâ"Âr“°¢6WD6öÖÖæE&öf–ÆR‡&VD6öÖÖæE&öf–ÆR‚’“°¢rç&W7VÇE&V6÷&FVBÒG'VS°¢Ð¢7–æ2‚“°¢Ð¢–b†×VÇF—Æ–W%&öÆRæ7W'&VçBÓÓÒ&†÷7B"bbVW"æ7W'&VçCòæ÷VâbbrçF–ÖRÒæWGv÷&µ6æ6†÷DBæ7W'&VçBãÒã’°¢æWGv÷&µ6æ6†÷DBæ7W'&VçBÒrçF–ÖS°¢VW%6VæB‡²G—S¢'7FFR"ÂvÖS¢rÒ“°¢Ð¢Ð ¢gVæ7F–öâ'Vä’†s¢vÖR’°¢6öç7B’ÒÖF‚æÖ‚ƒãƒ"ÂÖF‚æÖ–âƒã‚ÂræFF—fRÇÂ’“°¢6öç7BV6–W7BÒ—4V6–W7B†’“°¢òòF†R’6â7F–ÆÂF†–æ²6öçF–çV÷W6Ç’Â'WBÖVæ–ævgVÂFV6—6–öç2&P¢òò&FRÖÆ–Ö—FVB6ò—B6ææ÷B–ç7FçFÇ’6†–âW&fV7B&öGV7F–öâæBGF6·2à¢òòÆWfVÂvWG2&÷Vv†Ç’öæRFV6—6–öâWfW'’B6V6öæG3²W‡W'BvWG2öæR÷6V2à¢6öç7B7F–öç5W$Ö–çWFRÒV6–W7BòR¢ÖF‚ç&÷VæBƒR²‚†’Òãƒ"’òã3b’¢CR“°¢–b†rçF–ÖRÂ†ræ”7F–öäBóò’’&WGW&ã°¢6öç7BæW‡D7F–öâÒ‚’Óâ²ræ”7F–öäBÒrçF–ÖR²cò7F–öç5W$Ö–çWFS²Ó°¢6öç7BVæV×”'V–ÆF–æw2Òræ'V–ÆF–æw2æf–ÇFW"‚†"’Óâ"çFVÒÓÓÒ&VæV×’"’À¢‡ÒVæV×”'V–ÆF–æw2æf–æB‚†"’Óâ"çG—RÓÓÒ&‡"’À¢&VbÒVæV×”'V–ÆF–æw2æf–æB‚†"’Óâ"çG—RÓÓÒ'&Vf–æW'’"’À¢&'&6·2ÒVæV×”'V–ÆF–æw2æf–æB‚†"’Óâ"çG—RÓÓÒ&&'&6·2"’À¢v÷&¶W'2ÒrçVæ—G2æf–ÇFW"€¢‡R’ÓâRçFVÒÓÓÒ&VæV×’"bbRçG—RÓÓÒ'v÷&¶W""À¢’À¢&×’ÒrçVæ—G2æf–ÇFW"‚‡R’ÓâRçFVÒÓÓÒ&VæV×’"bb—46öÖ&EVæ—B‡R’“°¢–b‚‡’&WGW&ã°¢–b‚ræVæV×”Fö7G&–æRbbræVæV×”Fö7G&–æU&öGV7F–öâbbræVæV×”f÷'F–g•&öGV7F–öâbb‡ç&öGV7F–öâbbræVæV×”–çFVÂãÒDô5E$”äUô”åDTÅô4õ5B’°¢6öç7BÆ–W%Fæ·2ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bbVæ—BçG—RÓÓÒ'Fæ²"’æÆVæwFƒ°¢6öç7BÆ–W%G&ö÷W'2ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bbVæ—BçG—RÓÓÒ'G&ö÷W""’æÆVæwFƒ°¢6öç7B6†ö–6S¢Fö7G&–æRÒÆ–W%Fæ·2âÆ–W%G&ö÷W'2ò&—""¢&&Ö÷"#°¢ræVæV×”–çFVÂÓÒDô5E$”äUô”åDTÅô4õ5C°¢ræVæV×”Fö7G&–æU&öGV7F–öâÒ²G—S¢6†ö–6RÂVÆ6VC¢ÂGW&F–öã¢Dô5E$”äUôEU$D”ôâÓ°¢æW‡D7F–öâ‚“°¢&WGW&ã°¢Ð¢–b‚&VbbbræVæV×”ÆÆ÷’ãÒ%T”ÄEô4õ5Bç&Vf–æW'’’°¢ræVæV×”ÆÆ÷’ÓÒ%T”ÄEô4õ5Bç&Vf–æW'“°¢6öç7B'V–ÆF–æs¢'V–ÆF–ærÒ°¢–C¢rææW‡D–B²²À¢FVÓ¢&VæV×’"À¢G—S¢'&Vf–æW'’"À¢ƒ¢TäTÕ•ô$4Rç‚Ò#À¢“¢TäTÕ•ô$4Rç’Ò3RÀ¢‡¢À¢Öƒ¢CCÀ¢&öw&W73¢À¢6öç7G'V7F–öäGW&F–öã¢'V–ÆF–æt'V–ÆEF–ÖRç&Vf–æW'’À¢6öç7G'V7F–öå7F'FVC¢fÇ6RÀ¢Ó°¢ræ'V–ÆF–æw2çW6‚†'V–ÆF–ær“°¢6öç7B'V–ÆFW"Ò²ââçv÷&¶W'5Òç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚Ò'V–ÆF–ærç‚Âç’Ò'V–ÆF–ærç’’ÒÖF‚æ‡—÷B†"ç‚Ò'V–ÆF–ærç‚Â"ç’Ò'V–ÆF–ærç’’•³Ó°¢–b†'V–ÆFW"’VWVUv÷&¶W$6öç7G'V7F–öâ†'V–ÆFW"Â'V–ÆF–æræ–B“°¢–b†—5f—6–&ÆR†rÂ'V–ÆF–ærÂ'V–ÆF–æu7FG2ç&Vf–æW'’ç"’’ræÖW76vRÒ$VæV×’&Vf–æW'’6öç7G'V7F–öâFWFV7FVBâ#°¢æW‡D7F–öâ‚“°¢7–æ2‚“°¢&WGW&ã°¢Ð¢–b‚&'&6·2bbræVæV×”ÆÆ÷’ãÒ%T”ÄEô4õ5Bæ&'&6·2’°¢ræVæV×”ÆÆ÷’ÓÒ%T”ÄEô4õ5Bæ&'&6·3°¢6öç7B'V–ÆF–æs¢'V–ÆF–ærÒ°¢–C¢rææW‡D–B²²À¢FVÓ¢&VæV×’"À¢G—S¢&&'&6·2"À¢ƒ¢TäTÕ•ô$4Rç‚ÒƒÀ¢“¢TäTÕ•ô$4Rç’²3À¢‡¢À¢Öƒ¢S#À¢&öw&W73¢À¢6öç7G'V7F–öäGW&F–öã¢'V–ÆF–æt'V–ÆEF–ÖRæ&'&6·2À¢6öç7G'V7F–öå7F'FVC¢fÇ6RÀ¢Ó°¢ræ'V–ÆF–æw2çW6‚†'V–ÆF–ær“°¢6öç7B'V–ÆFW"Ò²ââçv÷&¶W'5Òç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚Ò'V–ÆF–ærç‚Âç’Ò'V–ÆF–ærç’’ÒÖF‚æ‡—÷B†"ç‚Ò'V–ÆF–ærç‚Â"ç’Ò'V–ÆF–ærç’’•³Ó°¢–b†'V–ÆFW"’VWVUv÷&¶W$6öç7G'V7F–öâ†'V–ÆFW"Â'V–ÆF–æræ–B“°¢–b†—5f—6–&ÆR†rÂ'V–ÆF–ærÂ'V–ÆF–æu7FG2æ&'&6·2ç"’’ræÖW76vRÒ$VæV×’&'&6·26öç7G'V7F–öâFWFV7FVBâ#°¢æW‡D7F–öâ‚“°¢7–æ2‚“°¢&WGW&ã°¢Ð¢6öç7Bv÷&¶W$vöÂÒÖF‚ç&÷VæBƒ2¢’“°¢–b‡v÷&¶W'2æÆVæwF‚Âv÷&¶W$vöÂbbræVæV×”7&VF—G2ãÒSbb‡ç&öGV7F–öâbb†‡æ6ööÆF÷vâÇÂ’bbræVæV×”Fö7G&–æU&öGV7F–öâbbræVæV×”f÷'F–g•&öGV7F–öâ’°¢ræVæV×”7&VF—G2ÓÒS°¢‡ç&öGV7F–öâÒ°¢G—S¢'v÷&¶W""À¢VÆ6VC¢À¢GW&F–öã¢&öGV7F–öäGW&F–öäf÷"†rÂ&VæV×’"Â'v÷&¶W""’À¢Ó°¢æW‡D7F–öâ‚“°¢&WGW&ã°¢Ð¢–b†&'&6·2bb'V–ÆF–æt÷W&F–öæÂ†&'&6·2’bb&'&6·2ç&öGV7F–öâbb†&'&6·2æ6ööÆF÷vâÇÂ’’°¢6öç7BFæ´6†æ6RÐ¢&×’æÆVæwF‚ãÒÖF‚ç&÷VæBƒR¢’’bbræVæV×”7&VF—G2ãÒCbbrçvfRâ°¢6öç7BÆ–W$&Ö÷"ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bbVæ—BçG—RÓÓÒ'Fæ²"’æÆVæwFƒ°¢6öç7BG&öæT6†æ6RÒÆ–W$&Ö÷"ãÒ"bbræVæV×”7&VF—G2ãÒVæ—D6÷7BæG&öæS°¢–b‡Fæ´6†æ6R’°¢ræVæV×”7&VF—G2ÓÒC°¢&'&6·2ç&öGV7F–öâÒ°¢G—S¢'Fæ²"À¢VÆ6VC¢À¢GW&F–öã¢&öGV7F–öäGW&F–öäf÷"†rÂ&VæV×’"Â'Fæ²"’À¢Ó°¢æW‡D7F–öâ‚“°¢ÒVÇ6R–b†G&öæT6†æ6R’°¢ræVæV×”7&VF—G2ÓÒVæ—D6÷7BæG&öæS°¢&'&6·2ç&öGV7F–öâÒ°¢G—S¢&G&öæR"À¢VÆ6VC¢À¢GW&F–öã¢&öGV7F–öäGW&F–öäf÷"†rÂ&VæV×’"Â&G&öæR"’À¢Ó°¢æW‡D7F–öâ‚“°¢ÒVÇ6R–b†ræVæV×”7&VF—G2ãÒ#R’°¢ræVæV×”7&VF—G2ÓÒ#S°¢&'&6·2ç&öGV7F–öâÒ°¢G—S¢'G&ö÷W""À¢VÆ6VC¢À¢GW&F–öã¢&öGV7F–öäGW&F–öäf÷"†rÂ&VæV×’"Â'G&ö÷W""’À¢Ó°¢æW‡D7F–öâ‚“°¢Ð¢Ð¢6öç7Bö&¦V7F—fUF&vWBÒ†ræö&¦V7F—fW2ÇÂµÒ¢æf–ÇFW"‚†ö&¦V7F—fR’Óâö&¦V7F—fRæ÷væW"ÓÒ&VæV×’"bb–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR’¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚Ò‡ç‚Âç’Ò‡ç’’ÒÖF‚æ‡—÷B†"ç‚Ò‡ç‚Â"ç’Ò‡ç’’•³Ó°¢6öç7Bö&¦V7F—fU7VBÒ&×’æf–ÇFW"‚‡Væ—B’ÓâVæ—Bæv'&—6öæVDBbbVæ—BæVæV×’bbVæ—BçF&vWB’ç6Æ–6RƒÂ"“°¢–b†rçF–ÖRãÒ3bbö&¦V7F—fUF&vWBbbö&¦V7F—fU7VBæÆVæwF‚ãÒ"’°¢ö&¦V7F—fU7VBæf÷$V6‚‚‡Væ—BÂ–æFW‚’Óâ°¢Væ—BçF&vWBÒ²ƒ¢ö&¦V7F—fUF&vWBç‚²†–æFW‚ò#‚¢Ó#‚’Â“¢ö&¦V7F—fUF&vWBç’Ó°¢Væ—Bæv'&—6öåF&vWBÒVæ—BçG—RÓÓÒ'G&ö÷W""òö&¦V7F—fUF&vWBæ–B¢VæFVf–æVC°¢Væ—BæÖ÷fTVævvRÒö&¦V7F—fUF&vWBæ÷væW"ÓÓÒ'Æ–W"#°¢–b‡Væ—BæÖ÷fTVævvR’Væ—Bç7Fæ6RÒ'W'7VR#°¢Væ—BææbÒVæFVf–æVC°¢Ò“°¢æW‡D7F–öâ‚“°¢&WGW&ã°¢Ð¢6öç7BÆ—fUF&vWG2ÒæWr6WB€¢²ââærçVæ—G2Âââæræ'V–ÆF–æw5Ð¢æf–ÇFW"‚†ò’ÓâòçFVÒÓÓÒ'Æ–W""bbòæ‡â¢æÖ‚†ò’Óâòæ–B’À¢“°¢6öç7B&VG’Ò&×’æf–ÇFW"‚‡R’ÓâRæv'&—6öæVDBbb‚RæVæV×’ÇÂÆ—fUF&vWG2æ†2‡RæVæV×’’’“°¢òòÆWfVÂ—2ÖVçBFòFV6‚F†RvÖRÂæ÷BFVÖæBâ–ÖÖVF–FRÆÂÖ–âà¢òòv—fRF†RÆ–W"Æöær÷Væ–æræB&WV—&RvVçV–æVÇ’f—6–&ÆR&×’à¢6öç7B&WV—&VBÒV6–W7@¢òÖF‚æÖ–âƒ"ÂÖF‚æÖ‚ƒ‚Â‚²rçvfR¢"’¢¢ÖF‚æÖ–âƒBÂÖF‚æÖ‚ƒBÂÖF‚ç&÷VæB‚ƒb²rçvfR¢"’¢’’’“°¢6öç7B÷Væ–ætw&6RÒV6–W7BbbrçvfRÓÓÒò#C¢°¢–b†rçF–ÖRãÒÖF‚æÖ‚†ræ”GF6´BÂ÷Væ–ætw&6R’bb&VG’æÆVæwF‚ãÒ&WV—&VB’°¢rçvfR²³°¢ræ”GF6´BÒrçF–ÖR²†V6–W7@¢òÖF‚æÖ‚ƒSÂ#ÒrçvfR¢‚¢¢ÖF‚æÖ‚ƒsRÂƒ#RÒrçvfR¢R’ò’’“°¢rçvfTBÒræ”GF6´C°¢6öç7BF&vWBÐ¢ræ'V–ÆF–æw2æf–æB‚†"’Óâ"çFVÒÓÓÒ'Æ–W""bb"çG—RÓÓÒ&‡"’ÇÀ¢ræ'V–ÆF–æw2æf–æB‚†"’Óâ"çFVÒÓÓÒ'Æ–W""“°¢–b‡F&vWB¢&VG’æf÷$V6‚‚‡RÂ’’Óâ°¢RæVæV×’ÒF&vWBæ–C°¢RçF&vWBÒ°¢ƒ¢F&vWBç‚²†’R2’¢#BÀ¢“¢F&vWBç’²ÖF‚æfÆö÷"†’ò2’¢#BÀ¢Ó°¢RææbÒVæFVf–æVC°¢Ò“°¢ræÖW76vRÒ”ä4ôÔ”äs¢VæV×’76VÇBG¶rçvfWÒ(	BVæV×’f÷&6W2&RGfæ6–æv°¢æW‡D7F–öâ‚“°¢7–æ2‚“°¢Ð¢Ð ¢gVæ7F–öâG&r‚’°¢6öç7B2Ò6çf2æ7W'&VçC°¢–b‚2’&WGW&ã°¢6öç7B‚Ò2ævWD6öçFW‡B‚#&B"’À¢rÒvÖRæ7W'&VçBÀ¢rÒ2æ6Æ–VçEv–GF‚À¢‚Ò2æ6Æ–VçD†V–v‡C°¢‚æ6ÆV%&V7BƒÂÂrÂ‚“°¢‚ç6fR‚“°¢‚çG&ç6ÆFR‡rò"Â‚ò"“°¢‚ç66ÆR†rç¦ööÒÂrç¦ööÒ“°¢‚çG&ç6ÆFR‚Öræ6ÖW&ç‚ÂÖræ6ÖW&ç’“°¢–b†'Bæ7W'&VçBçFW'&–äÆ–W"’°¢‚æG&t–ÖvR†'Bæ7W'&VçBçFW'&–äÆ–W"ÂÂ“°¢ÒVÇ6R°¢‚æf–ÆÅ7G–ÆRÒ"3#"#°¢‚æf–ÆÅ&V7BƒÂÂrÂ‚“°¢Ð¢òòfW'’f–çB6V7F÷"w&–B¶VW2ÆöærÖF—7Fæ6Ræf–vF–öâ&VF&ÆRv—F†÷W@¢òò6ö×WF–ærv—F‚F†R–çFVBw&÷VæBFW‡GW&Rà¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒC"Âƒ‚Âs"ÂãSR’#°¢‚æÆ–æUv–GF‚Ò°¢f÷"†ÆWB’Ò²’Âs²’³Ò#’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò†’Â“°¢‚æÆ–æUFò†’Â‚“°¢‚ç7G&ö¶R‚“°¢Ð¢f÷"†ÆWB’Ò²’Âƒ²’³Ò#’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFòƒÂ’“°¢‚æÆ–æUFò…rÂ’“°¢‚ç7G&ö¶R‚“°¢Ð¢f÷"†6öç7Bö&¦V7F—fRöbræö&¦V7F—fW2ÇÂµÒ’°¢6öç7B–çFVÂÒö&¦V7F—fT–çFVÂ†rÂö&¦V7F—fR“°¢–b‚–çFVÂæF—66÷fW&VB’6öçF–çVS°¢‚ç6fR‚“°¢‚æf–ÆÅ7G–ÆRÒ–çFVÂçf—6–&ÆRò'&v&ƒs"Â3rÂsBÂãr’"¢'&v&ƒbÂ#bÂ#ÂãB’#°¢‚ç7G&ö¶U7G–ÆRÒ–çFVÂçf—6–&ÆRò'&v&ƒ#CbÂ#Â"Âã"’"¢'&v&ƒC"Âc‚ÂcÂã"’#°¢‚æÆ–æUv–GF‚Ò#°¢‚æ&Vv–åF‚‚“²‚æ&2†ö&¦V7F—fRç‚Âö&¦V7F—fRç’Âc"ÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“²‚ç7G&ö¶R‚“°¢‚ç&W7F÷&R‚“°¢Ð¢f÷"†6öç7BÆFVRöbD5D”4ÅõÄDTU2’°¢‚ç6fR‚“°¢‚çG&ç6ÆFR‡ÆFVRç‚ÂÆFVRç’“°¢‚ç&÷FFR‡ÆFVRç&÷FF–öâ“°¢–b†'Bæ7W'&VçBçF7F–6ÅÆFVR’°¢‚æG&t–ÖvR†'Bæ7W'&VçBçF7F–6ÅÆFVRÂÓ#3ÂÓ#3ÂCcÂCc“°¢ÒVÇ6R°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒÃÃÂãC"’#°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂbÂÆFVRç'‚²RÂÆFVRç'’²#ÂÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“°¢6öç7Bw&F–VçBÒ‚æ7&VFU&F–Äw&F–VçB‚ÓSRÂÓSRÂ"ÂÂÂÆFVRç'‚“°¢w&F–VçBæFD6öÆ÷%7F÷ƒÂ"3sCc“Sr"“°¢w&F–VçBæFD6öÆ÷%7F÷‚ãc‚Â"3CƒCC6""“°¢w&F–VçBæFD6öÆ÷%7F÷ƒÂ"3##C#""“°¢‚æf–ÆÅ7G–ÆRÒw&F–VçC°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒsbÂcÂ#bÂãR’#°¢‚æÆ–æUv–GF‚Òƒ°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂÂÆFVRç'‚ÂÆFVRç'’ÂÂã#RÂÖF‚å’¢"Òã#R“²‚ç7G&ö¶R‚“²‚æf–ÆÂ‚“°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒBÂ’Â‚Âã’’#°¢‚æÆ–æUv–GF‚ÒS°¢‚æ&Vv–åF‚‚“²‚æÖ÷fUFò‚×ÆFVRç'‚Ò"Â“²‚æÆ–æUFò‚×ÆFVRç'‚²SBÂ“²‚ç7G&ö¶R‚“°¢‚æ&Vv–åF‚‚“²‚æÖ÷fUFò‡ÆFVRç'‚ÒSBÂ“²‚æÆ–æUFò‡ÆFVRç'‚²"Â“²‚ç7G&ö¶R‚“°¢Ð¢‚ç&W7F÷&R‚“°¢–b‡GWF÷&–Ç4Væ&ÆVB’°¢‚ç6fR‚“°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚æföçBÒ#ƒ—‚7—7FVÒ×V’#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ#CbÂ#Â"Âãƒ"’#°¢‚æf–ÆÅFW‡B‚$TÄUdDTB+r³RDÔr"ÂÆFVRç‚ÂÆFVRç’Ò‚“°¢‚æföçBÒ#sw‚7—7FVÒ×V’#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ##rÂ#CÂ#3BÂãc"’#°¢‚æf–ÆÅFW‡B‚#"$Õ44U52"ÂÆFVRç‚ÂÆFVRç’²R“°¢f÷"†6öç7B&×öbÆFVRç&×2’°¢6öç7BÆö6Å‚ÒÖF‚æ6÷2‡&×’¢ÆFVRç'‚¢ãƒc°¢6öç7BÆö6Å’ÒÖF‚ç6–â‡&×’¢ÆFVRç'’¢ãƒc°¢6öç7B2ÒÖF‚æ6÷2‡ÆFVRç&÷FF–öâ’Â2ÒÖF‚ç6–â‡ÆFVRç&÷FF–öâ“°¢6öç7B'‚ÒÆFVRç‚²Æö6Å‚¢2ÒÆö6Å’¢3°¢6öç7B'’ÒÆFVRç’²Æö6Å‚¢2²Æö6Å’¢3°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒ#CbÂ#Â"Âãs‚’#°¢‚æÆ–æUv–GF‚Ò3°¢‚æ&Vv–åF‚‚“²‚æ&2‡'‚Â'’Â2ÂÂÖF‚å’¢"“²‚ç7G&ö¶R‚“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢Ð¢òòg&–VæFÇ’7WÇ’6÷W&6W2&ö¦V7BV–WBw&÷VæB&÷VæF'’–ç7FVBöb¢òòFW‡BÆ&VÂâ÷fW&Æ–ær&–æw26†÷r†÷rFWÆ÷–VB7G'V7GW&W2W‡FVæBF†P¢òò7W÷'FVB&6RæWGv÷&²à¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒƒRÂ#BÂƒÂã3b’#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒƒRÂ#BÂƒÂã#R’#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚…³‚Â5Ò“°¢‚æÆ–æTF6„öfg6WBÒÒ†rçF–ÖR¢r’R3°¢‚ç6†F÷t6öÆ÷"Ò'&v&ƒƒRÂ#BÂƒÂãB’#°¢‚ç6†F÷t&ÇW"ÒS°¢f÷"†6öç7B6÷W&6Röbræ'V–ÆF–æw2æf–ÇFW"€¢†'V–ÆF–ær’Óâ'V–ÆF–ærçFVÒÓÓÒ'Æ–W""bb'V–ÆF–ærçG—RÓÒ'GW'&WB"bb'V–ÆF–æt÷W&F–öæÂ†'V–ÆF–ær’À¢’’°¢‚æ&Vv–åF‚‚“°¢‚æ&2‡6÷W&6Rç‚Â6÷W&6Rç’Â5UÅ•õ$D•U2ÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢Ð¢‚ç&W7F÷&R‚“°¢6öç7B6VÆV7FVE&W6÷W&6Uv÷&¶W"ÒrçVæ—G2æf–æB‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""bbVæ—BçG—RÓÓÒ'v÷&¶W""bbrç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’“°¢6öç7B76–væVE&W6÷W&6T–æFW‚Ò6VÆV7FVE&W6÷W&6Uv÷&¶W"bbçVÖ&W"æ—4–çFVvW"‡6VÆV7FVE&W6÷W&6Uv÷&¶W"ç&W6÷W&6UF&vWB’b`¢ræ7'—7FÇ5·6VÆV7FVE&W6÷W&6Uv÷&¶W"ç&W6÷W&6UF&vWBÓòæÖ÷VçBâ ¢ò6VÆV7FVE&W6÷W&6Uv÷&¶W"ç&W6÷W&6UF&vWB¢¢Ó°¢6öç7B6Æ÷6W7E&W6÷W&6T–æFW‚Ò6VÆV7FVE&W6÷W&6Uv÷&¶W ¢ò76–væVE&W6÷W&6T–æFW‚ãÒò76–væVE&W6÷W&6T–æFW‚¢ræ7'—7FÇ2ç&VGV6R‚†&W7BÂæöFRÂ–æFW‚’Óâ°¢–b†æöFRæÖ÷VçBÃÒ’&WGW&â&W7C°¢–b†&W7BÂ’&WGW&â–æFWƒ°¢6öç7B7W'&VçDF—7Fæ6RÒÖF‚æ‡—÷B†æöFRç‚Ò6VÆV7FVE&W6÷W&6Uv÷&¶W"ç‚ÂæöFRç’Ò6VÆV7FVE&W6÷W&6Uv÷&¶W"ç’“°¢6öç7B&W7DæöFRÒræ7'—7FÇ5¶&W7EÓ°¢&WGW&â7W'&VçDF—7Fæ6RÂÖF‚æ‡—÷B†&W7DæöFRç‚Ò6VÆV7FVE&W6÷W&6Uv÷&¶W"ç‚Â&W7DæöFRç’Ò6VÆV7FVE&W6÷W&6Uv÷&¶W"ç’’ò–æFW‚¢&W7C°¢ÒÂÓ¢¢Ó°¢f÷"†6öç7B·&W6÷W&6T–æFW‚ÂÒöbræ7'—7FÇ2æVçG&–W2‚’’°¢6öç7B¶–æBÒæ¶–æBÇÂ&7&VF—G2#°¢6öç7B7'—7FÅ7&—FRÒ¶–æBÓÓÒ&ÆÆ÷’"ò'Bæ7W'&VçBæÆÆ÷”7'—7FÂ¢'Bæ7W'&VçBæ7'—7FÃ°¢–b‡æÖ÷VçBâbb7'—7FÅ7&—FR’°¢‚ç6fR‚“°¢‚æG&t–ÖvR†7'—7FÅ7&—FRÂç‚Ò3BÂç’Ò3‚Âc‚Âc‚“°¢‚ç&W7F÷&R‚“°¢ÒVÇ6R–b‡æÖ÷VçBâ’°¢‚ç6†F÷t6öÆ÷"Ò"3sFcfF2#°¢‚ç6†F÷t&ÇW"ÒC°¢‚æf–ÆÅ7G–ÆRÒ¶–æBÓÓÒ&ÆÆ÷’"ò"6Sf“Fb"¢"3CC†3#°¢f÷"†ÆWB’Ò²’ÂS²’²²’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‡ç‚Ò‚²’¢‚Âç’²R“°¢‚æÆ–æUFò‡ç‚Ò"²’¢‚Âç’Ò"Ò†’R"’¢"“°¢‚æÆ–æUFò‡ç‚ÒB²’¢‚Âç’²R“°¢‚æf–ÆÂ‚“°¢Ð¢‚ç6†F÷t&ÇW"Ò°¢Ð¢–b‡&W6÷W&6T–æFW‚ÓÓÒ6Æ÷6W7E&W6÷W&6T–æFW‚bbæÖ÷VçBâ’°¢‚ç6fR‚“°¢6öç7BÆ&VÂÒG¶¶–æBÓÓÒ&ÆÆ÷’"ò$ÄÄõ’"¢$5$TD•E2'Ò+rG´ÖF‚æ6V–Â‡æÖ÷VçB—Ö°¢6öç7BÆ&VÅ’Òç’²3’²‡&W6÷W&6T–æFW‚R"’¢°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚æföçBÒ#ƒ‡‚7—7FVÒ×V’#°¢6öç7BÆ&VÅv–GF‚Ò‚æÖV7W&UFW‡B†Æ&VÂ’çv–GF‚²#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ2Â2ÂRÂãƒ"’#°¢‚æf–ÆÅ&V7B‡ç‚ÒÆ&VÅv–GF‚ò"ÂÆ&VÅ’ÒÂÆ&VÅv–GF‚ÂB“°¢‚æf–ÆÅ7G–ÆRÒ¶–æBÓÓÒ&ÆÆ÷’"ò"6ffCS†"¢"3–6c†V#°¢‚æf–ÆÅFW‡B†Æ&VÂÂç‚ÂÆ&VÅ’“°¢‚ç&W7F÷&R‚“°¢Ð¢Ð¢6öç7B6öç7G'V7F–öåVWVT&FvW2ÒæWrÖÆçVÖ&W"Â²÷&FW#¢çVÖ&W#²6öÆ÷#¢7G&–ærÕµÓâ‚“°¢6öç7B6VÆV7FVD'V–ÆEv÷&¶W'2ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""b`¢Væ—BçG—RÓÓÒ'v÷&¶W""b`¢rç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’b`¢‡Væ—Bæ'V–ÆEVWVSòæÆVæwF‚ÇÂVæ—Bæ'V–ÆEF&vWB’À¢“°¢6öç7Bw&÷WVD'V–ÆE&÷WFW2ÒæWrÖÇ7G&–ærÂ²v÷&¶W'3¢Væ—EµÓ²6—FW3¢'V–ÆF–æuµÒÓâ‚“°¢f÷"†6öç7Bv÷&¶W"öb6VÆV7FVD'V–ÆEv÷&¶W'2’°¢6öç7BVWVRÒv÷&¶W"æ'V–ÆEVWVRÇÂ‡v÷&¶W"æ'V–ÆEF&vWBò·v÷&¶W"æ'V–ÆEF&vWEÒ¢µÒ“°¢6öç7B6—FW2ÒVWVP¢æÖ‚†'V–ÆF–æt–B’Óâræ'V–ÆF–æw2æf–æB‚†'V–ÆF–ær’Óà¢'V–ÆF–æræ–BÓÓÒ'V–ÆF–æt–Bbb'V–ÆF–ærçFVÒÓÓÒv÷&¶W"çFVÒbb'V–ÆF–æræ‡âbb†'V–ÆF–ærç&öw&W72óò’ÂÀ¢’¢æf–ÇFW"‚†'V–ÆF–ær“¢'V–ÆF–ær—2'V–ÆF–ærÓâ&ööÆVâ†'V–ÆF–ær’“°¢–b‚6—FW2æÆVæwF‚’6öçF–çVS°¢6öç7B6–væGW&RÒ6—FW2æÖ‚‡6—FR’Óâ6—FRæ–B’æ¦ö–â‚"Ò"“°¢6öç7B&÷WFRÒw&÷WVD'V–ÆE&÷WFW2ævWB‡6–væGW&R“°¢–b‡&÷WFR’&÷WFRçv÷&¶W'2çW6‚‡v÷&¶W"“°¢VÇ6Rw&÷WVD'V–ÆE&÷WFW2ç6WB‡6–væGW&RÂ²v÷&¶W'3¢·v÷&¶W%ÒÂ6—FW2Ò“°¢Ð¢6öç7B&÷WFT6öÆ÷'2Ò²"3fS6B"Â"6cfC3cb"Â"3s†3–fb%Ó°¢²ââæw&÷WVD'V–ÆE&÷WFW2çfÇVW2‚•Òæf÷$V6‚‚‡&÷WFRÂ&÷WFT–æFW‚’Óâ°¢6öç7B6öÆ÷"Ò&÷WFT6öÆ÷'5·&÷WFT–æFW‚R&÷WFT6öÆ÷'2æÆVæwF…Ó°¢&÷WFRç6—FW2æf÷$V6‚‚‡6—FRÂ6—FT–æFW‚’Óâ°¢6öç7B&FvW2Ò6öç7G'V7F–öåVWVT&FvW2ævWB‡6—FRæ–B’ÇÂµÓ°¢&FvW2çW6‚‡²÷&FW#¢6—FT–æFW‚²Â6öÆ÷"Ò“°¢6öç7G'V7F–öåVWVT&FvW2ç6WB‡6—FRæ–BÂ&FvW2“°¢Ò“°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æf–ÆÅ7G–ÆRÒ6öÆ÷#°¢‚ævÆö&ÄÇ†Òãs#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚…³’ÂuÒ“°¢‚æÆ–æTF6„öfg6WBÒÒ†rçF–ÖR¢‚’Rc°¢f÷"†6öç7Bv÷&¶W"öb&÷WFRçv÷&¶W'2’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‡v÷&¶W"ç‚Âv÷&¶W"ç’“°¢‚æÆ–æUFò‡&÷WFRç6—FW5³Òç‚Â&÷WFRç6—FW5³Òç’“°¢‚ç7G&ö¶R‚“°¢Ð¢–b‡&÷WFRç6—FW2æÆVæwF‚â’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‡&÷WFRç6—FW5³Òç‚Â&÷WFRç6—FW5³Òç’“°¢&÷WFRç6—FW2ç6Æ–6Rƒ’æf÷$V6‚‚‡6—FR’Óâ‚æÆ–æUFò‡6—FRç‚Â6—FRç’’“°¢‚ç7G&ö¶R‚“°¢Ð¢‚ç6WDÆ–æTF6‚…µÒ“°¢&÷WFRç6—FW2æf÷$V6‚‚‡6—FR’Óâ°¢‚æ&Vv–åF‚‚“°¢‚æ&2‡6—FRç‚Â6—FRç’ÂbÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢Ò“°¢‚ç&W7F÷&R‚“°¢Ò“°¢f÷"†6öç7Bö&¦V7F—fRöbræö&¦V7F—fW2ÇÂµÒ’°¢6öç7B–çFVÂÒö&¦V7F—fT–çFVÂ†rÂö&¦V7F—fR“°¢–b‚–çFVÂæF—66÷fW&VB’6öçF–çVS°¢6öç7B÷W&F–öæÂÒ–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR“°¢6öç7B6ööÆ–ætF÷vâÒ÷W&F–öæÂbbö&¦V7F—fRç&V'V–ÆDBÓÒVæFVf–æVBbbrçF–ÖRÂö&¦V7F—fRç&V'V–ÆDC°¢6öç7B6öÆ÷"Ò–çFVÂçf—6–&ÆRò"3sƒ“†2"¢÷W&F–öæÂò6ööÆ–ætF÷vâò"6VcsV2"¢"6cV#ƒVb"¢ö&¦V7F—fRæ÷væW"ÓÓÒ'Æ–W""ò"3SvCv3"¢ö&¦V7F—fRæ÷væW"ÓÓÒ&VæV×’"ò"6VcS#fb"¢"6cVCsv#°¢6öç7B&öw&W72ÒÖF‚æÖ–âƒÂÖF‚æ'2†ö&¦V7F—fRæ6GW&R’òô$¤T5D•dUô4EU$UõD”ÔR“°¢6öç7Bö67WçG2Ò&VÆ”ö67WçG2†rÂö&¦V7F—fR“°¢6öç7B6VÆV7FVDv'&—6öâÒö67WçG2ç6öÖR‚‡Væ—B’Óârç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’“°¢‚ç6fR‚“°¢‚çG&ç6ÆFR†ö&¦V7F—fRç‚Âö&¦V7F—fRç’“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒÃÃÂã2’#°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂ3ÂCbÂ2ÂÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“°¢‚ævÆö&ÄÇ†Ò÷W&F–öæÂò¢6ööÆ–ætF÷vâòã#‚¢ãC"²†ö&¦V7F—fRç&V'V–ÆE&öw&W72ÇÂ’¢ãS°¢–b†'Bæ7W'&VçBæ–çFVÅ&VÆ’’°¢6öç7B&VÆ•6—¦RÒ”åDTÅõ$TÄ•õ$TäDU%õ4•¤S°¢‚æG&t–ÖvR†'Bæ7W'&VçBæ–çFVÅ&VÆ’Â×&VÆ•6—¦Rò"Â×&VÆ•6—¦R¢ãSBÂ&VÆ•6—¦RÂ&VÆ•6—¦R“°¢Ð¢VÇ6R°¢‚æf–ÆÅ7G–ÆRÒ"3s#S#’#°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æÆ–æUv–GF‚Ò3°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂbÂCBÂ3"ÂÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“²‚ç7G&ö¶R‚“°¢Ð¢‚ævÆö&ÄÇ†Ò°¢–b‡6VÆV7FVDv'&—6öâ’°¢‚ç7G&ö¶U7G–ÆRÒ"6ffSvB#°¢‚æÆ–æUv–GF‚Ò3°¢‚ç6WDÆ–æTF6‚…³rÂUÒ“°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂbÂC’Â3RÂÂÂÖF‚å’¢"“²‚ç7G&ö¶R‚“°¢‚ç6WDÆ–æTF6‚…µÒ“°¢Ð¢–b‡6VÆV7FVDv'&—6öâbb–çFVÂçf—6–&ÆRbb÷W&F–öæÂ’°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æÆ–æUv–GF‚ÒC°¢‚æ&Vv–åF‚‚“²‚æ&2ƒÂÂSBÂÔÖF‚å’ò"ÂÔÖF‚å’ò"²ÖF‚å’¢"¢&öw&W72“²‚ç7G&ö¶R‚“°¢Ð¢–b†–çFVÂçf—6–&ÆRbb÷W&F–öæÂbbö&¦V7F—fRæ‡Âö&¦V7F—fRæÖ‚’°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ2ÂÂ"Âã’’#°¢‚æf–ÆÅ&V7B‚ÓC"ÂÓcrÂƒBÂr“°¢‚æf–ÆÅ7G–ÆRÒö&¦V7F—fRæ‡òö&¦V7F—fRæÖ‚âã3Rò"6cV#ƒVb"¢"6VcS#fb#°¢‚æf–ÆÅ&V7B‚ÓCÂÓcbÂƒ"¢†ö&¦V7F—fRæ‡òö&¦V7F—fRæÖ‚’ÂR“°¢Ð¢–b‡6VÆV7FVDv'&—6öâbb–çFVÂçf—6–&ÆRbb÷W&F–öæÂ’°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æÆ–æUv–GF‚ÒC°¢‚æ&Vv–åF‚‚“°¢‚æ&2ƒÂÂSBÂÔÖF‚å’ò"ÂÔÖF‚å’ò"²ÖF‚å’¢"¢†ö&¦V7F—fRç&V'V–ÆE&öw&W72ÇÂ’“°¢‚ç7G&ö¶R‚“°¢–b†6ööÆ–ætF÷vâ’°¢‚æÆ–æUv–GF‚ÒS°¢‚æ&Vv–åF‚‚“²‚æÖ÷fUFò‚Ó2ÂÓ2“²‚æÆ–æUFòƒ2Â#2“²‚æÖ÷fUFòƒ2ÂÓ2“²‚æÆ–æUFò‚Ó2Â#2“²‚ç7G&ö¶R‚“°¢Ð¢Ð¢–b‡6VÆV7FVDv'&—6öâ’°¢f÷"†ÆWB6Æ÷BÒ²6Æ÷BÂ$TÄ•ôt%$•4ôåô44•E“²6Æ÷B²²’°¢‚æf–ÆÅ7G–ÆRÒ–çFVÂçf—6–&ÆRbb÷W&F–öæÂbb6Æ÷BÂö67WçG2æÆVæwF‚ò6öÆ÷"¢'&v&ƒBÂBÂrÂãƒb’#°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æÆ–æUv–GF‚ÒãS°¢‚æf–ÆÅ&V7B‚Ó#"²6Æ÷B¢"ÂSBÂ‚Â‚“°¢‚ç7G&ö¶U&V7B‚Ó#"²6Æ÷B¢"ÂSBÂ‚Â‚“°¢Ð¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢f÷"†6öç7B"öbræ'V–ÆF–æw2’°¢–b†"çFVÒÓÓÒ&VæV×’"bb—5f—6–&ÆR†rÂ"Â'V–ÆF–æu7FG5¶"çG—UÒç"’’6öçF–çVS°¢6öç7B"Ò'V–ÆF–æu7FG5¶"çG—UÒç"À¢6VÂÒrç6VÆV7FVBæ–æ6ÇVFW2†"æ–B’À¢Æ–W"Ò"çFVÒÓÓÒ'Æ–W""À¢66VçBÒÆ–W"ò"3SvCv3"¢"6VcS#fb"À¢VæFW$6öç7G'V7F–öâÒ"ç&öw&W72ÓÒVæFVf–æVBbb"ç&öw&W72Â°¢‚ç6fR‚“°¢–b‡6VÂbb"çG—RÓÒ'GW'&WB"bb'V–ÆF–æt÷W&F–öæÂ†"’’°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒƒrÂ#RÂ“"Âã#"’#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚…³"ÂÒ“°¢‚æ&Vv–åF‚‚“°¢‚æ&2†"ç‚Â"ç’Â5UÅ•õ$D•U2ÂÂÖF‚å’¢"“°¢‚ç7G&ö¶R‚“°¢‚ç6WDÆ–æTF6‚…µÒ“°¢Ð¢‚çG&ç6ÆFR†"ç‚Â"ç’“°¢‚æf–ÆÅ7G–ÆRÒVæFW$6öç7G'V7F–öâò'&v&ƒÃÃÂã‚’"¢'&v&ƒÃÃÂã#"’#°¢‚ç6†F÷t&ÇW"Ò°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂ"¢ãC"Â"¢ãƒbÂ"¢ãbÂÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“°¢‚ç6†F÷t6öÆ÷"Ò'&v&ƒÃÃÂãCR’#°¢‚ç6†F÷t&ÇW"Ò6VÂò‚¢°¢‚æf–ÆÅ7G–ÆRÒÆ–W"ò"3#3ƒ6""¢"36C&"#°¢‚ç7G&ö¶U7G–ÆRÒ6VÂò"6cVCsv"¢"3#S#"#°¢‚æÆ–æUv–GF‚Ò6VÂòB¢#°¢6öç7B'V–ÆF–ætFÆ2Ò'Bæ7W'&VçBæ'V–ÆF–æw3°¢6öç7B7&vÆW$FÆ2Ò"çG—RÓÓÒ&‡"bb"ç6¶VBò'Bæ7W'&VçBæ6öÖÖæD7&vÆW"¢VæFVf–æVC°¢6öç7BGW'&WDFÆ2Ò"çG—RÓÓÒ'GW'&WB"ò'Bæ7W'&VçBçGW'&WDF—&V7F–öç2¢VæFVf–æVC°¢–b‡VæFW$6öç7G'V7F–öâ’°¢‚ævÆö&ÄÇ†Ò"æ6öç7G'V7F–öå7F'FVBòÖF‚æÖ‚‚ã"Â"ç&öw&W72¢ãs‚’¢ãC°¢‚æf–ÇFW"Ò&w&—66ÆR‚ãSR’'&–v‡FæW72ƒã#R’#°¢Ð¢–b†'V–ÆF–ætFÆ2ÇÂGW'&WDFÆ2ÇÂ7&vÆW$FÆ2’°¢–b‡6VÂ’°¢‚ç6†F÷t&ÇW"Ò°¢‚ç7G&ö¶U7G–ÆRÒ"6cVCsv#°¢‚æÆ–æUv–GF‚Ò3°¢‚æ&Vv–åF‚‚“°¢‚æVÆÆ—6RƒÂ"¢ãCRÂ"¢ã"Â"¢ãS"ÂÂÂÖF‚å’¢"“°¢‚ç7G&ö¶R‚“°¢Ð¢6öç7B6—¦RÒ7&vÆW$FÆ2ò²s¢sBÂƒ¢CRÒ¢'V–ÆF–æu&VæFW%6—¦U¶"çG—UÓ°¢‚ç6†F÷t&ÇW"Ò°¢–b†7&vÆW$FÆ2’°¢‚æG&t–ÖvR†7&vÆW$FÆ2Â×6—¦Rçrò"Â×6—¦Ræ‚ò"Â6—¦RçrÂ6—¦Ræ‚“°¢ÒVÇ6R–b‡GW'&WDFÆ2’°¢6öç7B7rÒGW'&WDFÆ2ææGW&Åv–GF‚òC°¢6öç7B6‚ÒGW'&WDFÆ2ææGW&Ä†V–v‡Bò#°¢6öç7BævÆRÒçVÖ&W"æ—4f–æ—FR†"çGW'&WDf6–ær’ò"çGW'&WDf6–ær¢ÔÖF‚å’ò#°¢6öç7BF—&V7F–öâÒ‚„ÖF‚ç&÷VæB‚†ævÆR²ÖF‚å’ò"’ò„ÖF‚å’òB’’R‚’²‚’Rƒ°¢‚æG&t–ÖvR€¢GW'&WDFÆ2À¢†F—&V7F–öâRB’¢7rÀ¢ÖF‚æfÆö÷"†F—&V7F–öâòB’¢6‚À¢7rÀ¢6‚À¢×6—¦Rçrò"À¢×6—¦Ræ‚ò"À¢6—¦RçrÀ¢6—¦Ræ‚À¢“°¢–b‚†"çGW'&WDf—&UVçF–ÂÇÂ’ârçF–ÖRbbVæFW$6öç7G'V7F–öâ’°¢G&uvVöäf—&T7VR‡‚ÂævÆRÂã’ÂG'VR“°¢Ð¢ÒVÇ6R–b†'V–ÆF–ætFÆ2’°¢6öç7Bg&ÖRÒ²‡¢Â&Vf–æW'“¢Â&'&6·3¢"ÂGW'&WC¢2Õ¶"çG—UÓ°¢6öç7B7rÒ'V–ÆF–ætFÆ2ææGW&Åv–GF‚ò#°¢6öç7B6‚Ò'V–ÆF–ætFÆ2ææGW&Ä†V–v‡Bò#°¢‚æG&t–ÖvR€¢'V–ÆF–ætFÆ2À¢†g&ÖRR"’¢7rÀ¢ÖF‚æfÆö÷"†g&ÖRò"’¢6‚À¢7rÀ¢6‚À¢×6—¦Rçrò"À¢×6—¦Ræ‚ò"À¢6—¦RçrÀ¢6—¦Ræ‚À¢“°¢Ð¢òòFVÒ6öÆ÷'27F’7&—7æB6öç6—7FVçBWfVâF†÷Vv‚&÷F‚f7F–öç2W6P¢òòF†R6ÖR–çFVB&6R7&—FRà¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚ç6†F÷t6öÆ÷"Ò66VçC°¢‚ç6†F÷t&ÇW"ÒC°¢‚æf–ÆÅ&V7B‚×"¢ã3BÂ"¢ãC"Â"¢ãc‚ÂB“°¢‚æ&Vv–åF‚‚“°¢‚æ&2ƒÂ×"¢ãCBÂ2ÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢‚ç6†F÷t&ÇW"Ò°¢ÒVÇ6R–b†"çG—RÓÓÒ&‡"’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFòƒÂ×"“°¢‚æÆ–æUFò‡"¢ãƒ"Â×"¢ãCR“°¢‚æÆ–æUFò‡"¢ãƒ"Â"¢ãSR“°¢‚æÆ–æUFòƒÂ"“°¢‚æÆ–æUFò‚×"¢ãƒ"Â"¢ãSR“°¢‚æÆ–æUFò‚×"¢ãƒ"Â×"¢ãCR“°¢‚æ6Æ÷6UF‚‚“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚æf–ÆÅ&V7B‚Ó‚Â×"¢ãS"ÂbÂ"¢ãB“°¢‚æf–ÆÅ&V7B‚×"¢ãCRÂÓ‚Â"¢ã’Âb“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ##RÃ#CbÃ#3bÂãs"’#°¢‚æf–ÆÅ&V7B‚Ó2Â×"¢ãrÂbÂ"¢ã#R“°¢‚æf–ÆÅ&V7B‚×"¢ãrÂÓ2Â"¢ã#RÂb“°¢ÒVÇ6R–b†"çG—RÓÓÒ&&'&6·2"’°¢‚æf–ÆÅ&V7B‚×"¢ã‚Â×"¢ãS‚Â"¢ãbÂ"¢ãb“°¢‚ç7G&ö¶U&V7B‚×"¢ã‚Â×"¢ãS‚Â"¢ãbÂ"¢ãb“°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚æf–ÆÅ&V7B‚×"¢ãSRÂ×"¢ã2Â"¢ãÂr“°¢‚æf–ÆÅ&V7B‚×"¢ãSRÂ"¢ãÂ"¢ãÂr“°¢‚æf–ÆÅ7G–ÆRÒ"3#2#°¢‚æf–ÆÅ&V7B‚×"¢ã"Â"¢ã3"Â"¢ãBÂ"¢ã#‚“°¢ÒVÇ6R–b†"çG—RÓÓÒ'GW'&WB"’°¢‚æf–ÆÅ&V7B‚×"¢ãS‚Â×"¢ã3"Â"¢ãbÂ"¢ãƒb“°¢‚ç7G&ö¶U&V7B‚×"¢ãS‚Â×"¢ã3"Â"¢ãbÂ"¢ãƒb“°¢‚æf–ÆÅ7G–ÆRÒ"3ƒ#B#°¢‚æ&Vv–åF‚‚“²‚æ&2ƒÂ×"¢ã32Â"¢ãC"ÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“²‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚æf–ÆÅ&V7B‚Ó2Â×"¢ã"ÂbÂ"¢ãƒR“°¢‚æf–ÆÅ&V7BƒÂ×"¢ã"Â"¢ã‚ÂR“°¢‚æf–ÆÅ7G–ÆRÒ"6Ffc†c#°¢‚æf–ÆÅ&V7B‡"¢ãs"Â×"¢ãRÂbÂr“°¢ÒVÇ6R°¢‚æ&Vv–åF‚‚“°¢‚æ&2ƒÂÂ"¢ãs"ÂÂr“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚ç7G&ö¶U7G–ÆRÒ66VçC°¢‚æÆ–æUv–GF‚ÒS°¢‚æ&Vv–åF‚‚“°¢‚æ&2ƒÂÂ"¢ãC2ÂÂr“°¢‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚æf–ÆÅ&V7B‚ÓRÂ×"¢ãsRÂÂ"¢ã3R“°¢Ð¢–b‡VæFW$6öç7G'V7F–öâ’°¢‚ævÆö&ÄÇ†Ò°¢‚æf–ÇFW"Ò&æöæR#°¢‚ç6†F÷t&ÇW"Ò°¢‚ç7G&ö¶U7G–ÆRÒ"æ6öç7G'V7F–öå7F'FVBò'&v&ƒ#CbÂ#Â"Âã’’"¢'&v&ƒbÂ##RÂ#RÂãƒ"’#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚…³bÂUÒ“°¢‚ç7G&ö¶U&V7B‚×"¢ã“RÂ×"¢ãs‚Â"¢ã’Â"¢ãSb“°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‚×"¢ã“RÂ×"¢ãs‚“²‚æÆ–æUFò‡"¢ã“RÂ"¢ãs‚“°¢‚æÖ÷fUFò‡"¢ã“RÂ×"¢ãs‚“²‚æÆ–æUFò‚×"¢ã“RÂ"¢ãs‚“°¢‚æÖ÷fUFòƒÂ×"¢ã“‚“²‚æÆ–æUFòƒÂ"¢ã“‚“°¢‚ç7G&ö¶R‚“°¢‚ç6WDÆ–æTF6‚…µÒ“°¢Ð¢–b†"çG—RÓÓÒ&‡"bb"ç&VÆö6F–öâ’°¢6öç7B&öw&W72ÒÖF‚æÖ‚ƒÂÖF‚æÖ–âƒÂ"ç&VÆö6F–öâæVÆ6VBò"ç&VÆö6F–öâæGW&F–öâ’“°¢‚ævÆö&ÄÇ†Ò°¢‚æf–ÇFW"Ò&æöæR#°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒ#CbÂ#Â"Âã#"’#°¢‚æÆ–æUv–GF‚Òs°¢‚æ&Vv–åF‚‚“²‚æ&2ƒÂÂ"²#ÂÂÖF‚å’¢"“²‚ç7G&ö¶R‚“°¢‚ç7G&ö¶U7G–ÆRÒ"6cfC3cb#°¢‚æ&Vv–åF‚‚“²‚æ&2ƒÂÂ"²#ÂÔÖF‚å’ò"ÂÔÖF‚å’ò"²ÖF‚å’¢"¢&öw&W72“²‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ"ÂÂ"Âãƒ‚’#°¢‚æf–ÆÅ&V7B‚ÓS"Â"²#‚ÂBÂ‚“°¢‚æf–ÆÅ7G–ÆRÒ"6cfC3cb#°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚æföçBÒ#ƒ—‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B†"ç&VÆö6F–öâæÖöFRÓÓÒ'6²"ò%4´”är…"¢$DUÄõ””är…"ÂÂ"²C“°¢ÒVÇ6R–b†"çG—RÓÓÒ&‡"bb"ç6¶VB’°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ"ÂÂ"Âãƒ‚’#°¢‚æf–ÆÅ&V7B‚ÓS‚Â"²#BÂbÂ‚“°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚æföçBÒ#ƒ—‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B†"æÖö&–ÆUF&vWBò$5$tÄU"Ôõd”är+r""¢$4ôÔÔäB5$tÄU""ÂÂ"²3b“°¢Ð¢‚ç&W7F÷&R‚“°¢&"‡‚Â"ç‚Ò"Â"ç’Ò"Ò2Â"¢"Â"æ‡ò"æÖ‚Â66VçB“°¢–b†"ç&ÆÇ’’°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒÆ–W"ò"6cfC3cb"¢"6cV#sb#°¢‚ç6WDÆ–æTF6‚…³RÂUÒ“°¢‚æÆ–æUv–GF‚Ò#°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò†"ç‚Â"ç’“°¢‚æÆ–æUFò†"ç&ÆÇ’ç‚Â"ç&ÆÇ’ç’“°¢‚ç7G&ö¶R‚“°¢‚ç6WDÆ–æTF6‚…µÒ“°¢‚æ&Vv–åF‚‚“°¢‚æ&2†"ç&ÆÇ’ç‚Â"ç&ÆÇ’ç’ÂÂÂÖF‚å’¢"“°¢‚ç7G&ö¶R‚“°¢‚ç&W7F÷&R‚“°¢Ð¢–b†"ç&öGV7F–öâ’°¢6öç7BÒÖF‚æÖ–âƒÂ"ç&öGV7F–öâæVÆ6VBò"ç&öGV7F–öâæGW&F–öâ“°¢&"‡‚Â"ç‚Ò"Â"ç’Ò"Ò#2Â"¢"ÂÂ"6cfC3cb"“°¢‚æf–ÆÅ7G–ÆRÒ"6cfC3cb#°¢‚æföçBÒ#ƒ‡‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B€¢G·Væ—DæÖR†"ç&öGV7F–öâçG—R—ÒG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â†"ç&öGV7F–öâæGW&F–öâÒ"ç&öGV7F–öâæVÆ6VB’—×2G¶"ç&öGV7F–öâçVWVSòæÆVæwF‚ò+r²G¶"ç&öGV7F–öâçVWVRæÆVæwF‡Ö¢"'ÖÀ¢"ç‚À¢"ç’Ò"Ò#‚À¢“°¢Ð¢–b†"ç&öw&W72ÓÒVæFVf–æVBbb"ç&öw&W72Â’°¢‚ç7G&ö¶U7G–ÆRÒ"æ6öç7G'V7F–öå7F'FVBò"6cfC3cb"¢"3fS6B#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚†"æ6öç7G'V7F–öå7F'FVBòµÒ¢³RÂEÒ“°¢‚æ&Vv–åF‚‚“°¢‚æ&2€¢"ç‚À¢"ç’À¢"²‚À¢ÔÖF‚å’ò"À¢ÔÖF‚å’ò"²ÖF‚å’¢"¢"ç&öw&W72À¢“°¢‚ç7G&ö¶R‚“°¢‚ç6WDÆ–æTF6‚…µÒ“°¢6öç7B6V6öæG2ÒÖF‚æÖ‚€¢À¢ÖF‚æ6V–Â‚†"æ6öç7G'V7F–öäGW&F–öâÇÂb’¢ƒÒ"ç&öw&W72’’À¢“°¢‚æf–ÆÅ7G–ÆRÒ"æ6öç7G'V7F–öå7F'FVBò"6cfC3cb"¢"3†6cVS"#°¢‚æföçBÒ#ƒ‡‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B†"æ6öç7G'V7F–öå7F'FVBò%T”ÄD”är+rG·6V6öæG7×6¢%t•$Te$ÔR+rt•D”ärdõ"tõ$´U""Â"ç‚Â"ç’²"²r“°¢Ð¢6öç7BVWVT&FvW2Ò6öç7G'V7F–öåVWVT&FvW2ævWB†"æ–B’ÇÂµÓ°¢VWVT&FvW2æf÷$V6‚‚†&FvRÂ&FvT–æFW‚’Óâ°¢6öç7B&FvU‚Ò"ç‚²"²’²&FvT–æFW‚¢#3°¢6öç7B&FvU’Ò"ç’Ò"Òƒ°¢‚ç6fR‚“°¢‚ç6†F÷t6öÆ÷"Ò&FvRæ6öÆ÷#°¢‚ç6†F÷t&ÇW"Òƒ°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ2Â2ÂRÂã“B’#°¢‚ç7G&ö¶U7G–ÆRÒ&FvRæ6öÆ÷#°¢‚æÆ–æUv–GF‚Ò#°¢‚æ&Vv–åF‚‚“°¢‚æ&2†&FvU‚Â&FvU’ÂÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚ç6†F÷t&ÇW"Ò°¢‚æf–ÆÅ7G–ÆRÒ"6cFfff"#°¢‚æföçBÒ#“‚7—7FVÒ×V’#°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚çFW‡D&6VÆ–æRÒ&Ö–FFÆR#°¢‚æf–ÆÅFW‡B…7G&–ær†&FvRæ÷&FW"’Â&FvU‚Â&FvU’²ãR“°¢‚ç&W7F÷&R‚“°¢Ò“°¢–b†"çG—RÓÓÒ&‡"bb"çFVÒÓÓÒ'Æ–W""bbræf÷'F–g•&öGV7F–öâ’°¢6öç7BÒÖF‚æÖ–âƒÂræf÷'F–g•&öGV7F–öâæVÆ6VBòræf÷'F–g•&öGV7F–öâæGW&F–öâ“°¢‚ç7G&ö¶U7G–ÆRÒ"6cfC3cb#°¢‚æÆ–æUv–GF‚Ò3°¢‚æ&Vv–åF‚‚“°¢‚æ&2†"ç‚Â"ç’Â"²2ÂÔÖF‚å’ò"ÂÔÖF‚å’ò"²ÖF‚å’¢"¢“°¢‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ"6cfC3cb#°¢‚æföçBÒ#ƒ‡‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B†dõ%D”e’+rG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â†ræf÷'F–g•&öGV7F–öâæGW&F–öâÒræf÷'F–g•&öGV7F–öâæVÆ6VB’—×6Â"ç‚Â"ç’²"²#‚“°¢Ð¢–b†"çG—RÓÓÒ&‡"bb"çFVÒÓÓÒ'Æ–W""bbræFö7G&–æU&öGV7F–öâ’°¢6öç7BÒÖF‚æÖ–âƒÂræFö7G&–æU&öGV7F–öâæVÆ6VBòræFö7G&–æU&öGV7F–öâæGW&F–öâ“°¢‚ç7G&ö¶U7G–ÆRÒ"3s†3–fb#°¢‚æÆ–æUv–GF‚Ò3°¢‚æ&Vv–åF‚‚“°¢‚æ&2†"ç‚Â"ç’Â"²2ÂÔÖF‚å’ò"ÂÔÖF‚å’ò"²ÖF‚å’¢"¢“°¢‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ"3–VC–fb#°¢‚æföçBÒ#ƒ‡‚7—7FVÒ×V’#°¢‚æf–ÆÅFW‡B†G¶ræFö7G&–æU&öGV7F–öâçG—RÓÓÒ&—""ò$•""¢$$Ôõ"'ÒDô5E$”äR+rG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â†ræFö7G&–æU&öGV7F–öâæGW&F–öâÒræFö7G&–æU&öGV7F–öâæVÆ6VB’—×6Â"ç‚Â"ç’²"²#‚“°¢Ð¢Ð¢6öç7B6VÆV7FVEG&fVÆW'2ÒrçVæ—G2æf–ÇFW"‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""b`¢Væ—BçG—RÓÒ'v÷&¶W""b`¢Væ—Bæv'&—6öæVDBb`¢rç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’b`¢Væ—BçF&vWBb`¢Væ—Bç&WG&VF–ærb`¢Væ—BçG&öÂÀ¢“°¢f÷"†6öç7BVævvRöb¶fÇ6RÂG'VUÒ’°¢6öç7BG&fVÆW'2Ò6VÆV7FVEG&fVÆW'2æf–ÇFW"‚‡Væ—B’Óâ&ööÆVâ‡Væ—BæÖ÷fTVævvR’ÓÓÒVævvR“°¢–b‚G&fVÆW'2æÆVæwF‚’6öçF–çVS°¢6öç7B6öÆ÷"ÒVævvRò"3SVCf#R"¢"6cfC3cb#°¢6öç7BvöÂÒG&fVÆW'2ç&VGV6R€¢‡7VÒÂVæ—B’Óâ‡²ƒ¢7VÒç‚²Væ—BçF&vWBç‚Â“¢7VÒç’²Væ—BçF&vWBç’Ò’À¢²ƒ¢Â“¢ÒÀ¢“°¢vöÂç‚óÒG&fVÆW'2æÆVæwFƒ°¢vöÂç’óÒG&fVÆW'2æÆVæwFƒ°¢6öç7BVÇ6RÒ²ÖF‚ç6–â†rçF–ÖR¢R’¢ãƒ°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ6öÆ÷#°¢‚æf–ÆÅ7G–ÆRÒ6öÆ÷#°¢‚æÆ–æUv–GF‚Ò#°¢‚ævÆö&ÄÇ†Òãcc°¢‚ç6WDÆ–æTF6‚…³‚ÂuÒ“°¢‚æÆ–æTF6„öfg6WBÒÒ†rçF–ÖR¢b’RS°¢f÷"†6öç7BVæ—BöbG&fVÆW'2’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‡Væ—Bç‚ÂVæ—Bç’“°¢‚æÆ–æUFò‡Væ—BçF&vWBç‚ÂVæ—BçF&vWBç’“°¢‚ç7G&ö¶R‚“°¢Ð¢‚ç6WDÆ–æTF6‚…µÒ“°¢‚ævÆö&ÄÇ†Òã“c°¢‚ç6†F÷t6öÆ÷"Ò6öÆ÷#°¢‚ç6†F÷t&ÇW"Ò#°¢‚æ&Vv–åF‚‚“°¢‚æ&2†vöÂç‚ÂvöÂç’Â‚¢VÇ6RÂÂÖF‚å’¢"“°¢‚ç7G&ö¶R‚“°¢‚ç6†F÷t&ÇW"Ò°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò†vöÂç‚Ò#RÂvöÂç’“²‚æÆ–æUFò†vöÂç‚Ò‚ÂvöÂç’“°¢‚æÖ÷fUFò†vöÂç‚²‚ÂvöÂç’“²‚æÆ–æUFò†vöÂç‚²#RÂvöÂç’“°¢‚æÖ÷fUFò†vöÂç‚ÂvöÂç’Ò#R“²‚æÆ–æUFò†vöÂç‚ÂvöÂç’Ò‚“°¢‚æÖ÷fUFò†vöÂç‚ÂvöÂç’²‚“²‚æÆ–æUFò†vöÂç‚ÂvöÂç’²#R“°¢‚ç7G&ö¶R‚“°¢6öç7BÆ&VÂÒVævvRò$ÔõdR²TättR"¢$D•$T5BÔõdR#°¢‚æföçBÒ#“‡‚7—7FVÒ×V’#°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢6öç7BÆ&VÅv–GF‚Ò‚æÖV7W&UFW‡B†Æ&VÂ’çv–GF‚²C°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ2ÂRÂrÂã’’#°¢‚æf–ÆÅ&V7B†vöÂç‚ÒÆ&VÅv–GF‚ò"ÂvöÂç’²3ÂÆ&VÅv–GF‚Âb“°¢‚æf–ÆÅ7G–ÆRÒ6öÆ÷#°¢‚æf–ÆÅFW‡B†Æ&VÂÂvöÂç‚ÂvöÂç’²C“°¢‚ç&W7F÷&R‚“°¢Ð¢f÷"†6öç7BRöbrçVæ—G2’°¢–b‡Ræv'&—6öæVDB’6öçF–çVS°¢–b‡RçFVÒÓÓÒ&VæV×’"bb—5f—6–&ÆR†rÂRÂ7FG5·RçG—UÒç"’’6öçF–çVS°¢6öç7B2Ò7FG5·RçG—UÒÀ¢6VÂÒrç6VÆV7FVBæ–æ6ÇVFW2‡Ræ–B’À¢Æ–W"ÒRçFVÒÓÓÒ'Æ–W""À¢66VçBÒÆ–W"ò"3sS&6R"¢"6cV#sb"À¢6VçG'”ÖöFRÒRçG—RÓÓÒ'G&ö÷W""bbRç7Fæ6RÓÓÒ&†öÆB"À¢FWÆ÷–VD6—†W"ÒRçG—RÓÓÒ&6—†W""bb‡Ræ6—†W$ÖöFRÇÂ&Öö&–ÆR"’ÓÒ&Öö&–ÆR#°¢–b‡6VÂbbVæ—D6öÖ&E&ævR‡R’â’°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ'&v&ƒ#CbÂ#Â"Âãs‚’#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ#CbÂ#Â"Âã#R’#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6WDÆ–æTF6‚…³rÂeÒ“°¢‚ç6†F÷t6öÆ÷"Ò'&v&ƒ#CbÂ#Â"ÂãCR’#°¢‚ç6†F÷t&ÇW"ÒS°¢‚æ&Vv–åF‚‚“°¢‚æ&2‡Rç‚ÂRç’ÂVæ—D6öÖ&E&ævR‡R’ÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚ç&W7F÷&R‚“°¢Ð¢‚ç6fR‚“°¢‚çG&ç6ÆFR‡Rç‚ÂRç’²‡RçG—RÓÓÒ&G&öæR"bb6VçG'”ÖöFRòÖF‚ç6–â†rçF–ÖR¢R²Ræ–B’¢"Òr¢’“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒÃÃÂã#b’#°¢‚ç6†F÷t&ÇW"Ò°¢‚æ&Vv–åF‚‚“²‚æVÆÆ—6RƒÂ2ç"¢ãRÂ2ç"¢ã‚Â2ç"¢ã#"ÂÂÂÖF‚å’¢"“²‚æf–ÆÂ‚“°¢‚ç6†F÷t6öÆ÷"Ò'&v&ƒÃÃÂãSR’#°¢‚ç6†F÷t&ÇW"Ò6VÂòr¢°¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚ç7G&ö¶U7G–ÆRÒ6VÂò"6ffSvB"¢"3ƒ3B#°¢‚æÆ–æUv–GF‚Ò6VÂò2¢#°¢6öç7B&W7F–ætFÆ2Ò°¢v÷&¶W#¢'Bæ7W'&VçBçv÷&¶W$F—&V7F–öç2À¢G&ö÷W#¢'Bæ7W'&VçBçG&ö÷W$F—&V7F–öç2À¢Fæ³¢'Bæ7W'&VçBçFæ´F—&V7F–öç2À¢G&öæS¢'Bæ7W'&VçBæG&öæTF—&V7F–öç2À¢6—†W#¢'Bæ7W'&VçBæ6—†W$F—&V7F–öç2À¢Õ·RçG—UÓ°¢6öç7BÖ÷fVÖVçDFÆ6W2Ò°¢v÷&¶W#¢·&W7F–ætFÆ2Â'Bæ7W'&VçBçv÷&¶W%vÆ²Â'Bæ7W'&VçBçv÷&¶W%vÆ´5ÒÀ¢G&ö÷W#¢·&W7F–ætFÆ2Â'Bæ7W'&VçBçG&ö÷W%vÆ²Â'Bæ7W'&VçBçG&ö÷W%vÆ´5ÒÀ¢òòFæ²‡VÆÇ27F’f—7VÆÇ’&–v–BâG&6²Ö÷fVÖVçB—2æ–ÖFVB2¢òò67&öÆÆ–ærG&VB÷fW&Æ’–ç7FVBöb7v–ærv†öÆRÖ&öG’÷6W2à¢Fæ³¢·&W7F–ætFÆ5ÒÀ¢G&öæS¢·&W7F–ætFÆ2Â'Bæ7W'&VçBæG&öæTÖ÷fUÒÀ¢6—†W#¢·&W7F–ætFÆ5ÒÀ¢Õ·RçG—UÒæf–ÇFW"‚†FÆ2“¢FÆ2—2…DÔÄ–ÖvTVÆVÖVçBÓâ&ööÆVâ†FÆ2’“°¢6öç7Bf—&–ærÒ‡RæGF6µVçF–ÂÇÂ’ârçF–ÖS°¢6öç7BÖ–æ–ætg&ÖRÒ&ööÆVâ‡RæÖ–æ–ær’bbÖF‚æfÆö÷"‚†rçF–ÖR²Ræ–B¢ãC’¢‚’R"ÓÓÒ°¢6öç7BÖ÷fVÖVçDg&ÖRÒÖF‚æfÆö÷"‚†rçF–ÖR²Ræ–B¢ã3r’¢‚’RÖF‚æÖ‚ƒÂÖ÷fVÖVçDFÆ6W2æÆVæwF‚“°¢6öç7BF—&V7F–öæÄFÆ2Ò6VçG'”ÖöFP¢ò'Bæ7W'&VçBçGW'&WDF—&V7F–öç2ÇÂ&W7F–ætFÆ0¢¢Ö–æ–ætg&ÖP¢ò'Bæ7W'&VçBçv÷&¶W$Ö–æRÇÂ&W7F–ætFÆ0¢¢RæÖ÷f–æp¢òÖ÷fVÖVçDFÆ6W5¶Ö÷fVÖVçDg&ÖUÒÇÂ&W7F–ætFÆ0¢¢&W7F–ætFÆ3°¢6öç7BVæ—DFÆ2ÒFWÆ÷–VD6—†W"ò'Bæ7W'&VçBæ6—†W$FWÆ÷–VB¢F—&V7F–öæÄFÆ2ÇÂ'Bæ7W'&VçBçVæ—G3°¢–b‡Væ—DFÆ2’°¢–b‡6VÂ’°¢‚ç6†F÷t&ÇW"Ò°¢‚ç7G&ö¶U7G–ÆRÒ"6ffSvB#°¢‚æÆ–æUv–GF‚Ò"ãS°¢‚æ&Vv–åF‚‚“°¢‚æVÆÆ—6RƒÂ2ç"¢ãC‚Â2ç"¢ã‚Â2ç"¢ãS"ÂÂÂÖF‚å’¢"“°¢‚ç7G&ö¶R‚“°¢Ð¢ÆWB6÷W&6S¢²ƒ¢çVÖ&W#²“¢çVÖ&W#²s¢çVÖ&W#²ƒ¢çVÖ&W"Ó°¢6öç7Bf6–ætævÆRÒçVÖ&W"æ—4f–æ—FR‡Ræf6–ær¢òRæf6–ær¢¢RçFVÒÓÓÒ'Æ–W""ò¢ÖF‚å“°¢–b†FWÆ÷–VD6—†W"’°¢6÷W&6RÒ²ƒ¢Â“¢Âs¢Væ—DFÆ2ææGW&Åv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡BÓ°¢ÒVÇ6R–b†F—&V7F–öæÄFÆ2’°¢6öç7B6VÆÅv–GF‚ÒVæ—DFÆ2ææGW&Åv–GF‚òC°¢6öç7B6VÆÄ†V–v‡BÒVæ—DFÆ2ææGW&Ä†V–v‡Bò#°¢òò6†VWB÷&FW#¢âÂäRÂRÂ4Rò2Â5rÂrÂårà¢6öç7BF—&V7F–öâÒ‚„ÖF‚ç&÷VæB‚†f6–ætævÆR²ÖF‚å’ò"’ò„ÖF‚å’òB’’R‚’²‚’Rƒ°¢6÷W&6RÒ°¢ƒ¢†F—&V7F–öâRB’¢6VÆÅv–GF‚À¢“¢ÖF‚æfÆö÷"†F—&V7F–öâòB’¢6VÆÄ†V–v‡BÀ¢s¢6VÆÅv–GF‚À¢ƒ¢6VÆÄ†V–v‡BÀ¢Ó°¢ÒVÇ6R°¢6öç7B†VF–ærÒRçF&vW@¢òÖF‚æFã"‡RçF&vWBç’ÒRç’ÂRçF&vWBç‚ÒRç‚’²ÖF‚å’ò ¢¢°¢‚ç&÷FFR††VF–ær“°¢6öç7B6VÆÅv–GF‚ÒVæ—DFÆ2ææGW&Åv–GF‚ò3°¢6÷W&6RÒ°¢v÷&¶W#¢²ƒ¢Â“¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ã#rÂs¢6VÆÅv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ãCRÒÀ¢G&ö÷W#¢²ƒ¢6VÆÅv–GF‚Â“¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ã#rÂs¢6VÆÅv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ãCRÒÀ¢Fæ³¢²ƒ¢6VÆÅv–GF‚¢"Â“¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ã#rÂs¢6VÆÅv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ãCRÒÀ¢G&öæS¢²ƒ¢6VÆÅv–GF‚¢"Â“¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ã#rÂs¢6VÆÅv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ãCRÒÀ¢6—†W#¢²ƒ¢Â“¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ã#rÂs¢6VÆÅv–GF‚Âƒ¢Væ—DFÆ2ææGW&Ä†V–v‡B¢ãCRÒÀ¢Õ·RçG—UÓ°¢Ð¢6öç7B6—¦RÒFWÆ÷–VD6—†W ¢ò²s¢sbÂƒ¢S‚Ð¢¢6VçG'”ÖöFP¢ò²s¢cBÂƒ¢cBÐ¢¢Væ—E&VæFW%6—¦U·RçG—UÓ°¢‚ç6†F÷t&ÇW"Ò°¢–b†FWÆ÷–VD6—†W"bbRæ6—†W$ÖöFRÓÒ&FWÆ÷–VB"’‚ævÆö&ÄÇ†Òãcƒ°¢–b‡6VçG'”ÖöFR’°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒÆ–W"ò'&v&ƒ"Â##bÂ#bÂãƒ‚’"¢'&v&ƒ#CÂ“Â‚Âãƒb’#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒRÂ‚Â#Âãs‚’#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6†F÷t6öÆ÷"Ò66VçC°¢‚ç6†F÷t&ÇW"Òƒ°¢‚æ&Vv–åF‚‚“°¢‚æVÆÆ—6RƒÂBÂ#RÂÂÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢f÷"†6öç7B'&6TævÆRöb²ÔÖF‚å’òbÂÖF‚å’ò"ÂÖF‚å’¢ròeÒ’°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò„ÖF‚æ6÷2†'&6TævÆR’¢RÂ2²ÖF‚ç6–â†'&6TævÆR’¢R“°¢‚æÆ–æUFò„ÖF‚æ6÷2†'&6TævÆR’¢3Âb²ÖF‚ç6–â†'&6TævÆR’¢"“°¢‚ç7G&ö¶R‚“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢–b‡RçG—RÓÓÒ'Fæ²"bbRæÖ÷f–ær’°¢òò¶VWF†R–çFVB‡VÆÂ6ö×ÆWFVÇ’&–v–BâÖ÷fVÖVçB—26öÖ×Væ–6FV@¢òò&V†–æBF†RFæ²v—F‚—&VBG&VB–×&W76–öç2æB&W7G&–æV@¢òòGW7Bv¶R–ç7FVBöbG&v–æræ–ÖFVB&'27&÷72F†R7&—FRà¢6öç7B†VF–ærÒçVÖ&W"æ—4f–æ—FR‡Ræf6–ær’òRæf6–ær¢RçFVÒÓÓÒ'Æ–W""ò¢ÖF‚å“°¢6öç7Bf÷'v&E‚ÒÖF‚æ6÷2††VF–ær“°¢6öç7Bf÷'v&E’ÒÖF‚ç6–â††VF–ær“°¢6öç7B6–FU‚ÒÖf÷'v&E“°¢6öç7B6–FU’Òf÷'v&Eƒ°¢6öç7BG&VEVÇ6RÒ†rçF–ÖR¢#"²Ræ–B¢ãr’R“°¢‚ç6fR‚“°¢‚æÆ–æT6Ò'&÷VæB#°¢‚æÆ–æUv–GF‚Ò3°¢f÷"†ÆWBÖ&²Ò²Ö&²Â3²Ö&²³Ò’°¢6öç7B&V"Ò#R²Ö&²¢’²G&VEVÇ6S°¢6öç7BfFRÒã3BÒÖ&²¢ãsS°¢‚ç7G&ö¶U7G–ÆRÒ&v&ƒrÂ"Â"ÂG¶fFWÒ–°¢f÷"†6öç7B6–FRöb²ÓÂÒ’°¢6öç7B6VçFW%‚ÒÖf÷'v&E‚¢&V"²6–FU‚¢2ãR¢6–FS°¢6öç7B6VçFW%’ÒÖf÷'v&E’¢&V"²6–FU’¢2ãR¢6–FS°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò†6VçFW%‚Òf÷'v&E‚¢"ã‚Â6VçFW%’Òf÷'v&E’¢"ã‚“°¢‚æÆ–æUFò†6VçFW%‚²f÷'v&E‚¢"ã‚Â6VçFW%’²f÷'v&E’¢"ã‚“°¢‚ç7G&ö¶R‚“°¢Ð¢Ð¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ3ÂbÂ“"Âã"’#°¢f÷"†6öç7B6–FRöb²ÓÂÒ’°¢6öç7BGW7E‚ÒÖf÷'v&E‚¢3²6–FU‚¢2¢6–FS°¢6öç7BGW7E’ÒÖf÷'v&E’¢3²6–FU’¢2¢6–FS°¢‚æ&Vv–åF‚‚“°¢‚æ&2†GW7E‚ÂGW7E’ÂB²ÖF‚ç6–â†rçF–ÖR¢‚²Ræ–B²6–FR’¢ãrÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢‚æG&t–ÖvR€¢Væ—DFÆ2À¢6÷W&6Rç‚À¢6÷W&6Rç’À¢6÷W&6RçrÀ¢6÷W&6Ræ‚À¢×6—¦Rçrò"À¢×6—¦Ræ‚ò"À¢6—¦RçrÀ¢6—¦Ræ‚À¢“°¢–b†f—&–ær’°¢–b‡6VçG'”ÖöFR’G&uvVöäf—&T7VR‡‚Âf6–ætævÆRÂãc‚ÂG'VR“°¢VÇ6R–b‡RçG—RÓÓÒ'Fæ²"’G&uvVöäf—&T7VR‡‚Âf6–ætævÆRÂã"ÂG'VR“°¢VÇ6R–b‡RçG—RÓÓÒ'G&ö÷W""’G&uvVöäf—&T7VR‡‚Âf6–ætævÆRÂãc"ÂfÇ6R“°¢Ð¢‚æf–ÆÅ7G–ÆRÒ66VçC°¢‚ç6†F÷t6öÆ÷"Ò66VçC°¢‚ç6†F÷t&ÇW"Ò3°¢‚æf–ÆÅ&V7B‚×2ç"¢ãC"Â2ç"¢ãC2Â2ç"¢ãƒBÂ2“°¢‚ç6†F÷t&ÇW"Ò°¢–b‡RçG—RÓÓÒ'v÷&¶W""bb‡Ræ'V–ÆF–ærÇÂRç&W—&–ær’’°¢6öç7B†6RÒrçF–ÖR¢R²Ræ–C°¢6öç7BVffV7D6öÆ÷"ÒRæ'V–ÆF–ærò"6cfC3cb"¢"3sS&6R#°¢6öç7BFööÅ‚ÒÖF‚æ6÷2‡Ræf6–ærÇÂ’¢##°¢6öç7BFööÅ’ÒÖF‚ç6–â‡Ræf6–ærÇÂ’¢##°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒVffV7D6öÆ÷#°¢‚æf–ÆÅ7G–ÆRÒVffV7D6öÆ÷#°¢‚æÆ–æUv–GF‚Ò"ãC°¢‚ç6†F÷t6öÆ÷"ÒVffV7D6öÆ÷#°¢‚ç6†F÷t&ÇW"Òƒ°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò„ÖF‚æ6÷2‡Ræf6–ærÇÂ’¢rÂÖF‚ç6–â‡Ræf6–ærÇÂ’¢r“°¢‚æÆ–æUFò‡FööÅ‚ÂFööÅ’“°¢‚ç7G&ö¶R‚“°¢f÷"†ÆWB7&²Ò²7&²ÂC²7&²²²’°¢6öç7BævÆRÒ†6R²7&²¢ÖF‚å’ò#°¢6öç7B&F—W2ÒB²‚‡7&²²ÖF‚æfÆö÷"†rçF–ÖR¢"’’R2’¢#°¢‚æ&Vv–åF‚‚“°¢‚æ&2‡FööÅ‚²ÖF‚æ6÷2†ævÆR’¢&F—W2ÂFööÅ’²ÖF‚ç6–â†ævÆR’¢&F—W2ÂãRÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢ÒVÇ6R–b‡RçG—RÓÓÒ'Fæ²"’°¢‚æf–ÆÅ&V7B‚×2ç"Â×2ç"¢ãc"Â2ç"¢"Â2ç"¢ã#B“°¢‚ç7G&ö¶U&V7B‚×2ç"Â×2ç"¢ãc"Â2ç"¢"Â2ç"¢ã#B“°¢‚æf–ÆÅ7G–ÆRÒ"3#c#’#°¢‚æf–ÆÅ&V7B‚×2ç"¢ãs"Â×2ç"¢ã‚ÂrÂ2ç"¢ãb“°¢‚æf–ÆÅ&V7B‡2ç"¢ãSRÂ×2ç"¢ã‚ÂrÂ2ç"¢ãb“°¢‚æf–ÆÅ7G–ÆRÒ"6CVcFS’#²‚æf–ÆÅ&V7BƒÂÓ2Â2ç"²2Âb“°¢‚æf–ÆÅ7G–ÆRÒ66VçC²‚æ&Vv–åF‚‚“²‚æ&2‚×2ç"¢ãSRÂÂ2ÂÂr“²‚æ&2‡2ç"¢ãSRÂÂ2ÂÂr“²‚æf–ÆÂ‚“°¢ÒVÇ6R–b‡RçG—RÓÓÒ'G&ö÷W""’°¢‚æ&Vv–åF‚‚“²‚æÖ÷fUFòƒÂ×2ç"“²‚æÆ–æUFò‡2ç"¢ã‚Â2ç"¢ãSR“²‚æÆ–æUFòƒÂ2ç"“²‚æÆ–æUFò‚×2ç"¢ã‚Â2ç"¢ãSR“²‚æ6Æ÷6UF‚‚“²‚æf–ÆÂ‚“²‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ"6CVcFS’#²‚æf–ÆÅ&V7B‚Ó2Â×2ç"¢ã3‚ÂbÂr“°¢ÒVÇ6R°¢‚æ&Vv–åF‚‚“°¢‚æ&2ƒÂÂ2ç"¢ãƒ"ÂÂr“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚æf–ÆÅ7G–ÆRÒ"6CVcFS’#°¢‚æf–ÆÅ&V7Bƒ2ÂÓ2ÂÂb“°¢Ð¢‚ç&W7F÷&R‚“°¢&"€¢‚À¢Rç‚Ò2ç"À¢Rç’Ò2ç"Ò’À¢2ç"¢"À¢Ræ‡òRæÖ‚À¢Æ–W"ò"3SVCf#R"¢"6VCS#fB"À¢“°¢–b‡RçG—RÓÓÒ&6—†W""bb‡Ræ6—†W$ÖöFRÓÓÒ&FWÆ÷––ær"ÇÂRæ6—†W$ÖöFRÓÓÒ'6¶–ær"’’°¢6öç7BGW&F–öâÒRæ6—†W$ÖöFRÓÓÒ&FWÆ÷––ær"ò4•„U%ôDUÄõ•ôEU$D”ôâ¢4•„U%õ4µôEU$D”ôã°¢&"‡‚ÂRç‚Ò2ç"ÂRç’Ò2ç"ÒRÂ2ç"¢"Â‡Ræ6—†W%&öw&W72ÇÂ’òGW&F–öâÂ"6cfC3cb"“°¢Ð¢–b‚‡RæÆWfVÂÇÂ’â’°¢‚æf–ÆÅ7G–ÆRÒ"6cfC3cb#°¢‚æföçBÒ#“—‚7—7FVÒ×V’#°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚æf–ÆÅFW‡B‚‡RæÆWfVÂÇÂ’ÓÓÒ2ò.)xn)xb"¢.)xb"ÂRç‚ÂRç’Ò2ç"ÒB“°¢Ð¢–b†—4–FÆUv÷&¶W"†rÂR’’°¢6öç7BVÇ6RÒ²ÖF‚ç6–â†rçF–ÖR¢R²Ræ–B’¢ã#°¢‚ç6fR‚“°¢‚çG&ç6ÆFR‡Rç‚ÂRç’Ò2ç"Ò#R“°¢‚ç&÷FFR„ÖF‚å’òB“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒBÂ#rÂ#‚Âã’’#°¢‚ç7G&ö¶U7G–ÆRÒ"3sS&6R#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6†F÷t6öÆ÷"Ò"3SVCf#R#°¢‚ç6†F÷t&ÇW"Ò“°¢‚æf–ÆÅ&V7B‚Ób¢VÇ6RÂÓb¢VÇ6RÂ"¢VÇ6RÂ"¢VÇ6R“°¢‚ç7G&ö¶U&V7B‚Ób¢VÇ6RÂÓb¢VÇ6RÂ"¢VÇ6RÂ"¢VÇ6R“°¢‚ç&W7F÷&R‚“°¢Ð¢–b‡Væ—D–å7WÇ•&ævR†rÂR’’°¢6öç7B6†–VÆE‚ÒRç‚²2ç"²C°¢6öç7B6†–VÆE’ÒRç’Ò2ç"ÒC°¢‚ç6fR‚“°¢‚çG&ç6ÆFR‡6†–VÆE‚Â6†–VÆE’“°¢‚æf–ÆÅ7G–ÆRÒÆ–W"ò'&v&ƒƒRÂ#BÂƒÂãsB’"¢'&v&ƒ#3rÂƒ"Â’Âãs"’#°¢‚ç7G&ö¶U7G–ÆRÒÆ–W"ò"6#†ffc"¢"6ff362#°¢‚æÆ–æUv–GF‚Òã3°¢‚ç6†F÷t6öÆ÷"ÒÆ–W"ò"3SVCf#R"¢"6VCS#fB#°¢‚ç6†F÷t&ÇW"Òc°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFòƒÂÓr“°¢‚æÆ–æUFòƒbÂÓB“°¢‚æÆ–æUFòƒRÂ2“°¢‚çVG&F–47W'fUFòƒ2ÂrÂÂ’“°¢‚çVG&F–47W'fUFò‚Ó2ÂrÂÓRÂ2“°¢‚æÆ–æUFò‚ÓbÂÓB“°¢‚æ6Æ÷6UF‚‚“°¢‚æf–ÆÂ‚“°¢‚ç7G&ö¶R‚“°¢‚ç&W7F÷&R‚“°¢Ð¢Ð¢f÷"†6öç7B2öbrç6†÷G2ÇÂµÒ’°¢6öç7BÒÒ2æÆ–fRò2æÖ„Æ–fRÀ¢‚Ò2ç‚²‡2çG‚Ò2ç‚’¢À¢’Ò2ç’²‡2çG’Ò2ç’’¢°¢–b‚—5f—6–&ÆR†rÂ²ƒ¢‚Â“¢’ÒÂ"’’6öçF–çVS°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ2çFVÒÓÓÒ'Æ–W""ò"6ffSvB"¢"6fcsc“#°¢‚æf–ÆÅ7G–ÆRÒ‚ç7G&ö¶U7G–ÆS°¢‚ç6†F÷t6öÆ÷"Ò‚ç7G&ö¶U7G–ÆS°¢‚ç6†F÷t&ÇW"Ò2æ¶–æBÓÓÒ'6†VÆÂ"ò¢S°¢–b‡2æ¶–æBÓÓÒ'6†VÆÂ"’°¢‚æ&Vv–åF‚‚“°¢‚æ&2‡‚Â’ÂBÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢ÒVÇ6R°¢‚æÆ–æUv–GF‚Ò#°¢‚æ&Vv–åF‚‚“°¢‚æÖ÷fUFò‡‚Ò‡2çG‚Ò2ç‚’¢ã3RÂ’Ò‡2çG’Ò2ç’’¢ã3R“°¢‚æÆ–æUFò‡‚Â’“°¢‚ç7G&ö¶R‚“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢f÷"†6öç7BâöbræFÖvTçVÖ&W'2ÇÂµÒ’°¢–b‚—5f—6–&ÆR†rÂâÂ‚’’6öçF–çVS°¢‚ç6fR‚“°¢‚ævÆö&ÄÇ†ÒÖF‚æÖ–âƒÂâæÆ–fR¢"“°¢‚æf–ÆÅ7G–ÆRÒâçFVÒÓÓÒ'Æ–W""ò"6ffSvB"¢"6fcƒC“b#°¢‚ç7G&ö¶U7G–ÆRÒ"3ss’#°¢‚æÆ–æUv–GF‚Ò3°¢‚æföçBÒ#“7‚7—7FVÒ×V’#°¢‚çFW‡DÆ–vâÒ&6VçFW"#°¢‚ç7G&ö¶UFW‡B†ÒG¶âæÖ÷VçGÖÂâç‚Ââç’“°¢‚æf–ÆÅFW‡B†ÒG¶âæÖ÷VçGÖÂâç‚Ââç’“°¢‚ç&W7F÷&R‚“°¢Ð¢òò&VÂ%E2fös¢&Æ6²—2VæW‡Æ÷&VBÂw&W’—2W‡Æ÷&VB'WB7W'&VçFÇ’÷W@¢òòöb6–v‡BÂæBVæVÖ–W2&RöæÇ’G&vâv†–ÆRÆ–W"6÷W&6R6â6VRF†VÒà¢òò–çBöæÇ’F†R6‡&÷VB6VÆÇ2âFòæ÷BW&6R†öÆW2g&öÒF†R6çf2†W&S ¢òòFW7F–æF–öâÖ÷WBv÷VÆBÇ6òW&6RF†RFW'&–âæBg&–VæFÇ’Væ—G2G&và¢òòVæFW&æVF‚ÂÆVf–ærF†RvR&6¶w&÷VæBf—6–&ÆR–ç7FVBöbF†RvÖRà¢–b†ræfötVæ&ÆVB’°¢6öç7Bf—6–öâÒÆ–W%f—6–öâ†r“°¢‚ç6fR‚“°¢f÷"†ÆWB&÷rÒ²&÷rÂdôuõ$õu3²&÷r²²¢f÷"†ÆWB6öÂÒ²6öÂÂdôuô4ôÅ3²6öÂ²²’°¢6öç7B–æFW‚Ò&÷r¢dôuô4ôÅ2²6öÃ°¢6öç7B7‚Ò6öÂ¢dôuô4TÄÂ²dôuô4TÄÂò#°¢6öç7B7’Ò&÷r¢dôuô4TÄÂ²dôuô4TÄÂò#°¢6öç7B7W'&VçFÇ•f—6–&ÆRÒf—6–öâç6öÖR€¢‡b’ÓâÖF‚æ‡—÷B‡bç‚Ò7‚Âbç’Ò7’’ÃÒbç"²dôuô4TÄÂ¢ã’À¢“°¢–b†7W'&VçFÇ•f—6–&ÆR’6öçF–çVS°¢‚æf–ÆÅ7G–ÆRÒræföu6VVå¶–æFW…Ð¢ò'&v&ƒ"Â‚Â"Âãs"’ ¢¢'&v&ƒ"ÂbÂ’Âã“‚’#°¢‚æf–ÆÅ&V7B†6öÂ¢dôuô4TÄÂÂ&÷r¢dôuô4TÄÂÂdôuô4TÄÂ²Âdôuô4TÄÂ²“°¢Ð¢‚ç&W7F÷&R‚“°¢Ð¢–b‡ö–çFW"æ7W'&VçCòæG&r’°¢6öç7BÒö–çFW"æ7W'&VçBÀ¢æ÷rÒ67&VVåFõv÷&ÆB‡ç‚Âç’“°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒƒRÃ#BÃƒÂã"’#°¢‚ç7G&ö¶U7G–ÆRÒ"3SVCf#R#°¢‚æf–ÆÅ&V7B‡çw‚Âçw’Âæ÷rç‚Òçw‚Âæ÷rç’Òçw’“°¢‚ç7G&ö¶U&V7B‡çw‚Âçw’Âæ÷rç‚Òçw‚Âæ÷rç’Òçw’“°¢Ð¢‚ç&W7F÷&R‚“°¢òòÖ–æ–Ö ¢6öç7B×rÒ3"À¢Ö‚Òƒ"À¢×‚ÒrÒ×rÒ"À¢×’Ò#°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ"ÃbÃ‚Âã“‚’#°¢‚æf–ÆÅ&V7B†×‚Â×’Â×rÂÖ‚“°¢‚ç7G&ö¶U7G–ÆRÒ"333VS’#°¢‚ç7G&ö¶U&V7B†×‚Â×’Â×rÂÖ‚“°¢f÷"†ÆWB&÷rÒ²&÷rÂdôuõ$õu3²&÷r²²¢f÷"†ÆWB6öÂÒ²6öÂÂdôuô4ôÅ3²6öÂ²²’°¢–b‚ræföu6VVå·&÷r¢dôuô4ôÅ2²6öÅÒ’6öçF–çVS°¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒS‚Â"ÂbÂã3‚’#°¢‚æf–ÆÅ&V7B†×‚²†6öÂòdôuô4ôÅ2’¢×rÂ×’²‡&÷ròdôuõ$õu2’¢Ö‚Â×ròdôuô4ôÅ2²ÂÖ‚òdôuõ$õu2²“°¢Ð¢‚æf–ÆÅ7G–ÆRÒ'&v&ƒ‚Â#bÂ#Âãs"’#°¢f÷"†6öç7B&–FvRöbD5D”4ÅõÄDTU2’°¢‚æ&Vv–åF‚‚“°¢‚æVÆÆ—6R†×‚²‡&–FvRç‚òr’¢×rÂ×’²‡&–FvRç’ò‚’¢Ö‚Â‡&–FvRç'‚òr’¢×rÂ‡&–FvRç'’ò‚’¢Ö‚Â&–FvRç&÷FF–öâÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢Ð¢f÷"†6öç7Bòöb²ââæræ'V–ÆF–æw2ÂââærçVæ—G5Ò’°¢–b†—5Væ—B†ò’bbòæv'&—6öæVDB’6öçF–çVS°¢–b†òçFVÒÓÓÒ&VæV×’"bb—5f—6–&ÆR†rÂòÂ’’6öçF–çVS°¢‚æf–ÆÅ7G–ÆRÒòçFVÒÓÓÒ'Æ–W""ò"3SVCf#R"¢"6VCS#fB#°¢‚æf–ÆÅ&V7B†×‚²†òç‚òr’¢×rÒ"Â×’²†òç’ò‚’¢Ö‚Ò"ÂBÂB“°¢Ð¢f÷"†6öç7Bö&¦V7F—fRöbræö&¦V7F—fW2ÇÂµÒ’°¢6öç7B–çFVÂÒö&¦V7F—fT–çFVÂ†rÂö&¦V7F—fR“°¢–b‚–çFVÂæF—66÷fW&VB’6öçF–çVS°¢‚æf–ÆÅ7G–ÆRÒ–çFVÂçf—6–&ÆRò"3sƒ“†2"¢–çFVÅ&VÆ”÷W&F–öæÂ†ö&¦V7F—fR’ò"6c†VB"¢ö&¦V7F—fRæ÷væW"ÓÓÒ'Æ–W""ò"3SVCf#R"¢ö&¦V7F—fRæ÷væW"ÓÓÒ&VæV×’"ò"6VCS#fB"¢"6cfC3cb#°¢‚æ&Vv–åF‚‚“°¢‚æ&2†×‚²†ö&¦V7F—fRç‚òr’¢×rÂ×’²†ö&¦V7F—fRç’ò‚’¢Ö‚Â2ÂÂÖF‚å’¢"“°¢‚æf–ÆÂ‚“°¢Ð¢6öç7B7F—fTÆW'G2Ò†ræGF6´ÆW'G2ÇÂµÒ’æf–ÇFW"‚†ÆW'B’ÓâÆW'BçFVÒÓÓÒ'Æ–W""bbÆW'BæW‡—&W4BârçF–ÖR“°¢f÷"†6öç7BÆW'Böb7F—fTÆW'G2’°¢6öç7Bö&¦V7BÒ²ââærçVæ—G2Âââæræ'V–ÆF–æw5Òæf–æB‚†6æF–FFR’Óâ6æF–FFRæ–BÓÓÒÆW'BçF&vWD–Bbb6æF–FFRçFVÒÓÓÒ'Æ–W""“°¢6öç7B‚Ò×‚²‚‚†ö&¦V7Còç‚óòÆW'Bç‚’òr’¢×r“°¢6öç7B’Ò×’²‚‚†ö&¦V7Còç’óòÆW'Bç’’ò‚’¢Ö‚“°¢6öç7BVÇ6RÒr²„ÖF‚ç6–â‚†rçF–ÖRÒÆW'Bç7F'FVDB’¢’²’¢"ãS°¢‚ç6fR‚“°¢‚ç7G&ö¶U7G–ÆRÒ"6fc3cSr#°¢‚æÆ–æUv–GF‚Ò#°¢‚ç6†F÷t6öÆ÷"Ò"6fcƒ6b#°¢‚ç6†F÷t&ÇW"Òƒ°¢‚ævÆö&ÄÇ†Òãr²ÖF‚ç6–â‚†rçF–ÖRÒÆW'Bç7F'FVDB’¢"’¢ã#S°¢‚ç7G&ö¶U&V7B†‚ÒVÇ6Rò"Â’ÒVÇ6Rò"ÂVÇ6RÂVÇ6R“°¢‚ç&W7F÷&R‚“°¢Ð¢‚ç7G&ö¶U7G–ÆRÒ"6cfC3cb#°¢‚ç7G&ö¶U&V7B€¢×‚²‚†ræ6ÖW&ç‚Òròƒ"¢rç¦ööÒ’’òr’¢×rÀ¢×’²‚†ræ6ÖW&ç’Ò‚òƒ"¢rç¦ööÒ’’ò‚’¢Ö‚À¢‡ròrç¦ööÒòr’¢×rÀ¢†‚òrç¦ööÒò‚’¢Ö‚À¢“°¢Ð¢gVæ7F–öâ&"€¢ƒ¢6çf5&VæFW&–æt6öçFW‡C$BÀ¢'ƒ¢çVÖ&W"À¢'“¢çVÖ&W"À¢s¢çVÖ&W"À¢¢çVÖ&W"À¢6öÆ÷#¢7G&–ærÀ¢’°¢‚æf–ÆÅ7G–ÆRÒ"3c#°¢‚æf–ÆÅ&V7B†'‚Â'’ÂrÂB“°¢‚æf–ÆÅ7G–ÆRÒ6öÆ÷#°¢‚æf–ÆÅ&V7B†'‚Â'’Âr¢ÖF‚æÖ‚ƒÂ’ÂB“°¢Ð¢6öç7B6öÖÖ—EG&fVÄ6†ö–6RÒ‡v÷&ÆC¢Â6†ö–6S¢&VævvR"Â&F—&V7B"’Óâ°¢6öç7BrÒvÖRæ7W'&VçC°¢6öç7B6öÖ&BÒrçVæ—G2æf–ÇFW"‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""bb—46öÖ&EVæ—B‡Væ—B’bbrç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’“°¢6WDÖ÷fT6†ö÷6W"†çVÆÂ“°¢–b‚6öÖ&BæÆVæwF‚’°¢ræÖW76vRÒ%6VÆV7B6öÆF–W'2ÂFæ·2Â÷"G&öæW2&Vf÷&R—77V–ærG&fVÂ÷&FW"â#°¢7–æ2‚“°¢&WGW&ã°¢Ð¢ræÖöFRÒ6†ö–6RÓÓÒ&VævvR"ò&Ö÷fRÖVævvR"¢&Ö÷fR#°¢6öÖÖæB‡v÷&ÆBç‚Âv÷&ÆBç’“°¢Ó°¢6öç7BBÒ†S¢&V7Båö–çFW$WfVçB’Óâ°¢–b†Ræ'WGFöâÓÒ’&WGW&ã°¢6WDÖ÷fT6†ö÷6W"†çVÆÂ“°¢6öç7B"Ò6çf2æ7W'&VçBævWD&÷VæF–æt6Æ–VçE&V7B‚’À¢7‚ÒRæ6Æ–VçE‚Ò"æÆVgBÀ¢7’ÒRæ6Æ–VçE’Ò"çF÷À¢wÒ67&VVåFõv÷&ÆB‡7‚Â7’“°¢–b†Rçö–çFW%G—RÓÓÒ'F÷V6‚"’°¢F÷V6…ö–çG2æ7W'&VçBç6WB†Rçö–çFW$–BÂ²ƒ¢7‚Â“¢7’Ò“°¢–b‡F÷V6…ö–çG2æ7W'&VçBç6—¦RãÒ"’°¢–b†Ö÷fTvW7GW&Ræ7W'&VçCòçF–ÖW"’6ÆV%F–ÖV÷WB†Ö÷fTvW7GW&Ræ7W'&VçBçF–ÖW"“°¢Ö÷fTvW7GW&Ræ7W'&VçBÒçVÆÃ°¢6öç7B¶Â%ÒÒ²ââçF÷V6…ö–çG2æ7W'&VçBçfÇVW2‚•Ó°¢6öç7BÖ–BÒ²ƒ¢†ç‚²"ç‚’ò"Â“¢†ç’²"ç’’ò"Ó°¢–æ6‚æ7W'&VçBÒ°¢F—7Fæ6S¢ÖF‚æÖ‚ƒÂÖF‚æ‡—÷B†ç‚Ò"ç‚Âç’Ò"ç’’’À¢¦ööÓ¢vÖRæ7W'&VçBç¦ööÒÀ¢v÷&ÆDÖ–C¢67&VVåFõv÷&ÆB†Ö–Bç‚ÂÖ–Bç’’À¢Ó°¢–æ6„6öç7VÖVBæ7W'&VçBÒG'VS°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢6çf2æ7W'&VçBç6WEö–çFW$6GW&R†Rçö–çFW$–B“°¢&WGW&ã°¢Ð¢Ð¢ö–çFW"æ7W'&VçBÒ°¢ƒ¢7‚À¢“¢7’À¢wƒ¢wç‚À¢w“¢wç’À¢G&s¢fÇ6RÀ¢7F'C¢²ƒ¢7‚Â“¢7’ÒÀ¢Ó°¢6çf2æ7W'&VçBç6WEö–çFW$6GW&R†Rçö–çFW$–B“°¢6öç7BrÒvÖRæ7W'&VçC°¢6öç7B†56VÆV7FVD6öÖ&BÒrçVæ—G2ç6öÖR‚‡Væ—B’Óà¢Væ—BçFVÒÓÓÒ'Æ–W""bb—46öÖ&EVæ—B‡Væ—B’bbrç6VÆV7FVBæ–æ6ÇVFW2‡Væ—Bæ–B’“°¢6öç7B†—Dg&–VæFÇ’Ò²ââærçVæ—G2Âââæræ'V–ÆF–æw5Òç6öÖR‚†ö&¦V7B’Óà¢ö&¦V7BçFVÒÓÓÒ'Æ–W""bbÖF‚æ‡—÷B†ö&¦V7Bç‚Òwç‚Âö&¦V7Bç’Òwç’’ÂSR“°¢6öç7B×rÒ3"ÂÖ‚Òƒ"Â×‚Ò6çf2æ7W'&VçBæ6Æ–VçEv–GF‚Ò×rÒ"Â×’Ò#°¢6öç7B÷fW$Ö–æ–ÖÒ7‚ãÒ×‚bb7‚ÃÒ×‚²×rbb7’ãÒ×’bb7’ÃÒ×’²Öƒ°¢–b†ræÖöFRÓÓÒ'6VÆV7B"bb†56VÆV7FVD6öÖ&Bbb†—Dg&–VæFÇ’bb÷fW$Ö–æ–Ö’°¢6öç7BvW7GW&RÒ°¢÷VæVC¢fÇ6RÀ¢7F'C¢²ƒ¢7‚Â“¢7’ÒÀ¢v÷&ÆC¢wÀ¢6†ö–6S¢çVÆÂ2&VævvR"Â&F—&V7B"ÂçVÆÂÀ¢F–ÖW#¢VæFVf–æVB2&WGW&åG—SÇG—Vöb6WEF–ÖV÷WCâÂVæFVf–æVBÀ¢Ó°¢vW7GW&RçF–ÖW"Ò6WEF–ÖV÷WB‚‚’Óâ°¢–b†Ö÷fTvW7GW&Ræ7W'&VçBÓÒvW7GW&RÇÂö–çFW"æ7W'&VçCòæG&r’&WGW&ã°¢vW7GW&Ræ÷VæVBÒG'VS°¢6WDÖ÷fT6†ö÷6W"‡°¢ƒ¢ÖF‚æÖ‚ƒ"ÂÖF‚æÖ–â†6çf2æ7W'&VçBæ6Æ–VçEv–GF‚Ò"Â7‚’’À¢“¢ÖF‚æÖ‚ƒ"ÂÖF‚æÖ–â†6çf2æ7W'&VçBæ6Æ–VçD†V–v‡BÒ"Â7’’’À¢v÷&ÆC¢wÀ¢6†ö–6S¢çVÆÂÀ¢Ò“°¢ÒÂC#“°¢Ö÷fTvW7GW&Ræ7W'&VçBÒvW7GW&S°¢Ð¢Ó°¢6öç7BÒÒ†S¢&V7Båö–çFW$WfVçB’Óâ°¢6öç7B"Ò6çf2æ7W'&VçBævWD&÷VæF–æt6Æ–VçE&V7B‚’À¢7‚ÒRæ6Æ–VçE‚Ò"æÆVgBÀ¢7’ÒRæ6Æ–VçE’Ò"çF÷°¢–b†Rçö–çFW%G—RÓÓÒ'F÷V6‚"bbF÷V6…ö–çG2æ7W'&VçBæ†2†Rçö–çFW$–B’’°¢F÷V6…ö–çG2æ7W'&VçBç6WB†Rçö–çFW$–BÂ²ƒ¢7‚Â“¢7’Ò“°¢–b‡–æ6‚æ7W'&VçBbbF÷V6…ö–çG2æ7W'&VçBç6—¦RãÒ"’°¢6öç7B¶Â%ÒÒ²ââçF÷V6…ö–çG2æ7W'&VçBçfÇVW2‚•Ó°¢6öç7BÖ–BÒ²ƒ¢†ç‚²"ç‚’ò"Â“¢†ç’²"ç’’ò"Ó°¢6öç7BF—7Fæ6RÒÖF‚æÖ‚ƒÂÖF‚æ‡—÷B†ç‚Ò"ç‚Âç’Ò"ç’’“°¢6öç7BæW‡E¦ööÒÒÖF‚æÖ‚ƒãSRÂÖF‚æÖ–âƒãrÂ–æ6‚æ7W'&VçBç¦ööÒ¢†F—7Fæ6Rò–æ6‚æ7W'&VçBæF—7Fæ6R’’“°¢6öç7BrÒvÖRæ7W'&VçC°¢rç¦ööÒÒæW‡E¦ööÓ°¢Ö÷fT6ÖW&Fò€¢–æ6‚æ7W'&VçBçv÷&ÆDÖ–Bç‚Ò†Ö–Bç‚Ò6çf2æ7W'&VçBæ6Æ–VçEv–GF‚ò"’òæW‡E¦ööÒÀ¢–æ6‚æ7W'&VçBçv÷&ÆDÖ–Bç’Ò†Ö–Bç’Ò6çf2æ7W'&VçBæ6Æ–VçD†V–v‡Bò"’òæW‡E¦ööÒÀ¢“°¢&WGW&ã°¢Ð¢Ð¢–b‚ö–çFW"æ7W'&VçB’&WGW&ã°¢6öç7BÒö–çFW"æ7W'&VçC°¢6öç7BvW7GW&RÒÖ÷fTvW7GW&Ræ7W'&VçC°¢–b†vW7GW&Sòæ÷VæVB’°¢6öç7BG’Ò7’ÒvW7GW&Rç7F'Bç“°¢6öç7B6†ö–6RÒG’ÂÓ3Bò&VævvR"¢G’â3Bò&F—&V7B"¢çVÆÃ°¢–b†6†ö–6RÓÒvW7GW&Ræ6†ö–6R’°¢vW7GW&Ræ6†ö–6RÒ6†ö–6S°¢6WDÖ÷fT6†ö÷6W"‡°¢ƒ¢ÖF‚æÖ‚ƒ"ÂÖF‚æÖ–â†6çf2æ7W'&VçBæ6Æ–VçEv–GF‚Ò"ÂvW7GW&Rç7F'Bç‚’’À¢“¢ÖF‚æÖ‚ƒ"ÂÖF‚æÖ–â†6çf2æ7W'&VçBæ6Æ–VçD†V–v‡BÒ"ÂvW7GW&Rç7F'Bç’’’À¢v÷&ÆC¢vW7GW&Rçv÷&ÆBÀ¢6†ö–6RÀ¢Ò“°¢Ð¢ç‚Ò7ƒ°¢ç’Ò7“°¢&WGW&ã°¢Ð¢–b„ÖF‚æ‡—÷B‡7‚Òç7F'Bç‚Â7’Òç7F'Bç’’â"’°¢–b†vW7GW&SòçF–ÖW"’6ÆV%F–ÖV÷WB†vW7GW&RçF–ÖW"“°¢Ö÷fTvW7GW&Ræ7W'&VçBÒçVÆÃ°¢æG&rÒG'VS°¢Ð¢–b‡æG&r’°¢6öç7BG‚Ò7‚Òç‚À¢G’Ò7’Òç“°¢–b†ÖF6„ÖVF–‚"‡ö–çFW#¢6ö'6R’"’æÖF6†W2’°¢vÖRæ7W'&VçBæ6ÖW&ç‚ÓÒG‚òvÖRæ7W'&VçBç¦ööÓ°¢vÖRæ7W'&VçBæ6ÖW&ç’ÓÒG’òvÖRæ7W'&VçBç¦ööÓ°¢çw‚Ò67&VVåFõv÷&ÆB‡7‚Â7’’çƒ°¢çw’Ò67&VVåFõv÷&ÆB‡7‚Â7’’ç“°¢Ð¢ç‚Ò7ƒ°¢ç’Ò7“°¢Ð¢Ó°¢6öç7BRÒ†S¢&V7Båö–çFW$WfVçB’Óâ°¢–b†Rçö–çFW%G—RÓÓÒ'F÷V6‚"’°¢F÷V6…ö–çG2æ7W'&VçBæFVÆWFR†Rçö–çFW$–B“°¢–b‡–æ6„6öç7VÖVBæ7W'&VçB’°¢–b‡F÷V6…ö–çG2æ7W'&VçBç6—¦RÂ"’–æ6‚æ7W'&VçBÒçVÆÃ°¢–b‡F÷V6…ö–çG2æ7W'&VçBç6—¦RÓÓÒ’–æ6„6öç7VÖVBæ7W'&VçBÒfÇ6S°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢&WGW&ã°¢Ð¢Ð¢6öç7BvW7GW&RÒÖ÷fTvW7GW&Ræ7W'&VçC°¢–b†vW7GW&SòçF–ÖW"’6ÆV%F–ÖV÷WB†vW7GW&RçF–ÖW"“°¢Ö÷fTvW7GW&Ræ7W'&VçBÒçVÆÃ°¢–b†vW7GW&Sòæ÷VæVB’°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢–b†vW7GW&Ræ6†ö–6R’6öÖÖ—EG&fVÄ6†ö–6R†vW7GW&Rçv÷&ÆBÂvW7GW&Ræ6†ö–6R“°¢&WGW&ã°¢Ð¢6öç7BÒö–çFW"æ7W'&VçC°¢–b‚’&WGW&ã°¢6öç7B"Ò6çf2æ7W'&VçBævWD&÷VæF–æt6Æ–VçE&V7B‚’À¢7‚ÒRæ6Æ–VçE‚Ò"æÆVgBÀ¢7’ÒRæ6Æ–VçE’Ò"çF÷À¢wÒ67&VVåFõv÷&ÆB‡7‚Â7’’À¢rÒvÖRæ7W'&VçC°¢–b‚æG&r’ræÖF6…7FG2çÆ–W$7F–öç2²³°¢òòF†RÖ–æ–Ö—2â–çFW&7F—fRæf–vF–öâ6öçG&öÂÂæ÷B'BöbF†Rv÷&ÆBà¢6öç7B×rÒ3"ÂÖ‚Òƒ"Â×‚Ò6çf2æ7W'&VçBæ6Æ–VçEv–GF‚Ò×rÒ"Â×’Ò#°¢–b‚æG&rbb7‚ãÒ×‚bb7‚ÃÒ×‚²×rbb7’ãÒ×’bb7’ÃÒ×’²Ö‚’°¢6öç7BÆW'G2Ò†ræGF6´ÆW'G2ÇÂµÒ¢æf–ÇFW"‚†ÆW'B’ÓâÆW'BçFVÒÓÓÒ'Æ–W""bbÆW'BæW‡—&W4BârçF–ÖR¢ç6÷'B‚†Â"’Óâ"ç7F'FVDBÒç7F'FVDB“°¢6öç7BFVDÆW'BÒÆW'G2æf–æB‚†ÆW'B’Óâ°¢6öç7Bö&¦V7BÒ²ââærçVæ—G2Âââæræ'V–ÆF–æw5Òæf–æB‚†6æF–FFR’Óâ6æF–FFRæ–BÓÓÒÆW'BçF&vWD–Bbb6æF–FFRçFVÒÓÓÒ'Æ–W""“°¢6öç7B‚Ò×‚²‚‚†ö&¦V7Còç‚óòÆW'Bç‚’òr’¢×r“°¢6öç7B’Ò×’²‚‚†ö&¦V7Còç’óòÆW'Bç’’ò‚’¢Ö‚“°¢&WGW&âÖF‚æ‡—÷B‡7‚Ò‚Â7’Ò’’ÃÒc°¢Ò“°¢6öç7Bfö7W2ÒFVDÆW'@¢ò²ââærçVæ—G2Âââæræ'V–ÆF–æw5Òæf–æB‚†6æF–FFR’Óâ6æF–FFRæ–BÓÓÒFVDÆW'BçF&vWD–Bbb6æF–FFRçFVÒÓÓÒ'Æ–W""’ÇÂFVDÆW'@¢¢²ƒ¢‚‡7‚Ò×‚’ò×r’¢rÂ“¢‚‡7’Ò×’’òÖ‚’¢‚Ó°¢Ö÷fT6ÖW&Fò†fö7W2ç‚Âfö7W2ç’“°¢ræÖW76vRÒFVDÆW'Bò$6ÖW&§V×VBFòF†RÆFW7BGF6²ÆW'Bâ"¢%f–Ww÷'BÖ÷fVBFòÖ–æ–ÖÆö6F–öââ#°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢&WGW&ã°¢Ð¢–b‡æG&rbbÖF6„ÖVF–‚"‡ö–çFW#¢6ö'6R’"’æÖF6†W2’°¢6öç7BƒÒÖF‚æÖ–â‡çw‚Âwç‚’À¢ƒ"ÒÖF‚æÖ‚‡çw‚Âwç‚’À¢“ÒÖF‚æÖ–â‡çw’Âwç’’À¢“"ÒÖF‚æÖ‚‡çw’Âwç’“°¢6öç7B&÷†VBÒrçVæ—G0¢æf–ÇFW"€¢‡R’Óà¢RçFVÒÓÓÒ'Æ–W""bbRæv'&—6öæVDBbbRç‚âƒbbRç‚Âƒ"bbRç’â“bbRç’Â“"À¢¢æÖ‚‡R’ÓâRæ–B“°¢rç6VÆV7FVBÒRç6†–gD¶W¢ò²ââææWr6WB…²ââærç6VÆV7FVBÂââæ&÷†VEÒ•Ð¢¢&÷†VC°¢ræÖW76vRÒrç6VÆV7FVBæÆVæwF€¢òG¶rç6VÆV7FVBæÆVæwF‡ÒVæ—G26VÆV7FVBæ ¢¢$æòVæ—G2–â6VÆV7F–öâ&÷‚â#°¢ÒVÇ6R–b‚æG&r’°¢6öç7B6VÆV7FVEVæ—G2ÒrçVæ—G2æf–ÇFW"€¢‡R’ÓâRçFVÒÓÓÒ'Æ–W""bbrç6VÆV7FVBæ–æ6ÇVFW2‡Ræ–B’À¢“°¢6öç7B6VÆV7FVEv÷&¶W'2Ò6VÆV7FVEVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçG—RÓÓÒ'v÷&¶W""“°¢6öç7B&W6÷W&6UFÒræ7'—7FÇ0¢æÖ‚‡&W6÷W&6RÂ–æFW‚’Óâ‡²&W6÷W&6RÂ–æFW‚Ò’¢æf–ÇFW"‚‡²&W6÷W&6RÒ’Óâ&W6÷W&6RæÖ÷VçBâbb—5f—6–&ÆR†rÂ&W6÷W&6RÂ#B’¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç&W6÷W&6Rç‚Òwç‚Âç&W6÷W&6Rç’Òwç’’ÒÖF‚æ‡—÷B†"ç&W6÷W&6Rç‚Òwç‚Â"ç&W6÷W&6Rç’Òwç’’•³Ó°¢6öç7Bg&–VæFÇ•Væ—EFÒrçVæ—G0¢æf–ÇFW"‚‡Væ—B’ÓâVæ—BçFVÒÓÓÒ'Æ–W""bbVæ—Bæv'&—6öæVDB¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚Òwç‚Âç’Òwç’’ÒÖF‚æ‡—÷B†"ç‚Òwç‚Â"ç’Òwç’’¢æf–æB‚‡Væ—B’ÓâÖF‚æ‡—÷B‡Væ—Bç‚Òwç‚ÂVæ—Bç’Òwç’’ÂÖF‚æÖ‚ƒC"Â7FG5·Væ—BçG—UÒç"²#‚’“°¢6öç7B&VÆ•FÒ†ræö&¦V7F—fW2ÇÂµÒ¢æf–ÇFW"‚†ö&¦V7F—fR’Óâö&¦V7F—fT–çFVÂ†rÂö&¦V7F—fR’çf—6–&ÆR¢ç6÷'B‚†Â"’ÓâÖF‚æ‡—÷B†ç‚Òwç‚Âç’Òwç’’ÒÖF‚æ‡—÷B†"ç‚Òwç‚Â"ç’Òwç’’•³Ó°¢–b€¢ræÖöFRÓÓÒ'6VÆV7B"b`¢6VÆV7FVEv÷&¶W'2æÆVæwF‚b`¢&W6÷W&6UFb`¢ÖF‚æ‡—÷B‡&W6÷W&6UFç&W6÷W&6Rç‚Òwç‚Â&W6÷W&6UFç&W6÷W&6Rç’Òwç’’ÂC€¢’°¢6öÖÖæB‡&W6÷W&6UFç&W6÷W&6Rç‚Â&W6÷W&6UFç&W6÷W&6Rç’“°¢Æ7EFæ7W'&VçBÒçVÆÃ°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢&WGW&ã°¢Ð¢–b†ræÖöFRÓÓÒ'6VÆV7B"bbg&–VæFÇ•Væ—EFbb&VÆ•FbbÖF‚æ‡—÷B‡&VÆ•Fç‚Òwç‚Â&VÆ•Fç’Òwç’’Âs"’°¢–b‡6VÆV7FVEVæ—G2æÆVæwF‚’°¢6öÖÖæB‡wç‚Âwç’“°¢ÒVÇ6R°¢6öç7Bö67WçG2Ò&VÆ”ö67WçG2†rÂ&VÆ•FÂ'Æ–W""“°¢rç6VÆV7FVBÒö67WçG2æÖ‚‡Væ—B’ÓâVæ—Bæ–B“°¢ræÖW76vRÒ–çFVÅ&VÆ”÷W&F–öæÂ‡&VÆ•F¢ò&VÆ•Fç&V'V–ÆDBÓÒVæFVf–æVBbbrçF–ÖRÂ&VÆ•Fç&V'V–ÆD@¢ò”åDTÂ$TÄ’ôddÄ”äR+r&V6öç7G'V7F–öâ&Vv–ç2–âG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â‡&VÆ•Fç&V'V–ÆDBÒrçF–ÖR’—×2æ ¢¢”åDTÂ$TÄ’$T%T”ÄD”är+rG´ÖF‚ç&÷VæB‚‡&VÆ•Fç&V'V–ÆE&öw&W72ÇÂ’¢—ÒR6ö×ÆWFRæ ¢¢ö67WçG2æÆVæwF€¢òG¶ö67WçG2æÆVæwF‡ÒòGµ$TÄ•ôt%$•4ôåô44•E—Ò&VÆ’G&ö÷W'26VÆV7FVB+rFw&÷VæBFòFWÆ÷’F†VÒæ ¢¢”åDTÂ$TÄ’+rG·&VÆ”ö67WçG2†rÂ&VÆ•F’æÆVæwF‡ÒòGµ$TÄ•ôt%$•4ôåô44•E—Òö67W–VBæ°¢Ð¢Æ7EFæ7W'&VçBÒçVÆÃ°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢&WGW&ã°¢Ð¢6öç7BæV&W7D'V–ÆF–ærÒræ'V–ÆF–æw0¢æf–ÇFW"‚†'V–ÆF–ær’Óâ'V–ÆF–ærçFVÒÓÓÒ'Æ–W""¢ç6÷'B€¢†Â"’Óà¢ÖF‚æ‡—÷B†ç‚Òwç‚Âç’Òwç’’Ð¢ÖF‚æ‡—÷B†"ç‚Òwç‚Â"ç’Òwç’’À¢•³Ó°¢6öç7B'V–ÆF–æuFÒæV&W7D'V–ÆF–ærb`¢ÖF‚æ‡—÷B†æV&W7D'V–ÆF–ærç‚Òwç‚ÂæV&W7D'V–ÆF–ærç’Òwç’’À¢'V–ÆF–æu7FG5¶æV&W7D'V–ÆF–ærçG—UÒç"²€¢òæV&W7D'V–ÆF–æp¢¢VæFVf–æVC°¢6öç7B†—BÒ'V–ÆF–æuFÇÂg&–VæFÇ•Væ—EFÇÂ²ââærçVæ—G2Âââæræ'V–ÆF–æw5Ð¢æf–ÇFW"‚†ò’ÓâòçFVÒÓÓÒ'Æ–W""bb‚—5Væ—B†ò’ÇÂòæv'&—6öæVDB’¢ç6÷'B€¢†Â"’Óà¢ÖF‚æ‡—÷B†ç‚Òwç‚Âç’Òwç’’Ð¢ÖF‚æ‡—÷B†"ç‚Òwç‚Â"ç’Òwç’’À¢•³Ó°¢6öç7B†—DF—7Fæ6RÒ†—@¢òÖF‚æ‡—÷B††—Bç‚Òwç‚Â†—Bç’Òwç’¢¢–æf–æ—G“°¢6öç7B†—Ev—&Vg&ÖRÒ†—Bbbræ'V–ÆF–æw2æf–æB‚†'V–ÆF–ær’Óà¢'V–ÆF–æræ–BÓÓÒ†—Bæ–Bbb†'V–ÆF–ærç&öw&W72óò’ÂÀ¢“°¢–b††—Ev—&Vg&ÖRbb†—DF—7Fæ6RÂSR’°¢6öç7B6VÆV7FVEv÷&¶W'2Ò6VÆV7FVEVæ—G2æf–ÇFW"‚‡Væ—B’ÓâVæ—BçG—RÓÓÒ'v÷&¶W""“°¢–b†ræÖöFRÓÓÒ'6VÆV7B"bb6VÆV7FVEv÷&¶W'2æÆVæwF‚’°¢6VÆV7FVEv÷&¶W'2æf÷$V6‚‚‡v÷&¶W"’Óâ76–våv÷&¶W%FõVæF–æt6öç7G'V7F–öâ‡v÷&¶W"Â†—Ev—&Vg&ÖRæ–B’“°¢ræÖW76vRÒG·6VÆV7FVEv÷&¶W'2æÆVæwF‡Òv÷&¶W"G·6VÆV7FVEv÷&¶W'2æÆVæwF‚ÓÓÒò""¢'2'Ò76–væVBFòF†RG¶†—Ev—&Vg&ÖRçG—WÒv—&Vg&ÖRæ°¢Æ7EFæ7W'&VçBÒçVÆÃ°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢&WGW&ã°¢Ð¢rç6VÆV7FVBÒ¶†—Ev—&Vg&ÖRæ–EÓ°¢ræÖöFRÒ'6VÆV7B#°¢ræÖW76vRÒG¶†—Ev—&Vg&ÖRçG—RçFõWW$66R‚—Òv—&Vg&ÖR6VÆV7FVB+r6æ6VÂ—B&VÆ÷r÷"ÆVfR—B–âF†Rv÷&¶W"VWVRæ°¢Æ7EFæ7W'&VçBÒ²–C¢†—Ev—&Vg&ÖRæ–BÂF–ÖS¢W&f÷&Öæ6Rææ÷r‚’Ó°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢&WGW&ã°¢Ð¢òòg&–VæFÇ’7G'V7GW&W2F¶RF&–÷&—G’÷fW"Ö÷fVÖVçBâ6–ævÆRFöâ¢òò'V–ÆF–ær6ÆV'2F†R7W'&VçBVæ—Bw&÷WæB÷Vç2F†B'V–ÆF–ærw0¢òò6öÖÖæG2–ç7FVBöb6–ÆVçFÇ’÷&FW&–ærF†RVæ—G2F÷v&B—Bà¢–b†ræÖöFRÓÓÒ'6VÆV7B"bb'V–ÆF–æuFbb6VÆV7FVEVæ—G2æÆVæwF‚’°¢rç6VÆV7FVBÒ¶'V–ÆF–æuFæ–EÓ°¢ræÖW76vRÒG¶'V–ÆF–æuFçG—RÓÓÒ'GW'&WB"ò%4TåE%’EU%$UB"¢'V–ÆF–æuFçG—RçFõWW$66R‚—Ò6VÆV7FVBæ°¢Æ7EFæ7W'&VçBÒ²–C¢'V–ÆF–æuFæ–BÂF–ÖS¢W&f÷&Öæ6Rææ÷r‚’Ó°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢&WGW&ã°¢Ð¢–b††—Bbb†—DF—7Fæ6RÂSRbbræÖöFRÓÓÒ'6VÆV7B"’°¢6öç7Bæ÷rÒW&f÷&Öæ6Rææ÷r‚’À¢Væ—BÒrçVæ—G2æf–æB‚‡R’ÓâRæ–BÓÓÒ†—Bæ–B’À¢'V–ÆF–ærÒræ'V–ÆF–æw2æf–æB‚†"’Óâ"æ–BÓÓÒ†—Bæ–B’À¢&WVBÐ¢Æ7EFæ7W'&VçCòæ–BÓÓÒ†—Bæ–Bbbæ÷rÒÆ7EFæ7W'&VçBçF–ÖRÂ3S°¢–b‡Væ—Bbb&WVB’°¢6öç7B†ÆerÒ6çf2æ7W'&VçBæ6Æ–VçEv–GF‚òƒ"¢rç¦ööÒ’À¢†Æd‚Ò6çf2æ7W'&VçBæ6Æ–VçD†V–v‡Bòƒ"¢rç¦ööÒ“°¢rç6VÆV7FVBÒrçVæ—G0¢æf–ÇFW"€¢‡R’Óà¢RçFVÒÓÓÒ'Æ–W""b`¢Ræv'&—6öæVDBb`¢RçG—RÓÓÒVæ—BçG—Rb`¢Rç‚ãÒræ6ÖW&ç‚Ò†Æerb`¢Rç‚ÃÒræ6ÖW&ç‚²†Æerb`¢Rç’ãÒræ6ÖW&ç’Ò†Æd‚b`¢Rç’ÃÒræ6ÖW&ç’²†Æd‚À¢¢æÖ‚‡R’ÓâRæ–B“°¢ræÖW76vRÒ6VÆV7FVBG¶rç6VÆV7FVBæÆVæwF‡Òf—6–&ÆRG·Væ—DæÖR‡Væ—BçG—R’çFôÆ÷vW$66R‚—ÒG¶rç6VÆV7FVBæÆVæwF‚ÓÓÒò""¢'2'Òæ°¢Æ7EFæ7W'&VçBÒçVÆÃ°¢ÒVÇ6R–b€¢'V–ÆF–ærb`¢&WVBb`¢²&‡"Â&&'&6·2%Òæ–æ6ÇVFW2†'V–ÆF–ærçG—R¢’°¢rç6VÆV7FVBÒ¶'V–ÆF–æræ–EÓ°¢ræÖöFRÒ'6WB×&ÆÇ’#°¢ræÖW76vRÒ$ÄÅ’ô”åC¢Fv†W&RæWrG¶'V–ÆF–ærçG—RÓÓÒ&‡"ò$…Væ—G2"¢&6öÖ&BVæ—G2'Ò6†÷VÆBvòæ°¢Æ7EFæ7W'&VçBÒçVÆÃ°¢ÒVÇ6R°¢–b†Rç6†–gD¶W’’°¢rç6VÆV7FVBÒrç6VÆV7FVBæ–æ6ÇVFW2††—Bæ–B¢òrç6VÆV7FVBæf–ÇFW"‚†–B’Óâ–BÓÒ†—Bæ–B¢¢²ââærç6VÆV7FVBÂ†—Bæ–EÓ°¢ÒVÇ6R–b‡Væ—Bbb—46öÖ&EVæ—B‡Væ—B’’°¢6öç7B7W'&VçD6öÖ&E6VÆV7F–öâÒrçVæ—G2æf–ÇFW"‚†6æF–FFR’Óà¢6æF–FFRçFVÒÓÓÒ'Æ–W""bb—46öÖ&EVæ—B†6æF–FFR’bbrç6VÆV7FVBæ–æ6ÇVFW2†6æF–FFRæ–B’“°¢6öç7B6VÆV7F–öä6öçF–ç4öæÇ”6öÖ&BÒ7W'&VçD6öÖ&E6VÆV7F–öâæÆVæwF‚ÓÓÒrç6VÆV7FVBæÆVæwFƒ°¢rç6VÆV7FVBÒ6VÆV7F–öä6öçF–ç4öæÇ”6öÖ&@¢ò²ââææWr6WB…²ââærç6VÆV7FVBÂVæ—Bæ–EÒ•Ð¢¢·Væ—Bæ–EÓ°¢ÒVÇ6R°¢rç6VÆV7FVBÒ¶†—Bæ–EÓ°¢Ð¢ræÖW76vRÐ¢'V–ÆF–ærbb²&‡"Â&&'&6·2%Òæ–æ6ÇVFW2†'V–ÆF–ærçG—R¢òG¶'V–ÆF–ærçG—RçFõWW$66R‚—Ò6VÆV7FVB+r6†ö÷6R6WBv—ö–çB–âF†R6öÖÖæB&"æ ¢¢"#°¢Æ7EFæ7W'&VçBÒ²–C¢†—Bæ–BÂF–ÖS¢æ÷rÓ°¢Ð¢ÒVÇ6R°¢Æ7EFæ7W'&VçBÒçVÆÃ°¢6öÖÖæB‡wç‚Âwç’“°¢Ð¢Ð¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢7–æ2‚“°¢Ó°¢6öç7Bö–çFW$6æ6VÂÒ†S¢&V7Båö–çFW$WfVçB’Óâ°¢–b†Ö÷fTvW7GW&Ræ7W'&VçCòçF–ÖW"’6ÆV%F–ÖV÷WB†Ö÷fTvW7GW&Ræ7W'&VçBçF–ÖW"“°¢Ö÷fTvW7GW&Ræ7W'&VçBÒçVÆÃ°¢6WDÖ÷fT6†ö÷6W"†çVÆÂ“°¢F÷V6…ö–çG2æ7W'&VçBæFVÆWFR†Rçö–çFW$–B“°¢–b‡F÷V6…ö–çG2æ7W'&VçBç6—¦RÂ"’–æ6‚æ7W'&VçBÒçVÆÃ°¢–b‡F÷V6…ö–çG2æ7W'&VçBç6—¦RÓÓÒ’–æ6„6öç7VÖVBæ7W'&VçBÒfÇ6S°¢ö–çFW"æ7W'&VçBÒçVÆÃ°¢Ó°¢6öç7B6öçFW‡D6öÖÖæBÒ†S¢&V7BäÖ÷W6TWfVçCÄ…DÔÄ6çf4VÆVÖVçCâ’Óâ°¢Rç&WfVçDFVfVÇB‚“°¢–b‡W6VE&Vbæ7W'&VçBÇÂvÖRæ7W'&VçBæ÷fW"’&WGW&ã°¢–b†6æ6VÄ6öÖÖæDÖöFR‚’’&WGW&ã°¢6öç7B"Ò6çf2æ7W'&VçBævWD&÷VæF–æt6Æ–VçE&V7B‚’À¢7‚ÒRæ6Æ–VçE‚Ò"æÆVgBÀ¢7’ÒRæ6Æ–VçE’Ò"çF÷°¢6öç7B×rÒ3"ÂÖ‚Òƒ"Â×‚Ò6çf2æ7W'&VçBæ6Æ–VçEv–GF‚Ò×rÒ"Â×’Ò#°¢–b‡7‚ãÒ×‚bb7‚ÃÒ×‚²×rbb7’ãÒ×’bb7’ÃÒ×’²Ö‚’&WGW&ã°¢vÖRæ7W'&VçBæÖF6…7FG2çÆ–W$7F–öç2²³°¢6öç7BwÒ67&VVåFõv÷&ÆB‡7‚Â7’“°¢6öÖÖæB‡wç‚Âwç’“°¢Ó°¢6öç7Bv†VVÂÒ†S¢&V7Båv†VVÄWfVçB’Óâ°¢Rç&WfVçDFVfVÇB‚“°¢vÖRæ7W'&VçBç¦ööÒÒÖF‚æÖ‚€¢ãSRÀ¢ÖF‚æÖ–âƒãrÂvÖRæ7W'&VçBç¦ööÒ¢†RæFVÇF’âòã’¢ã’’À¢“°¢Ó°¢6öç7B7F—fUF—ÒV’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"bb‡V’æ‡6¶VBÇÂV’æ‡&VÆö6F–öâ¢ò²¶W“¢&6öÖÖæBÖ7&vÆW""ÂF—FÆS¢$Ôô$”ÄR„TET%DU%2"ÂFW‡C¢%F†R7&vÆW"Ö÷fW2BöæÇ’"ÖVæ—G2W"6V6öæBâ&öGV7F–öâÂ7WÇ’Â&W6V&6‚ÂæB&V–æf÷&6VÖVçB7F’öffÆ–æRVçF–Â—Bf–æ—6†W2FWÆ÷––æröâ6ÆV"FW'&–ââ"Ð¢¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&&'&6·2"bbV’ç&öGV7F–öä'V–ÆF–ærÓÓÒ&&'&6·2 ¢ò²¶W“¢&&'&6·2×&ÆÇ’"ÂF—FÆS¢$$%$4µ2t•ô”åB"ÂFW‡C¢%6VÆV7B6ö×ÆWFVB&'&6·2Â6†ö÷6R6WBv—ö–çBÂF†VâFF†R&GFÆVf–VÆBâæWr6öÖ&BVæ—G2v–ÆÂFWÆ÷’F÷v&B—Bâ"Ð¢¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&&'&6·2 ¢ò²¶W“¢&&'&6·2Ö'V–ÆF–ær"ÂF—FÆS¢$$%$4µ24ôå5E%T5D”ôâ"ÂFW‡C¢%F†Rv—&Vg&ÖRv—G2f÷"â76–væVBv÷&¶W"Fò'&—fRâ6öç7G'V7F–öâF–ÖR7F'G2öæÇ’v†VâF†Rv÷&¶W"—2öâ6—FRâ"Ð¢¢V’ç6VÆV7FVEv÷&¶W'2â ¢ò²¶W“¢'v÷&¶W"Ö÷&FW'2"ÂF—FÆS¢%tõ$´U"õ$DU%2"ÂFW‡C¢%Æ6R6WfW&Â6öç7G'V7F–öâv—&Vg&ÖW2&Vf÷&R&W76–ær6æ6VÃ²76–væVBv÷&¶W'2f—6—BæB'V–ÆBF†VÒ–â÷&FW"âÖ÷fR÷&FW"7F–ÆÂÆVfW2F†Rv÷&¶W"öâwV&B–ç7FVBöb&W7VÖ–ærÖ–æ–ærâ"Ð¢¢V’ç6VÆV7FVD6öÖ&Bâ ¢ò²¶W“¢&6öÖ&BÖ÷&FW'2"ÂF—FÆS¢%E$dTÂõ$DU%2"ÂFW‡C¢$Æöær×&W72÷Vâw&÷VæC¢6Æ–FRWf÷"Ö÷fR²VævvR÷"F÷vâf÷"F—&V7BÖ÷fRâF—&V7BÖ÷fRf—&W2öæÇ’–âvVöâ&ævRv—F†÷WB6†6–æs²Ö÷fR²VævvR'&V·26÷W'6RFòf–v‡BÂF†Vâ&W7VÖW2â"Ð¢¢²¶W“¢'6VÆV7B×Væ—G2"ÂF—FÆS¢$d”TÄBEUDõ$”Â"ÂFW‡C¢%6VÆV7Bv÷&¶W"Fò6öç7G'V7BÂ–÷W"…FòG&–â÷"&W6V&6‚Â÷"6ö×ÆWFVB&'&6·2FòG&–â6öÖ&BVæ—G2â"Ó°¢6öç7B6†÷t7F—fUF—ÒGWF÷&–Ç4Væ&ÆVBbb†öÖT÷VâbbW6VBbbF—6Ö—76VEF—2æ–æ6ÇVFW2†7F—fUF—æ¶W’“°¢6öç7B6öÖÖæE&öw&W72Ò6öÖÖæE&öf–ÆU&öw&W72†6öÖÖæE&öf–ÆR“°¢6öç7Bf—&T6öçG&öÅ&æ²ÒÖF‚æÖ‚ƒÂÖF‚æÖ–â„d•$Uô4ôåE$ôÅôÔ…õ$ä²Â6öÖÖæE&öf–ÆRæf—&T6öçG&öÅ&æ²ÇÂ’“°¢6öç7B6fT6öÖÖæE&öf–ÆRÒ†æW‡C¢6öÖÖæE&öf–ÆR’Óâ°¢Æö6Å7F÷&vRç6WD—FVÒ„4ôÔÔäEõ$ôd”ÄUô´U’Â¥4ôâç7G&–æv–g’†æW‡B’“°¢&WGW&âæW‡C°¢Ó°¢6öç7BW&6†6Tf—&T6öçG&öÂÒ‚’Óâ°¢6WD6öÖÖæE&öf–ÆR‚†7W'&VçB’Óâ°¢6öç7B&æ²ÒÖF‚æÖ‚ƒÂÖF‚æÖ–â„d•$Uô4ôåE$ôÅôÔ…õ$ä²Â7W'&VçBæf—&T6öçG&öÅ&æ²ÇÂ’“°¢–b‡&æ²ãÒd•$Uô4ôåE$ôÅôÔ…õ$ä²ÇÂ6öÖÖæE&öf–ÆU&öw&W72†7W'&VçB’çö–çG2Â’&WGW&â7W'&VçC°¢&WGW&â6fT6öÖÖæE&öf–ÆR‡²ââæ7W'&VçBÂf—&T6öçG&öÅ&æ³¢&æ²²Â7VçEö–çG3¢7W'&VçBç7VçEö–çG2²Ò“°¢Ò“°¢Ó°¢6öç7B&öGV7F–öä'WGFöâÒ‡G—S¢Væ—E²'G—R%Ò’Óâ°¢6öç7B7F—fRÒV’ç&öGV7F–öãòçG—RÓÓÒG—S°¢6öç7BVWVVD6÷VçBÒ†7F—fRò¢’²‡V’ç&öGV7F–öãòçVWVRÇÂµÒ’æf–ÇFW"‚‡VWVVEG—R’ÓâVWVVEG—RÓÓÒG—R’æÆVæwFƒ°¢6öç7B6ööÆ–ætF÷vâÒV’ç&öGV7F–öâbbV’ç&öGV7F–öä6ööÆF÷vââ°¢6öç7B6÷7BÒVæ—D6÷7E·G—UÓ°¢6öç7B6†÷'FfÆÂÒÖF‚æÖ‚ƒÂ6÷7BÒV’æ7&VF—G2“°¢6öç7BVæff÷&F&ÆRÒ6†÷'FfÆÂâ°¢6öç7B6—†W$Æö6¶VBÒG—RÓÓÒ&6—†W""bb‚V’çG&FTæWGv÷&²ÇÂV’æ6—†W$6÷VçBãÒ4•„U%ôÔ‚“°¢6öç7BÆö6¶VBÐ¢G—RÓÓÒ'v÷&¶W""ÇÂG—RÓÓÒ&6—†W" ¢òV’ç&öGV7F–öä'V–ÆF–ærÓÒ&‡"ÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ÇÂ6ööÆ–ætF÷vâÇÂ6—†W$Æö6¶V@¢¢V’ç&öGV7F–öä'V–ÆF–ærÓÒ&&'&6·2"ÇÂ6ööÆ–ætF÷vã°¢6öç7B–FÆRÐ¢G—RÓÓÒ'v÷&¶W" ¢òS5$TD•E2+r‡2+rG·Væ—D†VÇF‚çv÷&¶W'Ò… ¢¢G—RÓÓÒ&6—†W" ¢òG·Væ—D6÷7Bæ6—†W'Ò5$TD•E2+rG·Væ—D'V–ÆEF–ÖRæ6—†W'×2+rG·Væ—D†VÇF‚æ6—†W'Ò…+rG·V’æ6—†W$6÷VçGÒòG´4•„U%ôÔ‡Ö ¢¢G—RÓÓÒ'G&ö÷W" ¢ò#R5$TD•E2+rg2+r4õTåDU%2•& ¢¢G—RÓÓÒ'Fæ² ¢òC5$TD•E2+rW2+r4õTåDU%2”ädåE%– ¢¢35$TD•E2+r'2+r4õTåDU%2$Ôõ&°¢6öç7BÆö6µFW‡BÒ6ööÆ–ætF÷và¢ò4ôôÄDõtâG´ÖF‚æ6V–Â‡V’ç&öGV7F–öä6ööÆF÷vâ—×6 ¢¢G—RÓÓÒ&6—†W""bbV’çG&FTæWGv÷&°¢ò%$U4T$4‚E$DRäUEtõ$² ¢¢G—RÓÓÒ&6—†W""bbV’æ6—†W$6÷VçBãÒ4•„U%ôÔ€¢òÄ”Ô•BG´4•„U%ôÔ‡Ò$T4„TF ¢¢G—RÓÓÒ'v÷&¶W""ÇÂG—RÓÓÒ&6—†W" ¢ò$…%U5’ ¢¢$$%$4µ2Täd”Ä$ÄR#°¢&WGW&â€¢Æ'WGFöà¢¶W“×·G—WÐ¢F—6&ÆVC×¶Æö6¶VBÇÂVæff÷&F&ÆWÐ¢6Æ74æÖS×¶G¶7F—fRò'&öGV6–ær"¢"'ÒG¶Æö6¶VBò&Æö6¶VB"¢"'ÒG·Væff÷&F&ÆRò'Væff÷&F&ÆR"¢"'ÖÐ¢öä6Æ–6³×²‚’Óâ7F–öâ‡G—R—Ð¢F—FÆS×·Væff÷&F&ÆRòG·6†÷'FfÆÇÒÖ÷&R7&VF—G2&WV—&VF¢VæFVf–æVGÐ¢à¢Æ¶&Cç·G—RÓÓÒ'v÷&¶W""ò%b"¢G—RÓÓÒ&6—†W""ò,éâ"¢G—RÓÓÒ'G&ö÷W""ò$’"¢G—RÓÓÒ'Fæ²"ò$²"¢$â'ÓÂö¶&Cà¢Ç7â6Æ74æÖS×¶6öÖÖæBÖ'BVæ—BÒG·G—WÖÒ&–Ö†–FFVãÒ'G'VR#à¢²†Æö6¶VBÇÂVæff÷&F&ÆR’bbÆ"6Æ74æÖSÒ&6öÖÖæBÖ'BÖ&FvR#ç·Væff÷&F&ÆRò.(‰""¢/	ùI"'ÓÂö#çÐ¢·VWVVD6÷VçBâbbÆ"6Æ74æÖSÒ'&öGV7F–öâ×VWVRÖ&FvR#ç·VWVVD6÷VçGÓÂö#çÐ¢¶7F—fRbb€¢ÆVÒ6Æ74æÖSÒ'&öGV7F–öâ×&öw&W72Ö÷fW&Æ’"7G–ÆS×·²"Ò×&öw&W72#¢G²‡V’ç&öGV7F–öâæVÆ6VBòV’ç&öGV7F–öâæGW&F–öâ’¢ÒVÒ2&V7Bä555&÷W'F–W7Òóà¢—Ð¢Â÷7ãà¢Ç7ãà¢·Væ—DæÖR‡G—R—Ð¢Ç6ÖÆÃç·Væff÷&F&ÆRòäTTBG·6†÷'FfÆÇÒÔõ$R5$TD•E6¢Æö6¶VBòÆö6µFW‡B¢7F—fRòG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â‡V’ç&öGV7F–öâæGW&F–öâÒV’ç&öGV7F–öâæVÆ6VB’—×6¢–FÆWÓÂ÷6ÖÆÃà¢Â÷7ãà¢Âö'WGFöãà¢“°¢Ó°¢&WGW&â€¢ÆÖ–â6Æ74æÖSÒ&vÖR×6†VÆÂ#à¢¶†öÖT÷Vâbb€¢Ç6V7F–öâ6Æ74æÖSÒ&†öÖR×67&VVâ"&–ÖÆ&VÃÒ$g&öçF–W"6öÖÖæB†öÖR67&VVâ#à¢ÆF—b6Æ74æÖSÒ&†öÖRÖw&–B"óà¢ÆF—b6Æ74æÖSÒ&†öÖR×æVÂ#à¢Ç7â6Æ74æÖSÒ&†öÖR×6–v–Â#äd3Â÷7ãà¢Ç6ÖÆÃåD5D”4ÂäUEtõ$²òòÅ„Â÷6ÖÆÃà¢Æƒäe$ôåD”U#Æ'"óä4ôÔÔäCÂöƒà¢Çä&Ææ6R7&VF—G2ÂÆÆ÷’ÂæB–çFVÂâ6öçG&öÂF†RÖâFW7G&÷’F†RVæV×’6öÖÖæB6÷&RãÂ÷à¢Ç6V7F–öâ6Æ74æÖSÒ&6öÖÖæB×&öf–ÆR"&–ÖÆ&VÃ×¶6öÖÖæBÆWfVÂG¶6öÖÖæE&öw&W72æÆWfVÇÖÓà¢ÆF—b6Æ74æÖSÒ&6öÖÖæB×&öf–ÆRÖ†VF–ær#à¢Ç7ããÇ6ÖÆÃä4ôÔÔäBDUdTÄõÔTåCÂ÷6ÖÆÃãÆ#äÄUdTÂ¶6öÖÖæE&öw&W72æÆWfVÇÓÂö#ãÂ÷7ãà¢Ç7ããÇ7G&öæsç¶6öÖÖæE&öw&W72çö–çG7ÓÂ÷7G&öæsãÇ6ÖÆÃä4ôÔÔäBô”åG¶6öÖÖæE&öw&W72çö–çG2ÓÓÒò""¢%2'ÓÂ÷6ÖÆÃãÂ÷7ãà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&6öÖÖæB×‡×G&6²"&–ÖÆ&VÃ×¶G¶6öÖÖæE&öw&W72æ7W'&VçGÒöbG¶6öÖÖæE&öw&W72ææVVFVGÒ6öÖÖæB…F÷v&BF†RæW‡BÆWfVÆÓà¢Æ’7G–ÆS×·²v–GFƒ¢G¶6öÖÖæE&öw&W72ç&öw&W72¢ÒV×Òóà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&6öÖÖæB×‡×&VF÷WB#à¢Ç7ãç¶6öÖÖæE&öw&W72æ7W'&VçGÒò¶6öÖÖæE&öw&W72ææVVFVGÒ4ôÔÔäB…Â÷7ãà¢¶6öÖÖæE&öf–ÆRæÆ7Dv&BâbbÇ6ÖÆÃäÄ5BÔD4‚·¶6öÖÖæE&öf–ÆRæÆ7Dv&GÓÂ÷6ÖÆÃçÐ¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&6öÖÖæB×&W6V&6‚×&Wf–Wr"&–ÖÆ&VÃÒ$6öÖÖæB&W6V&6‚F‡2#à¢Ç6V7F–öâ6Æ74æÖS×¶6öÖÖæB×F‚f—&RÖ6öçG&öÂG¶f—&T6öçG&öÅ&æ²ò'VæÆö6¶VB"¢"'ÖÒ&–ÖÆ&VÃ×¶f—&R6öçG&öÂ&æ²G¶f—&T6öçG&öÅ&æ·ÒöbG´d•$Uô4ôåE$ôÅôÔ…õ$ä·ÖÓà¢Æ#î(Èd•$R4ôåE$ôÃÂö#à¢Ç6ÖÆÃå$ä²¶f—&T6öçG&öÅ&æ·Ò÷´d•$Uô4ôåE$ôÅôÔ…õ$ä·Ò+r"R$DRõ$ä³Â÷6ÖÆÃà¢ÆF—cà¢Æ'WGFöâG—SÒ&'WGFöâ"öä6Æ–6³×·W&6†6Tf—&T6öçG&öÇÒF—6&ÆVC×¶6öÖÖæE&öw&W72çö–çG2ÂÇÂf—&T6öçG&öÅ&æ²ãÒd•$Uô4ôåE$ôÅôÔ…õ$ä·Óå5TäBô”åCÂö'WGFöãà¢ÂöF—cà¢Ç6ÖÆÂ6Æ74æÖSÒ&6öÖÖæB×F‚×&VgVæB#å$TeTäB$õDô4ôÂTäÄô4µ2ÄDU#Â÷6ÖÆÃà¢ÆVÓäTddT5BTäD”äsÂöVÓà¢Â÷6V7F–öãà¢Ç7ãî*Ê$T”ädõ$4TBe$ÔU3Ç6ÖÆÃä4ôÔ”äräU…CÂ÷6ÖÆÃãÂ÷7ãà¢Ç7ãî)xâD5D”4Â”åDTÄÄ”tTä4SÇ6ÖÆÃä4ôÔ”äräU…CÂ÷6ÖÆÃãÂ÷7ãà¢ÂöF—cà¢Â÷6V7F–öãà¢¶†4WF÷6fRbb€¢Æ'WGFöâ6Æ74æÖSÒ&6öçF–çVRÖÖF6‚"öä6Æ–6³×¶vÖRæ7W'&VçBæ÷fW"ò‚’Óâ7F'DæWtÖF6‚†vÖRæ7W'&VçBæfötVæ&ÆVB’¢6öçF–çVTÖF6‡Óà¢Æ#ç¶vÖRæ7W'&VçBæ÷fW"ò%5D%BäUrÔD4‚"¢$4ôåD”åTRÔD4‚'ÓÂö#à¢Ç6ÖÆÃç¶vÖRæ7W'&VçBæ÷fW"ò%$Ud”õU2õU$D”ôâ4ôÕÄUDR"¢G¶vÖRæ7W'&VçBæfötVæ&ÆVBò%D5D”4Âdôr"¢$õTâ”åDTÂ'Ò+rtdRG¶vÖRæ7W'&VçBçvfWÖÓÂ÷6ÖÆÃà¢Âö'WGFöãà¢—Ð¢ÆF—b6Æ74æÖSÒ&ÖöFRÖ†VF–ær#à¢Ç7ãääUrÔD4‚ÔôDSÂ÷7ãà¢Ç6ÖÆÃå$U4õU$4U2$äDôÔ•¤RT4‚ÔD4ƒÂ÷6ÖÆÃà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&ÖöFRÖ÷F–öç2"&öÆSÒ'&F–öw&÷W"&–ÖÆ&VÃÒ$föröbv"ÖöFR#à¢Æ'WGFöà¢&öÆSÒ'&F–ò ¢&–Ö6†V6¶VC×²æWtÖF6„föwÐ¢6Æ74æÖS×²æWtÖF6„förò'6VÆV7FVB"¢"'Ð¢F—6&ÆVC×¶æWGv÷&²ç&öÆRÓÒ'6öÆò'Ð¢öä6Æ–6³×²‚’Óâ6†ö÷6TæWtÖF6„för†fÇ6R—Ð¢à¢Æ“î)xãÂö“ãÆ#äõTâ”åDTÃÂö#ãÇ6ÖÆÃäæòföröbv"âgVÆÂ&GFÆVf–VÆBf—6–&ÆRãÂ÷6ÖÆÃà¢Âö'WGFöãà¢Æ'WGFöà¢&öÆSÒ'&F–ò ¢&–Ö6†V6¶VC×¶æWtÖF6„föwÐ¢6Æ74æÖS×¶æWtÖF6„förò'6VÆV7FVB"¢"'Ð¢F—6&ÆVC×¶æWGv÷&²ç&öÆRÓÒ'6öÆò'Ð¢öä6Æ–6³×²‚’Óâ6†ö÷6TæWtÖF6„för‡G'VR—Ð¢à¢Æ“î)yÂö“ãÆ#åD5D”4ÂdôsÂö#ãÇ6ÖÆÃå66÷WBFò&WfVÂFW'&–âæBVæV×’f÷&6W2ãÂ÷6ÖÆÃà¢Âö'WGFöãà¢ÂöF—cà¢Æ'WGFöâ6Æ74æÖSÒ&ÆVæ6‚ÖÖF6‚"öä6Æ–6³×²‚’Óâ7F'DæWtÖF6‚‚—Óà¢ÄTä4‚4”ätÄRÕÄ”U"ÔD4€¢Âö'WGFöãà¢ÆF—b6Æ74æÖSÒ&×VÇF—Æ–W"ÖF—f–FW"#ãÇ7ãå$•dDRôäÄ”äRcÂ÷7ããÂöF—cà¢¶æWGv÷&²ç&öÆRÓÒ'6öÆò"bb²&7&VF–ær"Â'v—F–ær"Â&¦ö–æ–ær"Â&6öææV7F–ær%Òæ–æ6ÇVFW2†æWGv÷&²ç7FGW2’ò€¢ÆF—b6Æ74æÖSÒ'&ööÒ×v—F–ær#à¢Ç6ÖÆÃç¶æWGv÷&²ç7FGW2ÓÓÒ'v—F–ær"ò%$ôôÒ$TE’(	B4TäBD„•24ôDR"¢æWGv÷&²ç&öÆRÓÓÒ&wVW7B"ò$¤ô”ä”är$•dDR$ôôÒ"¢$U5D$Ä•4„”ärD5D”4ÂÄ”ä²'ÓÂ÷6ÖÆÃà¢Ç7G&öæsç¶æWGv÷&²æ6öFRÇÂ,+|+|+|+|+|+r'ÓÂ÷7G&öæsà¢Çç¶æWGv÷&²ç7FGW2ÓÓÒ'v—F–ær"òG¶æWtÖF6„förò%F7F–6Âför"¢$÷Vâ–çFVÂ'Ò—2Æö6¶VBf÷"F†—2&ööÒâF†R6V6öæBÆ–W"÷Vç2g&öçF–W"6öÖÖæBÂVçFW'2F†—26öFRÂæB¦ö–ç2æ¢æWGv÷&²ç&öÆRÓÓÒ&wVW7B"ò$6öææV7F–ærF—&V7FÇ’FòF†R†÷7B6öÖÖæFW.(
+b"¢%&W&–ærF†R&—fFR6öææV7F–öî(
+b'ÓÂ÷à¢Æ'WGFöâöä6Æ–6³×²‚’Óâ²ÆVfT×VÇF—Æ–W"‚“²6WDæWGv÷&²‡²&öÆS¢'6öÆò"Â7FGW3¢&–FÆR"Â6öFS¢""ÂFWF–Ã¢""Ò“²×Óä4ä4TÂ$ôôÓÂö'WGFöãà¢ÂöF—cà¢’¢€¢ÆF—b6Æ74æÖSÒ'&—fFRÖÖF6‚Ö7F–öç2#à¢Æ'WGFöà¢6Æ74æÖSÒ&7&VFR×&ööÒ ¢öä6Æ–6³×¶7&VFU&—fFTÖF6‡Ð¢F—6&ÆVC×µ²&7&VF–ær"Â&¦ö–æ–ær"Â&6öææV7F–ær%Òæ–æ6ÇVFW2†æWGv÷&²ç7FGW2—Ð¢à¢Æ#ä5$TDR$•dDRÔD4ƒÂö#à¢Ç6ÖÆÃç¶æWtÖF6„förò%D5D”4Âdôr"¢$õTâ”åDTÂ'Ò+rtUB$ôôÒ4ôDSÂ÷6ÖÆÃà¢Âö'WGFöãà¢ÆF—b6Æ74æÖSÒ&¦ö–â×&ööÒ#à¢Æ–çW@¢fÇVS×¶¦ö–ä6öFWÐ¢öä6†ævS×²†WfVçB’Óâ6WD¦ö–ä6öFR†WfVçBçF&vWBçfÇVRçFõWW$66R‚’ç&WÆ6R‚õµäÕ£"Ó•ÒörÂ""’ç6Æ–6RƒÂb’—Ð¢öä¶W”F÷vã×²†WfVçB’Óâ²–b†WfVçBæ¶W’ÓÓÒ$VçFW""’fö–B¦ö–å&—fFTÖF6‚‚“²×Ð¢Æ6V†öÆFW#Ò%$ôôÒ4ôDR ¢&–ÖÆ&VÃÒ%&—fFR×VÇF—Æ–W"&ööÒ6öFR ¢Ö„ÆVæwFƒ×³gÐ¢óà¢Æ'WGFöâöä6Æ–6³×¶¦ö–å&—fFTÖF6‡ÒF—6&ÆVC×¶æWGv÷&²ç7FGW2ÓÓÒ&¦ö–æ–ær'Óà¢¶æWGv÷&²ç7FGW2ÓÓÒ&¦ö–æ–ær"ò$¤ô”ä”ä~(
+b"¢$¤ô”âÔD4‚'Ð¢Âö'WGFöãà¢ÂöF—cà¢ÂöF—cà¢—Ð¢¶æWGv÷&²ç7FGW2ÓÓÒ&W'&÷""bbÇ6Æ74æÖSÒ&æWGv÷&²ÖW'&÷"#ç¶æWGv÷&²æFWF–ÇÓÂ÷çÐ¢ÂöF—cà¢Â÷6V7F–öãà¢—Ð¢Æ†VFW#à¢ÆF—b6Æ74æÖSÒ&'&æB#à¢Ç7â6Æ74æÖSÒ'6–v–Â#äd3Â÷7ãà¢ÆF—cà¢Æ#äe$ôåD”U"4ôÔÔäCÂö#à¢Ç6ÖÆÃåD5D”4ÂäUEtõ$²òòÅ„Â÷6ÖÆÃà¢ÂöF—cà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ'&W6÷W&6W2#à¢Ç7ãà¢)xbÆ#ç·V’æ7&VF—G7ÓÂö#â5$TD•E0¢Â÷7ãà¢Ç7ãà¢*Ê"Æ#ç·V’æÆÆ÷—ÓÂö#âÄÄõ¢Â÷7ãà¢Ç7ãà¢)x’Æ#ç·V’æ–çFVÇÓÂö#â”åDTÀ¢Â÷7ãà¢Ç7â6Æ74æÖSÒ'÷vW"×7FFR#à¢ùòÆ#ç·V’ç÷vW'ÓÂö#âõtU ¢Â÷7ãà¢Ç7â6Æ74æÖS×¶WÆ–æ²×7FFRG·V’æö&¦V7F—fW2ò'&W"¢&FævW"'ÖÓà¢$TÄ•2Æ#ç·V’æö&¦V7F—fW7Òó#Âö#à¢Â÷7ãà¢Ç7â6Æ74æÖSÒ'6fR×7FFR#à¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"ò6fU7FGW2¢æWGv÷&²ç7FGW2ÓÓÒ&6öææV7FVB"ò$ôôÒG¶æWGv÷&²æ6öFWÖ¢$Ä”ä´”är'Ð¢Â÷7ãà¢Ç7â6Æ74æÖS×¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"ò‡V’çvfRÓÓÒò'&W"¢&FævW""’¢'&W'Óà¢¶æWGv÷&²ç&öÆRÓÒ'6öÆò ¢ò%$•dDRc ¢¢V’çvfRÓÓÒ ¢ò%$U$”är ¢¢tdRG·V’çvfWÖÐ¢Â÷7ãà¢Æ'WGFöà¢6Æ74æÖSÒ&ÖVçRÖ'WGFöâ ¢öä6Æ–6³×²‚’Óâ6WEW6R‡G'VR—Ð¢&–ÖÆ&VÃÒ%W6RæB÷VâvÖRÖVçR ¢à¢)‹ ¢Âö'WGFöãà¢ÂöF—cà¢Âö†VFW#à¢Ç6V7F–öâ6Æ74æÖSÒ'f–Ww÷'B#à¢Æ6çf0¢&Vc×¶6çf7Ð¢öåö–çFW$F÷vã×·GÐ¢öåö–çFW$Ö÷fS×·×Ð¢öåö–çFW%W×·WÐ¢öåö–çFW$6æ6VÃ×·ö–çFW$6æ6VÇÐ¢öåv†VVÃ×·v†VVÇÐ¢öä6öçFW‡DÖVçS×¶6öçFW‡D6öÖÖæGÐ¢&–ÖÆ&VÃÒ$g&öçF–W"6öÖÖæB&GFÆVf–VÆB ¢óà¢¶Ö÷fT6†ö÷6W"bb€¢ÆF—`¢6Æ74æÖSÒ&Ö÷fRÖvW7GW&R ¢7G–ÆS×·²ÆVgC¢Ö÷fT6†ö÷6W"ç‚ÂF÷¢Ö÷fT6†ö÷6W"ç’×Ð¢&öÆSÒ&ÖVçR ¢&–ÖÆ&VÃÒ$6†ö÷6RG&fVÂVævvVÖVçB&V†f–÷" ¢à¢Æ'WGFöà¢6Æ74æÖS×¶VævvRG¶Ö÷fT6†ö÷6W"æ6†ö–6RÓÓÒ&VævvR"ò&6†÷6Vâ"¢"'ÖÐ¢öåö–çFW$F÷vã×²†WfVçB’ÓâWfVçBç7F÷&÷vF–öâ‚—Ð¢öä6Æ–6³×²‚’Óâ6öÖÖ—EG&fVÄ6†ö–6R†Ö÷fT6†ö÷6W"çv÷&ÆBÂ&VævvR"—Ð¢&öÆSÒ&ÖVçV—FVÒ ¢à¢Æ“î(iÂö“ãÆ#äÔõdR²TättSÂö#ãÇ6ÖÆÃäd”t…BÂD„Tâ$U5TÔSÂ÷6ÖÆÃà¢Âö'WGFöãà¢ÆF—b6Æ74æÖSÒ&Ö÷fRÖvW7GW&RÖæ6†÷"#ãÇ7ãä„ôÄCÂ÷7ããÆ“î)xcÂö“ãÇ6ÖÆÃå4Ä”DSÂ÷6ÖÆÃãÂöF—cà¢Æ'WGFöà¢6Æ74æÖS×¶F—&V7BG¶Ö÷fT6†ö÷6W"æ6†ö–6RÓÓÒ&F—&V7B"ò&6†÷6Vâ"¢"'ÖÐ¢öåö–çFW$F÷vã×²†WfVçB’ÓâWfVçBç7F÷&÷vF–öâ‚—Ð¢öä6Æ–6³×²‚’Óâ6öÖÖ—EG&fVÄ6†ö–6R†Ö÷fT6†ö÷6W"çv÷&ÆBÂ&F—&V7B"—Ð¢&öÆSÒ&ÖVçV—FVÒ ¢à¢Æ“î(i3Âö“ãÆ#äD•$T5BÔõdSÂö#ãÇ6ÖÆÃäd•$R”â$ätR+räò4„4SÂ÷6ÖÆÃà¢Âö'WGFöãà¢ÂöF—cà¢—Ð¢¶æWGv÷&²ç&öÆRÓÒ'6öÆò"bb²&F—66öææV7FVB"Â&W'&÷"%Òæ–æ6ÇVFW2†æWGv÷&²ç7FGW2’bb€¢ÆF—b6Æ74æÖSÒ&6öææV7F–öâÖÆ÷7B#à¢Ç6ÖÆÃåD5D”4ÂÄ”ä²Äõ5CÂ÷6ÖÆÃà¢Æ#äõD„U"4ôÔÔäDU"D•44ôääT5DTCÂö#à¢Çç¶æWGv÷&²æFWF–ÂÇÂ%F†R&—fFR6öææV7F–öâVæFVBâ'ÓÂ÷à¢Æ'WGFöâöä6Æ–6³×¶÷Vä†öÖWÓå$UEU$â„ôÔSÂö'WGFöãà¢ÂöF—cà¢—Ð¢ÆF—b6Æ74æÖSÒ'¦ööÒ#à¢Æ'WGFöà¢öä6Æ–6³×²‚’Óà¢†vÖRæ7W'&VçBç¦ööÒÒÖF‚æÖ–âƒãrÂvÖRæ7W'&VçBç¦ööÒ²ãR’¢Ð¢à¢ûÈ°¢Âö'WGFöãà¢Æ'WGFöà¢öä6Æ–6³×²‚’Óà¢†vÖRæ7W'&VçBç¦ööÒÒÖF‚æÖ‚ƒãSRÂvÖRæ7W'&VçBç¦ööÒÒãR’¢Ð¢à¢(‰ ¢Âö'WGFöãà¢ÂöF—cà¢·V’æ–FÆUv÷&¶W'2âbb€¢Æ'WGFöà¢6Æ74æÖSÒ&–FÆR×v÷&¶W"Ö'WGFöâ ¢öä6Æ–6³×·6VÆV7DæW‡D–FÆUv÷&¶W'Ð¢&–ÖÆ&VÃ×¶G·V’æ–FÆUv÷&¶W'7Ò–FÆRv÷&¶W"G·V’æ–FÆUv÷&¶W'2ÓÓÒò""¢'2'Òâ6VÆV7BæB6VçFW"öâF†RæW‡BöæRæÐ¢F—FÆSÒ%6VÆV7BæW‡B–FÆRv÷&¶W" ¢à¢Ç7â6Æ74æÖSÒ&6öÖÖæBÖ'BVæ—B×v÷&¶W""&–Ö†–FFVãÒ'G'VR"óà¢Æ#ç·V’æ–FÆUv÷&¶W'7ÓÂö#à¢Âö'WGFöãà¢—Ð¢·W6VBbb€¢ÆF—b6Æ74æÖSÒ'W6RÖÖVçR#à¢ÆF—b6Æ74æÖSÒ&ÖVçR×æVÂ#à¢Ç6ÖÆÃåD5D”4ÂäUEtõ$³Â÷6ÖÆÃà¢Æƒç¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"ò$tÔRU4TB"¢%D5D”4ÂÄ”ä²'ÓÂöƒà¢ÆF—b6Æ74æÖSÒ'W6RÖö&¦V7F—fW2#à¢Ç6ÖÆÃå$”Ô%’ô$¤T5D•dU3Â÷6ÖÆÃà¢Æ#äDU5E$õ’D„RTäTÕ’4ôÔÔäB4õ$SÂö#à¢Ç7ãå4T5U$R”åDTÂ$TÄ•2+rBE$ôõU"4ÄõE2+r³RRDÔtRT4ƒÂ÷7ãà¢Ç7ãä$Õ’·V’æ&×—Ò+rU´TU´ÖF‚æ6V–Â‡V’çW¶VW—Ò5$TD•E2ôÔ”âeDU"µU´TUõ4ôeEô4ÓÂ÷7ãà¢ÂöF—cà¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"bbÆF—b6Æ74æÖSÒ&F–ff–7VÇG’×&VF÷WB#à¢ÆF—b6Æ74æÖSÒ&F–ff–7VÇG’Ö†VF–ær#à¢Ç7ãä’D”dd”5TÅE“Â÷7ãà¢Æ#ç¶F–ff–7VÇG”–æfò†vÖRæ7W'&VçBæFF—fR’æÆ&VÇÓÂö#à¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&F–ff–7VÇG’Ö&""&–ÖÆ&VÃ×¶’F–ff–7VÇG’ÆWfVÂG¶F–ff–7VÇG”–æfò†vÖRæ7W'&VçBæFF—fR’æÆWfVÇÒöbVÓà¢´'&’æg&öÒ‡²ÆVæwFƒ¢RÒÂ…òÂ–æFW‚’Óâ€¢Æ’¶W“×¶–æFW‡Ò6Æ74æÖS×¶–æFW‚ÂF–ff–7VÇG”–æfò†vÖRæ7W'&VçBæFF—fR’æÆWfVÂò&f–ÆÆVB"¢"'Òóà¢’—Ð¢ÂöF—cà¢Ç6ÖÆÃäÄUdTÂ¶F–ff–7VÇG”–æfò†vÖRæ7W'&VçBæFF—fR’æÆWfVÇÒòSÂ÷6ÖÆÃà¢ÂöF—cçÐ¢Çç¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"ò6fU7FGW2¢$•dDR$ôôÒG¶æWGv÷&²æ6öFWÒ+rÔD4‚4ôåD”åTU2t„”ÄRD„•2ÔTåR•2õTæÓÂ÷à¢Æ'WGFöâ6Æ74æÖSÒ'&–Ö'’"öä6Æ–6³×²‚’Óâ6WEW6R†fÇ6R—Óà¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"ò%$U5TÔR"¢%$UEU$âDò$EDÄR'Ð¢Âö'WGFöãà¢ÆF—b6Æ74æÖSÒ'2Ö6öçG&öÇ2#à¢Æ#äDU4µDõ4ôåE$ôÅ3Âö#à¢Ç7ãå$”t…BÔ4Ä”4²ÔõdRòED4²+r4„”eBDB4TÄT5CÂ÷7ãà¢Ç7ãåt4Bò%$õu2â+rt„TTÂ¤ôôÒ+r54R4TåDU#Â÷7ãà¢Ç7ãä5E$Â³(	3’4dRu$õU+r(	3’$T4ÄÂ+rDõT$ÄRÕ$U524TåDU#Â÷7ãà¢Ç7ãåtõ$´U"4TÄT5DTC¢"$Td”äU%’+r"$%$4µ2+rBEU%$UCÂ÷7ãà¢Ç7ãä…4TÄT5DTC¢btõ$´U"+r$U4T$4‚+rrt•ô”åB+r¢4²ôDUÄõ’+rÂÔõdR5$tÄU#Â÷7ãà¢Ç7ãä$%$4µ24TÄT5DTC¢’E$ôõU"+r²Dä²+râE$ôäR+rrt•ô”åCÂ÷7ãà¢Ç7ãå¢ÔõdR+r2U%5TR+r‚„ôÄB+rE$ôÂ+r’$U•"+ròUDò$U•#Â÷7ãà¢Ç7ãäbdõ%D”e’+rR•"Dô5E$”äR+rÒ$Ôõ"Dô5E$”äSÂ÷7ãà¢ÂöF—cà¢Æ'WGFöà¢6Æ74æÖS×·GWF÷&–Ç4Væ&ÆVBò'F—2×FövvÆR7F—fR"¢'F—2×FövvÆR'Ð¢öä6Æ–6³×·FövvÆUGWF÷&–Ç7Ð¢&–×&W76VC×·GWF÷&–Ç4Væ&ÆVGÐ¢à¢EUDõ$”ÂbDôôÅD•3¢·GWF÷&–Ç4Væ&ÆVBò$ôâ"¢$ôdb'Ð¢Âö'WGFöãà¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"bbÆ'WGFöâöä6Æ–6³×·6fTÖçVÇÓå4dRtÔSÂö'WGFöãçÐ¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"bbÆ'WGFöâöä6Æ–6³×¶ÆöDÖçVÇÓäÄôBtÔSÂö'WGFöãçÐ¢Æ'WGFöà¢6Æ74æÖSÒ'v&æ–ær ¢öä6Æ–6³×¶÷Vä†öÖWÐ¢à¢„ôÔRòäUrtÔP¢Âö'WGFöãà¢ÂöF—cà¢ÂöF—cà¢—Ð¢·V’æ÷fW"bb€¢ÆF—b6Æ74æÖSÒ&VæB#à¢Ç6ÖÆÃäõU$D”ôâ4ôÕÄUDSÂ÷6ÖÆÃà¢Æƒç·V’æ÷fW"ÓÓÒ'vöâ"ò%d”5Dõ%’"¢$$4RÄõ5B'ÓÂöƒà¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"bb‚‚’Óâ°¢6öç7B&Wf–WrÒ&VDF–ff–7VÇG’‚’ç&Wf–Ww2æB‚Ó“°¢&WGW&â&Wf–WròÇ6Æ74æÖSÒ&ÖF6‚×&Wf–Wr#ãÆ#ç·&Wf–Wrç7VÖÖ'—ÓÂö#ãÆ'"óäÖF6‚W&f÷&Öæ6S¢´ÖF‚ç&÷VæB‡&Wf–Wrç66÷&R—Òó·&Wf–Wræ6öÖÖæE‡òÃãÆ'"óãÇ7G&öæsâ··&Wf–Wræ6öÖÖæE‡Ò4ôÔÔäB…Â÷7G&öæsãÂóâ¢çVÆÇÓÆ'"óãÇ6ÖÆÃäæW‡B÷öæVçC¢¶F–ff–7VÇG”–æfò†FF—fTF–ff–7VÇG’‚’’æÆ&VÇÓÂ÷6ÖÆÃãÂ÷â¢çVÆÃ°¢Ò’‚—Ð¢¶æWGv÷&²ç&öÆRÓÓÒ'6öÆò"bbÆ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'&W6WB"—ÓåÄ’t”ãÂö'WGFöãçÐ¢Æ'WGFöâöä6Æ–6³×¶÷Vä†öÖWÓä„ôÔSÂö'WGFöãà¢ÂöF—cà¢—Ð¢·6†÷t7F—fUF—bb€¢Æ6–FR6Æ74æÖSÒ'F7F–6Â×F—"&–ÖÆ—fSÒ'öÆ—FR#à¢Æ'WGFöâ6Æ74æÖSÒ'F—Ö6Æ÷6R"öä6Æ–6³×²‚’ÓâF—6Ö—75F—†7F—fUF—æ¶W’—Ò&–ÖÆ&VÃÒ$F—6Ö—72F†—2F—#ì9sÂö'WGFöãà¢Ç6ÖÆÃç¶7F—fUF—çF—FÆWÓÂ÷6ÖÆÃà¢Çç¶7F—fUF—çFW‡GÓÂ÷à¢Æ'WGFöâ6Æ74æÖSÒ'F—ÖF—6&ÆR"öä6Æ–6³×·FövvÆUGWF÷&–Ç7ÓåEU$âÄÂD•2ôdcÂö'WGFöãà¢Âö6–FSà¢—Ð¢Â÷6V7F–öãà¢Ç6V7F–öâ6Æ74æÖSÒ&6öÖÖæB#à¢ÆF—b6Æ74æÖSÒ'7FGW2#à¢Ç6ÖÆÃäd”TÄB4ôÔÕ3Â÷6ÖÆÃà¢Çç·V’æÖW76vWÓÂ÷à¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ'6VÆV7F–öâ#à¢Ç7à¢6Æ74æÖS×¶÷'G&—BG·V’ç6VÆV7FVEVæ—EG—RbbV’ç6VÆV7FVEVæ—EG—RÓÒ&Ö—†VB"ò6öÖÖæBÖ'BVæ—BÒG·V’ç6VÆV7FVEVæ—EG—WÖ¢V’ç6VÆV7FVD'V–ÆF–ærò6öÖÖæBÖ'B'V–ÆF–ærÒG·V’ç6VÆV7FVD'V–ÆF–æwÖ¢"'ÖÐ¢&–Ö†–FFVãÒ'G'VR ¢ç²V’ç6VÆV7FVEVæ—EG—RbbV’ç6VÆV7FVD'V–ÆF–ærò.)x‚"¢"'ÓÂ÷7ãà¢ÆF—cà¢Ç6ÖÆÃå4TÄT5D”ôãÂ÷6ÖÆÃà¢Æ#ç·V’ç6VÆV7FVGÓÂö#à¢ÂöF—cà¢Æ'WGFöà¢6Æ74æÖSÒ&FW6VÆV7B ¢öä6Æ–6³×²‚’Óâ7F–öâ‚&FW6VÆV7B"—Ð¢F—6&ÆVC×²V’æ6ä6ÆV'Ð¢à¢4ÄT ¢Âö'WGFöãà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&6öÖ&BÖÆVvVæB#à¢Ç6ÖÆÃä4ôÔ$B$TDõUCÂ÷6ÖÆÃà¢Ç7ããÆ#ä…Âö#â†VÇF‚+rÆ#äDÔsÂö#âFÖvRW"6†÷CÂ÷7ãà¢Ç7ãåG&ö÷W"(i"G&öæR(i"Fæ²(i"G&ö÷W"+rff÷&VBÖF6‡W³SRRDÔsÂ÷7ãà¢Ç7ãå6V7W&VB–çFVÂ&VÆ—2w&çB³RRDÔrV6‚+r7F6·2Fò³SÂ÷7ãà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&6öÖÖæBÖ6VçFW"#à¢·V’ç6VÆV7FVD6öÖ&BâbbV’ç6VÆV7FVEv÷&¶W'2ÓÓÒò€¢ÆF—b6Æ74æÖSÒ&f÷&ÖF–öâ×æVÂ#à¢ÆF—b6Æ74æÖSÒ&f÷&ÖF–öâÖ†VFW"#à¢ÆF—cãÇ6ÖÆÃädõ$ÔD”ôãÂ÷6ÖÆÃãÆ#ç·V’ç6VÆV7FVD6öÖ&GÒTä•E3Âö#ãÂöF—cà¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚&FW6VÆV7B"—Óä4ÄT#Âö'WGFöãà¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&f÷&ÖF–öâÖw&–B"&–ÖÆ&VÃÒ%6VÆV7FVBf÷&ÖF–öâVæ—G2#à¢·V’ç6VÆV7FVEVæ—D6&G2æÖ‚‡Væ—B’Óâ€¢Æ'WGFöà¢¶W“×·Væ—Bæ–GÐ¢6Æ74æÖS×¶f÷&ÖF–öâ×Væ—BÖ6&BVæ—BÒG·Væ—BçG—WÖÐ¢öä6Æ–6³×²‚’Óâ&VÖ÷fU6VÆV7FVEVæ—B‡Væ—Bæ–B—Ð¢&–ÖÆ&VÃ×¶&VÖ÷fRG·Væ—DæÖR‡Væ—BçG—R—Òg&öÒf÷&ÖF–öæÐ¢à¢Ç7â6Æ74æÖS×¶6öÖÖæBÖ'BVæ—BÒG·Væ—BçG—WÖÒ&–Ö†–FFVãÒ'G'VR"óà¢Ç7â6Æ74æÖSÒ&f÷&ÖF–öâ×Væ—BÖ–æfò#à¢Æ#ç·Væ—DæÖR‡Væ—BçG—R—ÓÂö#à¢Ç6ÖÆÃå'·Væ—BæÆWfVÇÓÂ÷6ÖÆÃà¢Æ“ãÆVÒ7G–ÆS×·²v–GFƒ¢G´ÖF‚æÖ‚ƒÂVæ—Bæ‡òVæ—BæÖ‚¢—ÒV×ÒóãÂö“à¢Â÷7ãà¢Ç7â6Æ74æÖSÒ&f÷&ÖF–öâ×&VÖ÷fR"&–Ö†–FFVãÒ'G'VR#î(‰#Â÷7ãà¢Âö'WGFöãà¢’—Ð¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&f÷&ÖF–öâÖ÷&FW'2"&–ÖÆ&VÃÒ$f÷&ÖF–öâ÷&FW'2#à¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚&Ö÷fR"—Ò&–ÖÆ&VÃÒ$F—&V7BÖ÷fR"F—FÆSÒ$F—&V7BÖ÷fR#î)êCÂö'WGFöãà¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'W'7VR"—Ò&–ÖÆ&VÃÒ%W'7VR"F—FÆSÒ%W'7VR#î(ÉcÂö'WGFöãà¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'G&öÂ"—Ò&–ÖÆ&VÃÒ%G&öÂ"F—FÆSÒ%G&öÂ#î(xCÂö'WGFöãà¢Æ'WGFöâ6Æ74æÖSÒ'&WG&VB"öä6Æ–6³×²‚’Óâ7F–öâ‚'&WG&VB"—Ò&–ÖÆ&VÃÒ%&WG&VB"F—FÆSÒ%&WG&VB#î(j“Âö'WGFöãà¢ÂöF—cà¢ÂöF—cà¢’¢ƒÃà¢ÆF—b6Æ74æÖSÒ&6öÖÖæBÖ6öçFW‡B"&–ÖÆ&VÃÒ$7W'&VçB6öÖÖæBÖVçR#à¢²†6öÖÖæEF"ÓÓÒ&'V–ÆF–æw2"ÇÂ6öÖÖæEF"ÓÓÒ'FV6‚"’ò€¢Æ'WGFöâ6Æ74æÖSÒ&6öçFW‡BÖ&6²"öä6Æ–6³×²‚’Óâ6WD6öÖÖæEF"‚'Væ—G2"—Óà¢Æ“î(“Âö“à¢Ç7ãç¶6öÖÖæEF"ÓÓÒ&'V–ÆF–æw2"ò$4ôå5E%T5D”ôâ"¢$…$U4T$4‚'ÓÇ6ÖÆÃä$4²Dòõ$DU%3Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢’¢V’ç6VÆV7FVEVæ—G2âò€¢ÆF—b6Æ74æÖSÒ'6VÆV7F–öâÖ6öÖÖæBÖ†VFW"#à¢Ç7â6Æ74æÖS×¶6öÖÖæB×F"Ö'BG·V’ç6VÆV7FVEVæ—EG—RbbV’ç6VÆV7FVEVæ—EG—RÓÒ&Ö—†VB"òVæ—BÒG·V’ç6VÆV7FVEVæ—EG—WÖ¢"'ÖÒ&–Ö†–FFVãÒ'G'VR#ç·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&Ö—†VB"ò.)x‚"¢"'ÓÂ÷7ãà¢Æ#ç·V’ç6VÆV7FVEVæ—G2ÓÓÒòVæ—DæÖR‡V’ç6VÆV7FVEVæ—EG—R2Væ—E²'G—R%Ò’¢G·V’ç6VÆV7FVEVæ—G7ÒTä•E6ÓÂö#à¢Ç6ÖÆÃäd”TÄBõ$DU%3Â÷6ÖÆÃà¢ÂöF—cà¢’¢V’ç6VÆV7FVD'V–ÆF–ærò€¢ÆF—b6Æ74æÖSÒ'6VÆV7F–öâÖ6öÖÖæBÖ†VFW"#à¢Ç7â6Æ74æÖS×¶6öÖÖæB×F"Ö'B'V–ÆF–ærÒG·V’ç6VÆV7FVD'V–ÆF–æwÖÒ&–Ö†–FFVãÒ'G'VR"óà¢Æ#ç·V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"bbV’æ‡6¶VBò$4ôÔÔäB5$tÄU""¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"ò$„TET%DU%2"¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ'GW'&WB"ò%4TåE%’EU%$UB"¢V’ç6VÆV7FVD'V–ÆF–ærçFõWW$66R‚—ÓÂö#à¢Ç6ÖÆÃç·V’ç6VÆV7FVD6öç7G'V7F–öâò$4ôå5E%T5D”ôât•$Te$ÔR"¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"bbV’æ‡&VÆö6F–öâòG·V’æ‡&VÆö6F–öâæÖöFRÓÓÒ'6²"ò%4´”är"¢$DUÄõ””är'Ò+rG´ÖF‚æ6V–Â‡V’æ‡&VÆö6F–öâæGW&F–öâÒV’æ‡&VÆö6F–öâæVÆ6VB—×6¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"bbV’æ‡6¶VBò$Ôô$”ÄR+r4ôÔÔäB5•5DTÕ2ôddÄ”äR"¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"ò$4ôÔÔäBb$U4T$4‚"¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&&'&6·2"ò%Tä•B$ôET5D”ôâ"¢%5E%T5EU$Rõ$DU%2'ÓÂ÷6ÖÆÃà¢ÂöF—cà¢’¢€¢ÆF—b6Æ74æÖSÒ'6VÆV7F–öâÖ6öÖÖæBÖ†VFW"æòÖ6öÖÖæB#à¢Ç7â6Æ74æÖSÒ&6öÖÖæB×F"×FV6‚"&–Ö†–FFVãÒ'G'VR#î(ÈÂ÷7ãà¢Æ#ä4ôÔÔäB$TE“Âö#à¢Ç6ÖÆÃå4TÄT5BTä•Bõ"%T”ÄD”äsÂ÷6ÖÆÃà¢ÂöF—cà¢—Ð¢ÂöF—cà¢ÆF—b6Æ74æÖSÒ&7F–öç2"&öÆSÒ'F'æVÂ#à¢·V’ç6VÆV7FVEv÷&¶W'2âbb6öÖÖæEF"ÓÓÒ&'V–ÆF–æw2"ò€¢Ãà¢Æ'WGFöâF—6&ÆVC×·V’æÆÆ÷’Â%T”ÄEô4õ5Bç&Vf–æW'—Ò6Æ74æÖS×¶G·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆB×&Vf–æW'’"ò'Æ6–ær"¢"'ÒG·V’æÆÆ÷’Â%T”ÄEô4õ5Bç&Vf–æW'’ò'Væff÷&F&ÆR"¢"'ÖÒ&–×&W76VC×·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆB×&Vf–æW'’'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&'V–ÆB×&Vf–æW'’"—ÒF—FÆS×·V’æÆÆ÷’Â%T”ÄEô4õ5Bç&Vf–æW'’òG´%T”ÄEô4õ5Bç&Vf–æW'’ÒV’æÆÆ÷—ÒÖ÷&RÆÆ÷’&WV—&VF¢VæFVf–æVGÓà¢Æ¶&Cå#Âö¶&CãÇ7â6Æ74æÖSÒ&6öÖÖæBÖ'B'V–ÆF–ær×&Vf–æW'’"&–Ö†–FFVãÒ'G'VR"óãÇ7ãå$Td”äU%“Ç6ÖÆÃç·V’æÆÆ÷’Â%T”ÄEô4õ5Bç&Vf–æW'’òäTTBG´%T”ÄEô4õ5Bç&Vf–æW'’ÒV’æÆÆ÷—ÒÔõ$RÄÄõ–¢G´%T”ÄEô4õ5Bç&Vf–æW'—ÒÄÄõ’+rDÕTÅD•ÄR4•DU6ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Æ'WGFöâF—6&ÆVC×·V’æÆÆ÷’Â%T”ÄEô4õ5Bæ&'&6·7Ò6Æ74æÖS×¶G·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆBÖ&'&6·2"ò'Æ6–ær"¢"'ÒG·V’æÆÆ÷’Â%T”ÄEô4õ5Bæ&'&6·2ò'Væff÷&F&ÆR"¢"'ÖÒ&–×&W76VC×·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆBÖ&'&6·2'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&'V–ÆBÖ&'&6·2"—ÒF—FÆS×·V’æÆÆ÷’Â%T”ÄEô4õ5Bæ&'&6·2òG´%T”ÄEô4õ5Bæ&'&6·2ÒV’æÆÆ÷—ÒÖ÷&RÆÆ÷’&WV—&VF¢VæFVf–æVGÓà¢Æ¶&Cä#Âö¶&CãÇ7â6Æ74æÖSÒ&6öÖÖæBÖ'B'V–ÆF–ærÖ&'&6·2"&–Ö†–FFVãÒ'G'VR"óãÇ7ãä$%$4µ3Ç6ÖÆÃç·V’æÆÆ÷’Â%T”ÄEô4õ5Bæ&'&6·2òäTTBG´%T”ÄEô4õ5Bæ&'&6·2ÒV’æÆÆ÷—ÒÔõ$RÄÄõ–¢G´%T”ÄEô4õ5Bæ&'&6·7ÒÄÄõ’+rDÕTÅD•ÄR4•DU6ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Æ'WGFöâF—6&ÆVC×·V’æÆÆ÷’Â%T”ÄEô4õ5BçGW'&WGÒ6Æ74æÖS×¶G·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆB×GW'&WB"ò'Æ6–ær"¢"'ÒG·V’æÆÆ÷’Â%T”ÄEô4õ5BçGW'&WBò'Væff÷&F&ÆR"¢"'ÖÒ&–×&W76VC×·V’æ'V–ÆDÖöFRÓÓÒ&'V–ÆB×GW'&WB'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&'V–ÆB×GW'&WB"—ÒF—FÆS×·V’æÆÆ÷’Â%T”ÄEô4õ5BçGW'&WBòG´%T”ÄEô4õ5BçGW'&WBÒV’æÆÆ÷—ÒÖ÷&RÆÆ÷’&WV—&VF¢VæFVf–æVGÓà¢Æ¶&CåCÂö¶&CãÇ7â6Æ74æÖSÒ&6öÖÖæBÖ'B'V–ÆF–ær×GW'&WB"&–Ö†–FFVãÒ'G'VR"óãÇ7ãå4TåE%’EU%$UCÇ6ÖÆÃç·V’æÆÆ÷’Â%T”ÄEô4õ5BçGW'&WBòäTTBG´%T”ÄEô4õ5BçGW'&WBÒV’æÆÆ÷—ÒÔõ$RÄÄõ–¢G´%T”ÄEô4õ5BçGW'&WGÒÄÄõ’+rTUTR+rW2DUÄõ–ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Âóà¢’¢V’ç6VÆV7FVEVæ—G2âò€¢Ãà¢Æ'WGFöâF—6&ÆVC×·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&6—†W""bbV’ç6VÆV7FVD6—†W$ÖöFRÓÒ&Öö&–ÆR'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&Ö÷fR"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$¶VWF†RFW7F–æF–öâÆö6¶VBæBf—&RBVæVÖ–W2Ç&VG’v—F†–âvVöâ&ævRv—F†÷WB6†6–ærF†VÒâ"¢VæFVf–æVGÓà¢Æ¶&Cå£Âö¶&CãÆ“î)êCÂö“ãÇ7ãäD•$T5BÔõdSÇ6ÖÆÃç·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&6—†W""ò$Ôô$”ÄRE$dTÂ"¢$d•$R”â$ätR+räò4„4R'ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&6—†W""bb‡V’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&Öö&–ÆR"ÇÂV’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&Ö—†VB"’bb€¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚&FWÆ÷’Ö6—†W""—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$FWÆ÷’f÷"V–v‡B6V6öæG2âöæ6RöæÆ–æRæB÷WBöb6öÖ&BÂF†—26—†W"vVæW&FW2öæR7&VF—BV6‚6V6öæBâ"¢VæFVf–æVGÓà¢Æ“î(ÈÂö“ãÇ7ãäDUÄõ’4•„U#Ç6ÖÆÃç´4•„U%ôDUÄõ•ôEU$D”ôç×2+r³c5$TD•E2ôÔ”ãÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢—Ð¢·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&6—†W""bb‡V’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&FWÆ÷–VB"ÇÂV’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&Ö—†VB"’bb€¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'6²Ö6—†W""—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò%6‡WBF÷vâF†R–æ6öÖRÆ–æ²æB&WGW&âF†R6—†W"Fò—G2Öö&–ÆRf÷&Òâ"¢VæFVf–æVGÓà¢Æ“î)j3Âö“ãÇ7ãå4²4•„U#Ç6ÖÆÃç´4•„U%õ4µôEU$D”ôç×2+r5Dõ2”ä4ôÔSÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢—Ð¢·V’ç6VÆV7FVEVæ—EG—RÓÓÒ&6—†W""bb‡V’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&FWÆ÷––ær"ÇÂV’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ'6¶–ær"’bb€¢Æ'WGFöâF—6&ÆVB6Æ74æÖSÒ'Æ6–ær#à¢Æ“î(ÈÂö“ãÇ7ãç·V’ç6VÆV7FVD6—†W$ÖöFRÓÓÒ&FWÆ÷––ær"ò$DUÄõ””är"¢%4´”är'ÓÇ6ÖÆÃåE$å4•D”ôâ”â$ôu$U53Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢—Ð¢·V’ç6VÆV7FVD6öÖ&BâbbƒÃà¢Æ'WGFöâ6Æ74æÖS×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'W'7VR"ò&7F—fRÖ÷&FW""¢"'Ò&–×&W76VC×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'W'7VR'Òöä6Æ–6³×²‚’Óâ7F–öâ‚'W'7VR"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$6†6Rf—6–&ÆRVæVÖ–W2v—F†–â6–v‡B&ævRâ"¢VæFVf–æVGÓà¢Æ¶&Cä3Âö¶&CãÆ“î(ÉcÂö“ãÇ7ãåU%5TSÇ6ÖÆÃä4„4Rd•4”$ÄRD$tUE3Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢·V’ç6VÆV7FVEVæ—EG—RÓÓÒ'G&ö÷W""bb€¢Æ'WGFöâ6Æ74æÖS×·V’ç6VÆV7FVE7Fæ6RÓÓÒ&†öÆB"ò&7F—fRÖ÷&FW""¢"'Ò&–×&W76VC×·V’ç6VÆV7FVE7Fæ6RÓÓÒ&†öÆB'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&†öÆB"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò%G&ö÷W'2FWÆ÷’–çFò7FF–öæ'’GW'&WBf÷&Òv—F‚3RRw&VFW"vVöâ&ævRâ"¢VæFVf–æVGÓà¢Æ¶&CäƒÂö¶&CãÆ“î(ËãÂö“ãÇ7ãå4TåE%’ÔôDSÇ6ÖÆÃåE$ôõU%2+r³3RR$ätSÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢—Ð¢Æ'WGFöâ6Æ74æÖS×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'G&öÂ"ò&7F—fRÖ÷&FW""¢"'Ò&–×&W76VC×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'G&öÂ'Òöä6Æ–6³×²‚’Óâ7F–öâ‚'G&öÂ"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$6†ö÷6RGvòö–çG2âVæ—G2G&fVÂ&WGvVVâF†VÒæBVævvRF‡&VG2Vâ&÷WFRâ"¢VæFVf–æVGÓà¢Æ¶&CåÂö¶&CãÆ“î(xCÂö“ãÇ7ãåE$ôÃÇ6ÖÆÃå4UBEtò$õUDRô”åE3Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Æ'WGFöâ6Æ74æÖSÒ'&WG&VB"öä6Æ–6³×²‚’Óâ7F–öâ‚'&WG&VB"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò%&WGW&âFò…#Rf7FW"Âfö–B6öÖ&BÂæB†VÂöâ'&—fÂâ"¢VæFVf–æVGÓà¢Æ¶&CäSÂö¶&CãÆ“î(j“Âö“ãÇ7ãå$UE$TCÇ6ÖÆÃäD•4TättR+r„TÂB…Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Âóâ—Ð¢·V’ç6VÆV7FVEv÷&¶W'2âbbƒÃà¢Æ'WGFöâöä6Æ–6³×²‚’Óâ6WD6öÖÖæEF"‚&'V–ÆF–æw2"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$÷VâF†Rv÷&¶W"6öç7G'V7F–öâÖVçRâ"¢VæFVf–æVGÓà¢Æ“î)jcÂö“ãÇ7ãä4ôå5E%T5D”ôãÇ6ÖÆÃäõTâ%T”ÄBÔTåSÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'&W—""—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò$6†ö÷6RöæRFÖvVBg&–VæFÇ’Væ—B÷"7G'V7GW&RFò&W—"â&W—'26öç7VÖRÆÆ÷’â"¢VæFVf–æVGÓà¢Æ¶&Cå“Âö¶&CãÆ“ï	ùJsÂö“ãÇ7ãå$U•"D$tUCÇ6ÖÆÃåTä•E2²5E%T5EU$U2+rµ$U•%õ$DWÒ…÷3Â÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢Æ'WGFöâ6Æ74æÖS×·V’æWFõ&W—"ò&7F—fRÖ÷&FW"&W—"×FövvÆR"¢'&W—"×FövvÆR'Ò&–×&W76VC×·V’æWFõ&W—'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&WFò×&W—""—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò%v†VâVæ&ÆVBÂF†W6Rv÷&¶W'27F÷Ö–æ–æræBWFöÖF–6ÆÇ’&W—"æV&'’g&–VæFÇ’Væ—G2æB7G'V7GW&W2âFVfVÇB—2öfbâ"¢VæFVf–æVGÓà¢Æ¶&CäóÂö¶&CãÆ“ç·V’æWFõ&W—"ò.)É2"¢.)x²'ÓÂö“ãÇ7ãäUDò$U•"·V’æWFõ&W—"ò$ôâ"¢$ôdb'ÓÇ6ÖÆÃç·V’ç&W—&–æuv÷&¶W'2òG·V’ç&W—&–æuv÷&¶W'7Ò$U•$”äv¢%5Dõ2Ô”ä”är+r$U•%2ÄÄ”U2'ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢·V’æWFõ&W—"bbV’ç6VÆV7FVD6öÖ&BÓÓÒbb€¢Æ'WGFöâ6Æ74æÖS×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'G&öÂ"ò&7F—fRÖ÷&FW""¢"'Ò&–×&W76VC×·V’ç6VÆV7FVE7Fæ6RÓÓÒ'G&öÂ'Òöä6Æ–6³×²‚’Óâ7F–öâ‚'G&öÂ"—ÒF—FÆS×·GWF÷&–Ç4Væ&ÆVBò%6WBGvòG&öÂö–çG2âv÷&¶W'2&W—"æV&'’ÆÆ–W2ÂF†Vâ&W7VÖRF†R&÷WFRâ"¢VæFVf–æVGÓà¢Æ¶&CåÂö¶&CãÆ“î(xCÂö“ãÇ7ãäÔ”åDTää4RE$ôÃÇ6ÖÆÃå$U•"äT"$õUDR+r$U5TÔSÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢—Ð¢Âóâ—Ð¢Âóà¢’¢V’ç6VÆV7FVD6öç7G'V7F–öâbbV’ç6VÆV7FVD'V–ÆF–ærò€¢Æ'WGFöâ6Æ74æÖSÒ'6VÆÂ"öä6Æ–6³×²‚’Óâ7F–öâ‚&6æ6VÂÖ6öç7G'V7F–öâ"—Óà¢Æ“î)ÉSÂö“ãÇ7ãä4ä4TÂ·V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ'GW'&WB"ò%4TåE%’"¢V’ç6VÆV7FVD'V–ÆF–ærçFõWW$66R‚—ÓÇ6ÖÆÃäeTÄÂ$TeTäB$Tdõ$Rtõ$²+rSReDU"5D%CÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢’¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"bbV’æ‡6¶VBbbV’æ‡&VÆö6F–öâbb6öÖÖæEF"ÓÓÒ'FV6‚"ò€¢Ãà¢Æ'WGFöâF—6&ÆVC×·V’æf÷'F–f–VBÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ÇÂV’æ–çFVÂÂdõ%D”e•ô”åDTÅô4õ5GÒ6Æ74æÖS×·V’æf÷'F–f–VBÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ò&Æö6¶VB"¢V’æf÷'F–g•&öGV7F–öâò'Æ6–ær"¢V’æ–çFVÂÂdõ%D”e•ô”åDTÅô4õ5Bò'Væff÷&F&ÆR"¢"'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&f÷'F–g’"—ÒF—FÆS×·V’æ–çFVÂÂdõ%D”e•ô”åDTÅô4õ5BòG´dõ%D”e•ô”åDTÅô4õ5BÒV’æ–çFVÇÒÖ÷&R–çFVÂ&WV—&VF¢VæFVf–æVGÓà¢Æ¶&CäcÂö¶&CãÇ7â6Æ74æÖSÒ&6öÖÖæBÖ'B'V–ÆF–ærÖ‡"&–Ö†–FFVãÒ'G'VR#ç·V’æf÷'F–f–VBbbÆ"6Æ74æÖSÒ&6öÖÖæBÖ'BÖ&FvR#î)É3Âö#çÓÂ÷7ãà¢Ç7ãç·V’æf÷'F–f–VBò$$4Rdõ%D”d”TB"¢V’æf÷'F–g•&öGV7F–öâò$dõ%D”e””är$4R"¢$dõ%D”e’$4R'ÓÇ6ÖÆÃç·V’æf÷'F–f–VBò"³#RR5E%T5EU$R…5D•dR"¢V’æf÷'F–g•&öGV7F–öâòG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â‡V’æf÷'F–g•&öGV7F–öâæGW&F–öâÒV’æf÷'F–g•&öGV7F–öâæVÆ6VB’—×2$TÔ”ä”äv¢V’æ–çFVÂÂdõ%D”e•ô”åDTÅô4õ5BòäTTBG´dõ%D”e•ô”åDTÅô4õ5BÒV’æ–çFVÇÒÔõ$R”åDTÆ¢G´dõ%D”e•ô”åDTÅô4õ5GÒ”åDTÂ+rC2+r³#RR5E%T5EU$R…ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢²…²&—""Â&&Ö÷"%Ò2Fö7G&–æUµÒ’æÖ‚†Fö7G&–æR’Óâ°¢6öç7B6†÷6VâÒV’æFö7G&–æRÓÓÒFö7G&–æS°¢6öç7B&W6V&6†–ærÒV’æFö7G&–æU&öGV7F–öãòçG—RÓÓÒFö7G&–æS°¢6öç7BÆö6¶VBÒ&ööÆVâ‡V’æFö7G&–æRbb6†÷6Vâ’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâbb&W6V&6†–ær“°¢&WGW&â€¢Æ'WGFöâ¶W“×¶Fö7G&–æWÒF—6&ÆVC×´&ööÆVâ‡V’æFö7G&–æR’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ÇÂV’æ–çFVÂÂDô5E$”äUô”åDTÅô4õ5GÒ6Æ74æÖS×¶6†÷6VâÇÂÆö6¶VBÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ò&Æö6¶VB"¢&W6V&6†–ærò'Æ6–ær"¢V’æ–çFVÂÂDô5E$”äUô”åDTÅô4õ5Bò'Væff÷&F&ÆR"¢"'Òöä6Æ–6³×²‚’Óâ7F–öâ†Fö7G&–æRÒG¶Fö7G&–æWÖ—ÒF—FÆS×·V’æ–çFVÂÂDô5E$”äUô”åDTÅô4õ5BòG´Dô5E$”äUô”åDTÅô4õ5BÒV’æ–çFVÇÒÖ÷&R–çFVÂ&WV—&VF¢VæFVf–æVGÓà¢Æ¶&Cç¶Fö7G&–æRÓÓÒ&—""ò%R"¢$Ò'ÓÂö¶&CãÆ“ç¶Fö7G&–æRÓÓÒ&—""ò.)Êb"¢.*Ê"'ÓÂö“à¢Ç7ãç¶Fö7G&–æRÓÓÒ&—""ò$•"5UU$”õ$•E’"¢$$Ôõ$TB4ôÔÔäB'ÓÇ6ÖÆÃç¶6†÷6VâòFö7G&–æRÓÓÒ&—""ò$Äô4´TB+r³‚RE$ôäRDÔr+r³RR5TTB"¢$Äô4´TB+r³‚RDä²…bDÔr"¢Æö6¶VBò$Äô4´TB%’õD„U"Dô5E$”äR"¢&W6V&6†–æròG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â‡V’æFö7G&–æU&öGV7F–öâæGW&F–öâÒV’æFö7G&–æU&öGV7F–öâæVÆ6VB’—×2$TÔ”ä”äv¢V’æ–çFVÂÂDô5E$”äUô”åDTÅô4õ5BòäTTBG´Dô5E$”äUô”åDTÅô4õ5BÒV’æ–çFVÇÒÔõ$R”åDTÆ¢G´Dô5E$”äUô”åDTÅô4õ5GÒ”åDTÂ+rG´Dô5E$”äUôEU$D”ôç×2+rU$ÔäTåB4„ô”4VÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢“°¢Ò—Ð¢Æ'WGFöâF—6&ÆVC×·V’çG&FTæWGv÷&²ÇÂ&ööÆVâ‡V’çG&FTæWGv÷&µ&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ÇÂV’æ–çFVÂÂE$DUôäUEtõ$µô”åDTÅô4õ5GÒ6Æ74æÖS×·V’çG&FTæWGv÷&²ÇÂ&ööÆVâ‡V’æf÷'F–g•&öGV7F–öâ’ÇÂ&ööÆVâ‡V’æFö7G&–æU&öGV7F–öâ’ò&Æö6¶VB"¢V’çG&FTæWGv÷&µ&öGV7F–öâò'Æ6–ær"¢V’æ–çFVÂÂE$DUôäUEtõ$µô”åDTÅô4õ5Bò'Væff÷&F&ÆR"¢"'Òöä6Æ–6³×²‚’Óâ7F–öâ‚'G&FRÖæWGv÷&²"—ÒF—FÆS×·V’æ–çFVÂÂE$DUôäUEtõ$µô”åDTÅô4õ5BòGµE$DUôäUEtõ$µô”åDTÅô4õ5BÒV’æ–çFVÇÒÖ÷&R–çFVÂ&WV—&VF¢VæFVf–æVGÓà¢Æ“î(ÈÂö“ãÇ7ãç·V’çG&FTæWGv÷&²ò%E$DRäUEtõ$²ôäÄ”äR"¢V’çG&FTæWGv÷&µ&öGV7F–öâò$õTä”ärE$DRäUEtõ$²"¢%E$DRäUEtõ$²'ÓÇ6ÖÆÃç·V’çG&FTæWGv÷&²ò$4•„U"$ôET5D”ôâTäÄô4´TB"¢V’çG&FTæWGv÷&µ&öGV7F–öâòG´ÖF‚æÖ‚ƒÂÖF‚æ6V–Â‡V’çG&FTæWGv÷&µ&öGV7F–öâæGW&F–öâÒV’çG&FTæWGv÷&µ&öGV7F–öâæVÆ6VB’—×2$TÔ”ä”äv¢V’æ–çFVÂÂE$DUôäUEtõ$µô”åDTÅô4õ5BòäTTBGµE$DUôäUEtõ$µô”åDTÅô4õ5BÒV’æ–çFVÇÒÔõ$R”åDTÆ¢GµE$DUôäUEtõ$µô”åDTÅô4õ5GÒ”åDTÂ+rGµE$DUôäUEtõ$µôEU$D”ôç×2+rTäÄô4²4•„U&ÓÂ÷6ÖÆÃãÂ÷7ãà¢Âö'WGFöãà¢ÆF—b6Æ74æÖSÒ'FV6‚×&W÷'B#à¢Ç7G&öæsäTäTÕ’DT4‚+rÄ5B44õUDTCÂ÷7G&öæsà¢Ç6ÖÆÃç·V’æVæV×”Fö7G&–æT¶æ÷và¢òV’æVæV×”Fö7G&–æRÓÓÒ&—""ò$•"5UU$”õ$•E’DUDT5DTB ¢¢V’æVæV×”Fö7G&–æRÓÓÒ&&Ö÷""ò$$Ôõ$TB4ôÔÔäBDUDT5DTB ¢¢$äò4ôÕÄUDTBDô5E$”äRDUDT5DTB ¢¢%Tä´äõtâ+r44õUBD„RTäTÕ’…'ÓÂ÷6ÖÆÃà¢ÂöF—cà¢Âóà¢’¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&‡"ò€¢V’æ‡6¶VBòÃà¢Æ'WGFöâF—6&ÆVC×´&ööÆVâ‡V’æ‡&VÆö6F–öâ—Òöä6Æ–6³×²‚’Óâ7F–öâ‚&Ö÷fRÖ‡"—ÓãÆ¶&CäÃÂö¶&CãÆ“î)êCÂö“ãÇ7ãäÔõdR5$tÄU#Ç6ÖÆÃã"5TTB+rU…E$TÔTÅ’4ÄõsÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Æ'WGFöâF—6&ÆVC×´&ööÆVâ‡V’æ‡&VÆö6F–öâ—Ò6Æ74æÖS×·V’æ‡&VÆö6F–öãòæÖöFRÓÓÒ&FWÆ÷’"ò'Æ6–ær"¢"'Òöä6Æ–6³×²‚’Óâ7F–öâ‚&FWÆ÷’Ö‡"—ÓãÆ¶&Cä£Âö¶&CãÆ“î(È#Âö“ãÇ7ãç·V’æ‡&VÆö6F–öãòæÖöFRÓÓÒ&FWÆ÷’"ò$DUÄõ””är…"¢$DUÄõ’…'ÓÇ6ÖÆÃç·V’æ‡&VÆö6F–öâòG´ÖF‚æ6V–Â‡V’æ‡&VÆö6F–öâæGW&F–öâÒV’æ‡&VÆö6F–öâæVÆ6VB—×2$TÔ”ä”äv¢#g2+r$UT•$U24ÄT"DU%$”â'ÓÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Âóâ¢Ãà¢·&öGV7F–öä'WGFöâ‚'v÷&¶W""—Ð¢·&öGV7F–öä'WGFöâ‚&6—†W""—Ð¢Æ'WGFöâF—6&ÆVC×´&ööÆVâ‡V’æ‡&VÆö6F–öâ—Òöä6Æ–6³×²‚’Óâ7F–öâ‚'&ÆÇ’"—ÓãÆ¶&CäsÂö¶&CãÆ“î(ÉcÂö“ãÇ7ãå4UBt•ô”åCÇ6ÖÆÃä…Tä•BDUÄõ”ÔTåCÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Æ'WGFöâF—6&ÆVC×´&ööÆVâ‡V’æ‡&VÆö6F–öâ—Òöä6Æ–6³×²‚’Óâ6WD6öÖÖæEF"‚'FV6‚"—ÓãÆ¶&CåÂö¶&CãÆ“î(ÊÃÂö“ãÇ7ãå$U4T$4ƒÇ6ÖÆÃå5TäB”åDTÂôâUu$DU3Â÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Æ'WGFöâF—6&ÆVC×´&ööÆVâ‡V’æ‡&VÆö6F–öâ—Ò6Æ74æÖS×·V’æ‡&VÆö6F–öãòæÖöFRÓÓÒ'6²"ò'Æ6–ær"¢"'Òöä6Æ–6³×²‚’Óâ7F–öâ‚'6²Ö‡"—ÓãÆ¶&Cä£Âö¶&CãÆ“î)j3Âö“ãÇ7ãç·V’æ‡&VÆö6F–öãòæÖöFRÓÓÒ'6²"ò%4´”är…"¢%4²…'ÓÇ6ÖÆÃç·V’æ‡&VÆö6F–öâòG´ÖF‚æ6V–Â‡V’æ‡&VÆö6F–öâæGW&F–öâÒV’æ‡&VÆö6F–öâæVÆ6VB—×2$TÔ”ä”äv¢#W2+r$T4ôÔU24ôÔÔäB5$tÄU"'ÓÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Âóà¢’¢V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ&&'&6·2"ò€¢V’ç&öGV7F–öä'V–ÆF–ærÓÓÒ&&'&6·2"òÃà¢·&öGV7F–öä'WGFöâ‚'G&ö÷W""—×·&öGV7F–öä'WGFöâ‚'Fæ²"—×·&öGV7F–öä'WGFöâ‚&G&öæR"—Ð¢Æ'WGFöâöä6Æ–6³×²‚’Óâ7F–öâ‚'&ÆÇ’"—ÓãÆ¶&CäsÂö¶&CãÆ“î(ÉcÂö“ãÇ7ãå4UBt•ô”åCÇ6ÖÆÃä4ôÔ$BTä•BDUÄõ”ÔTåCÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Æ'WGFöâ6Æ74æÖSÒ'6VÆÂ"öä6Æ–6³×²‚’Óâ7F–öâ‚'6VÆÂ"—ÓãÆ“î)ÉSÂö“ãÇ7ãå4TÄÂ$%$4µ3Ç6ÖÆÃãSR+r´ÖF‚æfÆö÷"„%T”ÄEô4õ5Bæ&'&6·2ò"—Ò5$TD•E3Â÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢Âóâ¢ÆF—b6Æ74æÖSÒ'&öGV7F–öâÖV×G’#ãÇ7G&öæsä$%$4µ2TäDU"4ôå5E%T5D”ôãÂ÷7G&öæsãÇ6ÖÆÃä6öÖ&BVæ—G2V"†W&Rv†Vâ6öç7G'V7F–öâ—26ö×ÆWFRãÂ÷6ÖÆÃãÂöF—cà¢’¢V’ç6VÆV7FVD'V–ÆF–ærò€¢Æ'WGFöâ6Æ74æÖSÒ'6VÆÂ"öä6Æ–6³×²‚’Óâ7F–öâ‚'6VÆÂ"—ÓãÆ“î)ÉSÂö“ãÇ7ãå4TÄÂ·V’ç6VÆV7FVD'V–ÆF–ærÓÓÒ'GW'&WB"ò%4TåE%’"¢V’ç6VÆV7FVD'V–ÆF–ærçFõWW$66R‚—ÓÇ6ÖÆÃãSR$TeTäCÂ÷6ÖÆÃãÂ÷7ããÂö'WGFöãà¢’¢€¢ÆF—b6Æ74æÖSÒ'&öGV7F–öâÖV×G’#à¢Ç7G&öæså4TÄT5B4ôÔÔäB4õU$4SÂ÷7G&öæsà¢Ç6ÖÆÃåv÷&¶W#¢6öç7G'V7F–öâæB&W—"+r…¢V6öæö×’Væ—G2æB&W6V&6‚+r6ö×ÆWFVB&'&6·3¢6öÖ&BVæ—G2ãÂ÷6ÖÆÃà¢ÂöF—cà¢—Ð¢ÂöF—cà¢Âóâ—Ð¢ÂöF—cà¢Â÷6V7F–öãà¢Æfö÷FW#à¢DõT4ƒ¢D4TÄT5B+rDõT$ÄRÕD4TÄT5BE•R+rÄôärÕ$U52u$õTäB²4Ä”DR(iTättRò(i2D•$T5B+rDTäTÕ’ED4²+rE$rç²"'Ð¢Ç7ãäDU4µDõ¢ÄTeBE$r4TÄT5B+r$”t…BÔ4Ä”4²4ôÔÔäB+r4„”eBDB+r5E$Â³(	3’u$õU2+rU42U4SÂ÷7ãà¢Âöfö÷FW#à¢ÂöÖ–ãà¢“°§Ð
