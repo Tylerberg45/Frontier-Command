@@ -39,6 +39,8 @@ type Unit = {
   carrying?: number;
   /** The resource currently in the worker's cargo hold. */
   carryingType?: ResourceKind;
+  /** Crystal-array index explicitly assigned by the player. */
+  resourceTarget?: number;
   xp?: number;
   level?: number;
   /** Active-match timestamp of the unit's most recent dealt or received damage. */
@@ -603,7 +605,7 @@ const unitDuty = (unit: Unit) => {
   }
   if (unit.workerMode === "repair") return "REPAIR DUTY";
   if (unit.workerMode === "hold") return "GUARD POST · MINING PAUSED";
-  return "MINER";
+  return Number.isInteger(unit.resourceTarget) ? "TARGETED MINING" : "MINER";
 };
 function normalizeUnits(units: Unit[]): Unit[] {
   return units.map((raw) => {
@@ -635,6 +637,7 @@ function normalizeUnits(units: Unit[]): Unit[] {
       supply: Math.max(0, Math.min(SUPPLY_CAPACITY, Number(raw.supply) || SUPPLY_CAPACITY)),
       autoRepair: Boolean(raw.autoRepair),
       repairTarget: Number.isInteger(raw.repairTarget) ? raw.repairTarget : undefined,
+      resourceTarget: Number.isInteger(raw.resourceTarget) ? raw.resourceTarget : undefined,
       workerMode:
         raw.type === "worker" && ["mine", "hold", "construct", "repair"].includes(raw.workerMode || "")
           ? raw.workerMode
@@ -723,6 +726,7 @@ function queueWorkerConstruction(worker: Unit, buildingId: number) {
   worker.buildQueue = queue;
   worker.buildTarget = queue[0];
   worker.workerMode = "construct";
+  worker.resourceTarget = undefined;
   worker.repairTarget = undefined;
   worker.enemy = undefined;
   worker.target = undefined;
@@ -737,6 +741,7 @@ function assignWorkerToPendingConstruction(worker: Unit, buildingId: number) {
   worker.buildQueue = [buildingId, ...queue.filter((id) => id !== buildingId)];
   worker.buildTarget = buildingId;
   worker.workerMode = "construct";
+  worker.resourceTarget = undefined;
   worker.repairTarget = undefined;
   worker.enemy = undefined;
   worker.target = undefined;
@@ -747,6 +752,25 @@ function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "h
   worker.buildQueue = [];
   worker.buildTarget = undefined;
   worker.workerMode = nextMode;
+  worker.resourceTarget = undefined;
+}
+
+function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number) {
+  const resource = g.crystals[resourceIndex];
+  if (!resource || resource.amount <= 0) return false;
+  workers.forEach((worker) => {
+    clearWorkerConstruction(worker, "mine");
+    worker.resourceTarget = resourceIndex;
+    worker.autoRepair = false;
+    worker.repairTarget = undefined;
+    worker.enemy = undefined;
+    worker.target = undefined;
+    worker.nav = undefined;
+    worker.patrol = undefined;
+    worker.retreating = false;
+    if (worker.stance === "patrol") worker.stance = "pursue";
+  });
+  return true;
 }
 
 function isIdleWorker(g: Game, unit: Unit) {
@@ -1913,6 +1937,20 @@ export default function Home() {
       return;
     }
     const remoteUnits = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id));
+    const remoteWorkersForResource = remoteUnits.filter((unit) => unit.type === "worker");
+    const resourceHit = g.crystals
+      .map((resource, index) => ({ resource, index }))
+      .filter(({ resource }) => resource.amount > 0 && isVisibleFor(g, "enemy", resource, 24))
+      .sort((a, b) => Math.hypot(a.resource.x - wx, a.resource.y - wy) - Math.hypot(b.resource.x - wx, b.resource.y - wy))[0];
+    if (
+      mode === "select" &&
+      remoteWorkersForResource.length &&
+      resourceHit &&
+      Math.hypot(resourceHit.resource.x - wx, resourceHit.resource.y - wy) < 48
+    ) {
+      assignWorkersToResource(g, remoteWorkersForResource, resourceHit.index);
+      return;
+    }
     if (mode === "repair") {
       const workers = remoteUnits.filter((unit) => unit.type === "worker");
       const repairable = [...g.buildings, ...g.units]
@@ -2401,6 +2439,28 @@ export default function Home() {
     const selectedWorkers = g.units.filter((unit) => unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
     const selectedCombat = g.units.filter((unit) => unit.team === "player" && unit.type !== "worker" && g.selected.includes(unit.id));
     const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
+    const resourceHit = g.crystals
+      .map((resource, index) => ({ resource, index }))
+      .filter(({ resource }) => resource.amount > 0 && isVisible(g, resource, 24))
+      .sort((a, b) => Math.hypot(a.resource.x - wx, a.resource.y - wy) - Math.hypot(b.resource.x - wx, b.resource.y - wy))[0];
+    if (
+      g.mode === "select" &&
+      selectedWorkers.length &&
+      resourceHit &&
+      Math.hypot(resourceHit.resource.x - wx, resourceHit.resource.y - wy) < 48
+    ) {
+      assignWorkersToResource(g, selectedWorkers, resourceHit.index);
+      const kind = resourceHit.resource.kind === "alloy" ? "alloy" : "credits";
+      const hasRefinery = g.buildings.some((building) =>
+        building.team === "player" && building.type === "refinery" && buildingOperational(building));
+      g.matchStats.meaningfulActions++;
+      g.matchStats.orders++;
+      g.message = hasRefinery
+        ? `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to this ${kind} deposit.`
+        : `${kind.toUpperCase()} deposit assigned · complete a Refinery to begin mining.`;
+      sync();
+      return;
+    }
     if (g.mode === "repair") {
       const repairable = [...g.buildings, ...g.units]
         .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
@@ -3912,14 +3972,27 @@ export default function Home() {
         );
         if (ref) {
           const cargoKind = u.carryingType || "credits";
-          const crystal = g.crystals
+          const assignedCrystal = Number.isInteger(u.resourceTarget)
+            ? g.crystals[u.resourceTarget!]
+            : undefined;
+          if (Number.isInteger(u.resourceTarget) && (!assignedCrystal || assignedCrystal.amount <= 0)) {
+            u.resourceTarget = undefined;
+          }
+          const activeAssignedCrystal = assignedCrystal && assignedCrystal.amount > 0
+            ? assignedCrystal
+            : undefined;
+          const crystal = activeAssignedCrystal || g.crystals
             .filter((x) => x.amount > 0 && (!(u.carrying || 0) || (x.kind || "credits") === cargoKind))
             .sort(
               (a, b) =>
                 (Math.hypot(a.x - u.x, a.y - u.y) + Math.hypot(a.x - ref.x, a.y - ref.y) * .35) -
                 (Math.hypot(b.x - u.x, b.y - u.y) + Math.hypot(b.x - ref.x, b.y - ref.y) * .35),
             )[0];
-          if ((u.carrying || 0) >= 100) {
+          const assignedKind = activeAssignedCrystal?.kind || "credits";
+          const unloadBeforeAssignedMining = Boolean(
+            activeAssignedCrystal && (u.carrying || 0) > 0 && cargoKind !== assignedKind,
+          );
+          if ((u.carrying || 0) >= 100 || unloadBeforeAssignedMining) {
             const d = Math.hypot(ref.x - u.x, ref.y - u.y);
             if (d < 55) {
               if (u.team === "player") {
@@ -4362,8 +4435,12 @@ export default function Home() {
     x.restore();
     const selectedResourceWorker = g.units.find((unit) =>
       unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
+    const assignedResourceIndex = selectedResourceWorker && Number.isInteger(selectedResourceWorker.resourceTarget) &&
+      g.crystals[selectedResourceWorker.resourceTarget!]?.amount > 0
+      ? selectedResourceWorker.resourceTarget!
+      : -1;
     const closestResourceIndex = selectedResourceWorker
-      ? g.crystals.reduce((best, node, index) => {
+      ? assignedResourceIndex >= 0 ? assignedResourceIndex : g.crystals.reduce((best, node, index) => {
           if (node.amount <= 0) return best;
           if (best < 0) return index;
           const currentDistance = Math.hypot(node.x - selectedResourceWorker.x, node.y - selectedResourceWorker.y);
@@ -5493,6 +5570,11 @@ export default function Home() {
       const selectedUnits = g.units.filter(
         (u) => u.team === "player" && g.selected.includes(u.id),
       );
+      const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
+      const resourceTap = g.crystals
+        .map((resource, index) => ({ resource, index }))
+        .filter(({ resource }) => resource.amount > 0 && isVisible(g, resource, 24))
+        .sort((a, b) => Math.hypot(a.resource.x - wp.x, a.resource.y - wp.y) - Math.hypot(b.resource.x - wp.x, b.resource.y - wp.y))[0];
       const friendlyUnitTap = g.units
         .filter((unit) => unit.team === "player" && !unit.garrisonedAt)
         .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))
@@ -5500,6 +5582,17 @@ export default function Home() {
       const relayTap = (g.objectives || [])
         .filter((objective) => objectiveIntel(g, objective).visible)
         .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))[0];
+      if (
+        g.mode === "select" &&
+        selectedWorkers.length &&
+        resourceTap &&
+        Math.hypot(resourceTap.resource.x - wp.x, resourceTap.resource.y - wp.y) < 48
+      ) {
+        command(resourceTap.resource.x, resourceTap.resource.y);
+        lastTap.current = null;
+        pointer.current = null;
+        return;
+      }
       if (g.mode === "select" && !friendlyUnitTap && relayTap && Math.hypot(relayTap.x - wp.x, relayTap.y - wp.y) < 72) {
         if (selectedUnits.length) {
           command(wp.x, wp.y);
