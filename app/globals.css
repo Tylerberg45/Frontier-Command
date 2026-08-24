@@ -700,7 +700,7 @@ canvas {
   display: grid;
   min-width: 0;
   overflow: hidden;
-  grid-template-columns: 1fr 1.1fr 1.15fr 2fr;
+  grid-template-columns: 1fr 1.15fr 3.15fr;
   gap: 1px;
   border-top: 1px solid var(--line);
   background: var(--line);
@@ -899,7 +899,9 @@ canvas {
 .command-art.building-barracks,
 .command-tab-art.building-barracks,
 .command-art.building-turret,
-.command-tab-art.building-turret {
+.command-tab-art.building-turret,
+.command-art.building-exchange,
+.command-tab-art.building-exchange {
   background-image: url("/game-art/frontier-buildings-atlas-v1.png");
   background-size: 200% 200%;
 }
@@ -911,6 +913,11 @@ canvas {
 .command-tab-art.building-barracks { background-position: 0 100%; }
 .command-art.building-turret,
 .command-tab-art.building-turret { background-position: 100% 100%; }
+.command-art.building-exchange,
+.command-tab-art.building-exchange {
+  background-position: 100% 0;
+  filter: hue-rotate(58deg) saturate(1.35);
+}
 .command-art-badge {
   position: absolute;
   right: -3px;
@@ -1561,7 +1568,7 @@ header {
 }
 .formation-orders {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 6px;
 }
 .formation-orders button {
@@ -2003,17 +2010,16 @@ header {
     box-shadow: inset 0 -3px var(--gold);
   }
   .actions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-content: start;
+    display: flex;
+    align-items: stretch;
     gap: 6px;
-    overflow-x: hidden;
-    overflow-y: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding: 7px !important;
   }
   .actions button {
-    width: auto;
-    min-width: 0;
+    width: 112px;
+    min-width: 112px;
     height: 74px;
     padding: 7px 5px 8px;
     gap: 3px;
