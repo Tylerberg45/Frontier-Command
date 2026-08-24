@@ -2064,14 +2064,11 @@ header {
   }
 }
 
-/* iPhone portrait command deck
-   The selection portrait used to remain 48px wide inside a 36px grid column,
-   which let it overlap the readout beside it. Two action rows also need more
-   room than the previous 246px deck allowed. Keep the whole two-row deck
-   visible on tall phones and retain real vertical scrolling on shorter ones. */
+/* iPhone portrait command deck: compact two-column cards keep the complete
+   Worker/Barracks menus visible without turning the controls into tall slabs. */
 @media (orientation: portrait) and (max-width: 720px) {
   .game-shell {
-    grid-template-rows: 78px minmax(250px, 1fr) 276px 0;
+    grid-template-rows: 78px minmax(250px, 1fr) 232px 0;
   }
 
   .command {
@@ -2096,12 +2093,16 @@ header {
     overflow: hidden;
   }
 
+  .command-center {
+    grid-template-rows: 42px minmax(0, 1fr);
+  }
+
   .selection-command-header {
     min-height: 0;
-    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-columns: 34px minmax(0, 1fr);
     grid-template-rows: auto auto;
     align-content: center;
-    padding: 5px 8px;
+    padding: 3px 8px;
     overflow: hidden;
   }
 
@@ -2115,25 +2116,61 @@ header {
   }
 
   .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: 61px;
+    align-content: start;
     min-height: 0;
-    grid-auto-rows: minmax(74px, auto);
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior-y: contain;
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
-    padding: 7px 7px 12px !important;
+    gap: 6px;
+    padding: 7px 7px 9px !important;
   }
 
   .actions button {
-    height: auto;
-    min-height: 74px;
-    overflow: visible;
+    width: auto;
+    min-width: 0;
+    height: 61px;
+    min-height: 61px;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 7px;
+    padding: 6px 8px;
+    text-align: left;
+    overflow: hidden;
   }
 
   .actions button > span:last-child {
-    max-height: none;
-    overflow: visible;
+    align-items: flex-start;
+    max-height: 100%;
+    overflow: hidden;
+  }
+
+  .actions button .command-art {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+  }
+
+  .actions button i {
+    width: 28px;
+    flex: 0 0 28px;
+    font-size: 18px;
+    text-align: center;
+  }
+
+  .actions button span {
+    font-size: 8px;
+    line-height: 1.08;
+  }
+
+  .actions button small {
+    margin-top: 3px;
+    font-size: 6.5px;
+    line-height: 1.15;
   }
 
   .actions button span,
@@ -2168,6 +2205,6 @@ header {
 
 @media (orientation: portrait) and (max-width: 380px) {
   .game-shell {
-    grid-template-rows: 76px minmax(220px, 1fr) 270px 0;
+    grid-template-rows: 76px minmax(220px, 1fr) 228px 0;
   }
 }
