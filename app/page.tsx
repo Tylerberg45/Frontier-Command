@@ -5098,6 +5098,42 @@ export default function Home() {
           }
           x.restore();
         }
+        if (u.type === "tank" && u.moving) {
+          // Keep the painted hull completely rigid. Movement is communicated
+          // behind the tank with paired tread impressions and a restrained
+          // dust wake instead of drawing animated bars across the sprite.
+          const heading = Number.isFinite(u.facing) ? u.facing! : u.team === "player" ? 0 : Math.PI;
+          const forwardX = Math.cos(heading);
+          const forwardY = Math.sin(heading);
+          const sideX = -forwardY;
+          const sideY = forwardX;
+          const treadPulse = (g.time * 22 + u.id * 1.7) % 9;
+          x.save();
+          x.lineCap = "round";
+          x.lineWidth = 3;
+          for (let mark = 0; mark < 3; mark += 1) {
+            const rear = 25 + mark * 9 + treadPulse;
+            const fade = .34 - mark * .075;
+            x.strokeStyle = `rgba(7, 12, 12, ${fade})`;
+            for (const side of [-1, 1]) {
+              const centerX = -forwardX * rear + sideX * 13.5 * side;
+              const centerY = -forwardY * rear + sideY * 13.5 * side;
+              x.beginPath();
+              x.moveTo(centerX - forwardX * 2.8, centerY - forwardY * 2.8);
+              x.lineTo(centerX + forwardX * 2.8, centerY + forwardY * 2.8);
+              x.stroke();
+            }
+          }
+          x.fillStyle = "rgba(130, 116, 92, .12)";
+          for (const side of [-1, 1]) {
+            const dustX = -forwardX * 30 + sideX * 13 * side;
+            const dustY = -forwardY * 30 + sideY * 13 * side;
+            x.beginPath();
+            x.arc(dustX, dustY, 4 + Math.sin(g.time * 8 + u.id + side) * .7, 0, Math.PI * 2);
+            x.fill();
+          }
+          x.restore();
+        }
         x.drawImage(
           unitAtlas,
           source.x,
@@ -5109,27 +5145,6 @@ export default function Home() {
           size.w,
           size.h,
         );
-        if (u.type === "tank" && u.moving && !firing) {
-          const heading = Number.isFinite(u.facing) ? u.facing! : u.team === "player" ? 0 : Math.PI;
-          const treadPhase = (g.time * 34 + u.id * 2.7) % 10;
-          x.save();
-          x.rotate(heading);
-          x.lineCap = "round";
-          x.strokeStyle = "rgba(4, 9, 10, .78)";
-          x.lineWidth = 5;
-          for (const trackY of [-17, 17]) {
-            x.beginPath(); x.moveTo(-31, trackY); x.lineTo(31, trackY); x.stroke();
-          }
-          x.strokeStyle = "rgba(165, 181, 172, .72)";
-          x.lineWidth = 2.2;
-          x.setLineDash([4, 6]);
-          x.lineDashOffset = -treadPhase;
-          for (const trackY of [-17, 17]) {
-            x.beginPath(); x.moveTo(-31, trackY); x.lineTo(31, trackY); x.stroke();
-          }
-          x.setLineDash([]);
-          x.restore();
-        }
         x.fillStyle = accent;
         x.shadowColor = accent;
         x.shadowBlur = 3;
