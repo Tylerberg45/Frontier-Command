@@ -14,7 +14,7 @@ type Doctrine = "air" | "armor";
 type Unit = {
   id: number;
   team: "player" | "enemy";
-  type: "worker" | "trooper" | "tank" | "drone";
+  type: "worker" | "trooper" | "tank" | "drone" | "cipher";
   x: number;
   y: number;
   hp: number;
@@ -79,6 +79,10 @@ type Unit = {
   stance?: "pursue" | "hold" | "patrol";
   patrol?: { a: P; b: P; next: "a" | "b" };
   repairing?: boolean;
+  /** Cipher economy state. Only a fully deployed, undisturbed Cipher earns credits. */
+  cipherMode?: "mobile" | "deploying" | "deployed" | "packing";
+  /** Seconds completed in the current Cipher deployment or packing transition. */
+  cipherProgress?: number;
 };
 type Production = {
   type: Unit["type"];
@@ -191,6 +195,10 @@ type Game = {
   doctrineProduction?: { type: Doctrine; elapsed: number; duration: number };
   enemyDoctrine?: Doctrine;
   enemyDoctrineProduction?: { type: Doctrine; elapsed: number; duration: number };
+  tradeNetwork?: boolean;
+  tradeNetworkProduction?: { elapsed: number; duration: number };
+  enemyTradeNetwork?: boolean;
+  enemyTradeNetworkProduction?: { elapsed: number; duration: number };
   enemyDoctrineKnown?: boolean;
   scoutedEnemyDoctrine?: Doctrine | "none";
   mapVersion?: number;
@@ -312,7 +320,7 @@ function saveResult(result: "won" | "lost", g: Game) {
   p[result === "won" ? "wins" : "losses"]++;
   p.recent = [...p.recent, result].slice(-5);
   const s = g.matchStats;
-  const army = g.units.filter((u) => u.team === "player" && u.type !== "worker").length;
+  const army = g.units.filter((u) => u.team === "player" && isCombatUnit(u)).length;
   const efficiency = Math.min(25, s.combatUnitsBuilt * 1.5 + s.enemyUnitsDestroyed * 2 - s.unitsLost * 1.25);
   const economy = Math.min(20, s.unitsBuilt * 1.2 + Math.min(8, s.totalCreditsSpent / 600));
   const discipline = Math.max(-20, Math.min(20, 12 - s.baseDamage / 35 - s.unitsLost * 0.8));
@@ -428,6 +436,7 @@ const stats = {
   trooper: { r: 12, speed: 66, damage: 7, range: 105, rate: 0.55 },
   tank: { r: 19, speed: 38, damage: 20, range: 145, rate: 1.15 },
   drone: { r: 17, speed: 82, damage: 13, range: 130, rate: 0.78 },
+  cipher: { r: 14, speed: 46, damage: 0, range: 0, rate: 1 },
 };
 const buildingStats = {
   hq: { r: 54 },
@@ -439,9 +448,9 @@ const buildingHealth = { hq: 900, refinery: 440, barracks: 520, turret: 360 };
 const turretStats = { damage: 12, range: 210, rate: 0.68 };
 const buildingBuildTime = { refinery: 6, barracks: 6, turret: 15 };
 const FORTIFY_DURATION = 40;
-const unitHealth = { worker: 70, trooper: 95, tank: 240, drone: 135 };
-const unitCost = { worker: 150, trooper: 125, tank: 400, drone: 300 };
-const unitBuildTime = { worker: 8, trooper: 6, tank: 15, drone: 12 };
+const unitHealth = { worker: 70, trooper: 95, tank: 240, drone: 135, cipher: 60 };
+const unitCost = { worker: 150, trooper: 125, tank: 400, drone: 300, cipher: 300 };
+const unitBuildTime = { worker: 8, trooper: 6, tank: 15, drone: 12, cipher: 20 };
 const MAX_QUEUE = 6;
 const BUILD_COST = { refinery: 260, barracks: 360, turret: 240 } as const;
 const FORTIFY_INTEL_COST = 180;
@@ -458,6 +467,13 @@ const SUPPLY_CAPACITY = 12;
 const SUPPLY_RADIUS = 470;
 const DOCTRINE_INTEL_COST = 140;
 const DOCTRINE_DURATION = 30;
+const TRADE_NETWORK_INTEL_COST = 160;
+const TRADE_NETWORK_DURATION = 45;
+const CIPHER_DEPLOY_DURATION = 8;
+const CIPHER_PACK_DURATION = 4;
+const CIPHER_INCOME_RATE = 1;
+const CIPHER_COMBAT_LOCKOUT = 5;
+const CIPHER_MAX = 4;
 const PRODUCTION_COOLDOWN = 3;
 const UPKEEP_SOFT_CAP = 10;
 const REPAIR_RATE = 24;
@@ -474,13 +490,28 @@ function unitCombatRange(unit: Unit) {
   const stanceMultiplier = unit.type === "trooper" && !unit.garrisonedAt && unit.stance === "hold" ? SENTRY_RANGE_MULTIPLIER : 1;
   return stats[unit.type].range * stanceMultiplier * (unit.garrisonedAt ? RELAY_RANGE_MULTIPLIER : 1);
 }
+function isCombatType(type: Unit["type"]): type is "trooper" | "tank" | "drone" {
+  return type === "trooper" || type === "tank" || type === "drone";
+}
+function isCombatUnit(unit: Unit) {
+  return isCombatType(unit.type);
+}
 function upkeepPerSecond(count: number) {
   return count <= UPKEEP_SOFT_CAP ? 0 : Math.pow(count - UPKEEP_SOFT_CAP, 1.25) * .08;
 }
 function productionDurationFor(g: Game, team: Unit["team"], type: Unit["type"]) {
-  if (type === "worker") return unitBuildTime.worker;
+  if (type === "worker" || type === "cipher") return unitBuildTime[type];
   const barracks = g.buildings.filter((building) => building.team === team && building.type === "barracks" && buildingOperational(building)).length;
   return unitBuildTime[type] * (1 + Math.max(0, barracks - 1) * .18);
+}
+function cipherCountForTeam(g: Game, team: Unit["team"]) {
+  const active = g.units.filter((unit) => unit.team === team && unit.type === "cipher").length;
+  const queued = g.buildings
+    .filter((building) => building.team === team)
+    .reduce((count, building) => count +
+      (building.production?.type === "cipher" ? 1 : 0) +
+      (building.production?.queue || []).filter((type) => type === "cipher").length, 0);
+  return active + queued;
 }
 function supplyMultiplier(unit: Unit) {
   return (unit.supply ?? SUPPLY_CAPACITY) <= 0 ? 0.75 : 1;
@@ -506,7 +537,7 @@ function structureMultiplier(attacker: Unit, target: Unit | Building) {
 }
 function formationDestinations(units: Unit[], destination: P) {
   const result = new Map<number, P>();
-  if (units.length < 2 || units.some((unit) => unit.type === "worker")) {
+  if (units.length < 2 || !units.every(isCombatUnit)) {
     units.forEach((unit, index) => result.set(unit.id, {
       x: destination.x + (index % 3) * 26,
       y: destination.y + Math.floor(index / 3) * 26,
@@ -623,20 +654,26 @@ function plateauBypassPoint(start: P, destination: P, plateau: TacticalPlateau) 
     )[0];
 }
 function objectRadius(object: Unit | Building) {
-  return object.type === "worker" || object.type === "trooper" || object.type === "tank" || object.type === "drone"
+  return object.type === "worker" || object.type === "trooper" || object.type === "tank" || object.type === "drone" || object.type === "cipher"
     ? stats[object.type].r
     : buildingStats[object.type].r;
 }
 function isUnit(object: Unit | Building): object is Unit {
-  return ["worker", "trooper", "tank", "drone"].includes(object.type as Unit["type"]);
+  return ["worker", "trooper", "tank", "drone", "cipher"].includes(object.type as Unit["type"]);
 }
 const unitName = (type: Unit["type"]) =>
   type === "tank" ? "TANK" : type === "drone" ? "STRIKE DRONE" : type.toUpperCase();
 const unitRole = (type: Unit["type"]) =>
-  type === "worker" ? "MINER" : type === "trooper" ? "ANTI-AIR INFANTRY" : type === "tank" ? "ANTI-INFANTRY ARMOR" : "ANTI-ARMOR AIR";
+  type === "worker" ? "MINER" : type === "trooper" ? "ANTI-AIR INFANTRY" : type === "tank" ? "ANTI-INFANTRY ARMOR" : type === "drone" ? "ANTI-ARMOR AIR" : "ECONOMIC SPECIALIST";
 const unitDuty = (unit: Unit) => {
   if (unit.garrisonedAt) return `INTEL RELAY GARRISON · +${Math.round((RELAY_RANGE_MULTIPLIER - 1) * 100)}% RANGE`;
-  if (unit.type !== "worker") return `${unitRole(unit.type)}${unit.type === "trooper" && unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
+  if (unit.type === "cipher") {
+    if (unit.cipherMode === "deployed") return "TRADE NETWORK · +60 CREDITS/MIN";
+    if (unit.cipherMode === "deploying") return `DEPLOYING · ${Math.round(((unit.cipherProgress || 0) / CIPHER_DEPLOY_DURATION) * 100)}%`;
+    if (unit.cipherMode === "packing") return `PACKING · ${Math.round(((unit.cipherProgress || 0) / CIPHER_PACK_DURATION) * 100)}%`;
+    return "ECONOMIC SPECIALIST · MOBILE";
+  }
+  if (isCombatUnit(unit)) return `${unitRole(unit.type)}${unit.type === "trooper" && unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
   if (unit.autoRepair) return `MAINTENANCE${unit.stance === "patrol" ? " PATROL" : ""}${unit.repairing ? " · REPAIRING" : ""}`;
   if (unit.workerMode === "construct") {
     const queued = unit.buildQueue?.length || (unit.buildTarget ? 1 : 0);
@@ -687,6 +724,14 @@ function normalizeUnits(units: Unit[]): Unit[] {
         ? raw.buildQueue.filter((id) => Number.isInteger(id))
         : Number.isInteger(raw.buildTarget) ? [raw.buildTarget!] : [],
       stance: raw.stance === "patrol" || (type === "trooper" && raw.stance === "hold") ? raw.stance : "pursue",
+      cipherMode:
+        type === "cipher" && ["mobile", "deploying", "deployed", "packing"].includes(raw.cipherMode || "")
+          ? raw.cipherMode
+          : type === "cipher" ? "mobile" : undefined,
+      cipherProgress:
+        type === "cipher" && (raw.cipherMode === "deploying" || raw.cipherMode === "packing")
+          ? Math.max(0, Number(raw.cipherProgress) || 0)
+          : undefined,
       patrol:
         raw.patrol && raw.patrol.a && raw.patrol.b
           ? {
@@ -1302,6 +1347,10 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
     doctrineProduction: undefined,
     enemyDoctrine: undefined,
     enemyDoctrineProduction: undefined,
+    tradeNetwork: false,
+    tradeNetworkProduction: undefined,
+    enemyTradeNetwork: false,
+    enemyTradeNetworkProduction: undefined,
     enemyDoctrineKnown: false,
     scoutedEnemyDoctrine: undefined,
     mapVersion: 2,
@@ -1442,6 +1491,8 @@ function guestPerspective(authoritative: Game, local: Game | null, firstSnapshot
   [view.fortifyProduction, view.enemyFortifyProduction] = [view.enemyFortifyProduction, view.fortifyProduction];
   [view.doctrine, view.enemyDoctrine] = [view.enemyDoctrine, view.doctrine];
   [view.doctrineProduction, view.enemyDoctrineProduction] = [view.enemyDoctrineProduction, view.doctrineProduction];
+  [view.tradeNetwork, view.enemyTradeNetwork] = [view.enemyTradeNetwork, view.tradeNetwork];
+  [view.tradeNetworkProduction, view.enemyTradeNetworkProduction] = [view.enemyTradeNetworkProduction, view.tradeNetworkProduction];
   view.over = authoritative.over === "won" ? "lost" : authoritative.over === "lost" ? "won" : "";
   view.camera = firstSnapshot ? { x: W - 440, y: ENEMY_BASE.y } : local?.camera || { x: W - 440, y: ENEMY_BASE.y };
   view.zoom = local?.zoom || 1;
@@ -1465,7 +1516,7 @@ function repairBuilding(b: Building): Building {
       ? b.max
       : buildingHealth[b.type];
   const production =
-    b.production && ["worker", "trooper", "tank", "drone"].includes(b.production.type)
+    b.production && ["worker", "trooper", "tank", "drone", "cipher"].includes(b.production.type)
       ? {
           ...b.production,
           elapsed: Math.max(0, Number(b.production.elapsed) || 0),
@@ -1475,7 +1526,7 @@ function repairBuilding(b: Building): Building {
           ),
           queue: Array.isArray(b.production.queue)
             ? b.production.queue.filter((type) =>
-                ["worker", "trooper", "tank", "drone"].includes(type),
+                ["worker", "trooper", "tank", "drone", "cipher"].includes(type),
               )
             : [],
         }
@@ -1583,6 +1634,22 @@ function hydrateGame(parsed: Game, message: string): Game {
       (parsed.enemyDoctrineProduction?.type === "air" || parsed.enemyDoctrineProduction?.type === "armor") && !parsed.enemyDoctrine
         ? { type: parsed.enemyDoctrineProduction.type, elapsed: Math.max(0, Number(parsed.enemyDoctrineProduction.elapsed) || 0), duration: Math.max(1, Number(parsed.enemyDoctrineProduction.duration) || DOCTRINE_DURATION) }
         : undefined,
+    tradeNetwork: Boolean(parsed.tradeNetwork),
+    tradeNetworkProduction:
+      parsed.tradeNetworkProduction && !parsed.tradeNetwork
+        ? {
+            elapsed: Math.max(0, Number(parsed.tradeNetworkProduction.elapsed) || 0),
+            duration: Math.max(1, Number(parsed.tradeNetworkProduction.duration) || TRADE_NETWORK_DURATION),
+          }
+        : undefined,
+    enemyTradeNetwork: Boolean(parsed.enemyTradeNetwork),
+    enemyTradeNetworkProduction:
+      parsed.enemyTradeNetworkProduction && !parsed.enemyTradeNetwork
+        ? {
+            elapsed: Math.max(0, Number(parsed.enemyTradeNetworkProduction.elapsed) || 0),
+            duration: Math.max(1, Number(parsed.enemyTradeNetworkProduction.duration) || TRADE_NETWORK_DURATION),
+          }
+        : undefined,
     enemyDoctrineKnown: Boolean(parsed.enemyDoctrineKnown),
     scoutedEnemyDoctrine:
       parsed.scoutedEnemyDoctrine === "air" || parsed.scoutedEnemyDoctrine === "armor" || parsed.scoutedEnemyDoctrine === "none"
@@ -1676,6 +1743,8 @@ export default function Home() {
       tankDirections?: HTMLImageElement;
       droneDirections?: HTMLImageElement;
       droneMove?: HTMLImageElement;
+      cipherDirections?: HTMLImageElement;
+      cipherDeployed?: HTMLImageElement;
       trooperFire?: HTMLImageElement;
       tankFire?: HTMLImageElement;
       workerMine?: HTMLImageElement;
@@ -1751,6 +1820,9 @@ export default function Home() {
     productionCooldown: 0,
     doctrine: null as Doctrine | null,
     doctrineProduction: null as { type: Doctrine; elapsed: number; duration: number } | null,
+    tradeNetwork: false,
+    tradeNetworkProduction: null as { elapsed: number; duration: number } | null,
+    cipherCount: 0,
     enemyDoctrine: null as Doctrine | null,
     enemyDoctrineKnown: false,
     canClear: false,
@@ -1759,6 +1831,7 @@ export default function Home() {
     selectedUnits: 0,
     selectedWorkers: 0,
     selectedUnitType: null as Unit["type"] | "mixed" | null,
+    selectedCipherMode: null as Unit["cipherMode"] | "mixed" | null,
     selectedStance: null as Unit["stance"] | "mixed" | null,
     autoRepair: false,
     repairingWorkers: 0,
@@ -1807,7 +1880,7 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const load = (
-      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "trooperFire" | "tankFire" | "workerMine" | "turretDirections" | "turretFire" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
+      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "cipherDirections" | "cipherDeployed" | "trooperFire" | "tankFire" | "workerMine" | "turretDirections" | "turretFire" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
       src: string,
     ) => {
       const image = new Image();
@@ -1870,6 +1943,8 @@ export default function Home() {
     load("tankDirections", "/game-art/frontier-tank-directions-v2.png");
     load("droneDirections", "/game-art/frontier-strike-drone-directions-v1.png");
     load("droneMove", "/game-art/frontier-strike-drone-move-b-v2.png");
+    load("cipherDirections", "/game-art/frontier-cipher-directions-v1.png");
+    load("cipherDeployed", "/game-art/frontier-cipher-deployed-v1.png");
     load("trooperFire", "/game-art/frontier-trooper-fire-v1.png");
     load("tankFire", "/game-art/frontier-tank-fire-v1.png");
     load("workerMine", "/game-art/frontier-worker-mine-v1.png");
@@ -1921,8 +1996,9 @@ export default function Home() {
     }
     const chosenUnits = chosen.filter(isUnit);
     const chosenTypes = [...new Set(chosenUnits.map((unit) => unit.type))];
+    const chosenCipherModes = [...new Set(chosenUnits.filter((unit) => unit.type === "cipher").map((unit) => unit.cipherMode || "mobile"))];
     const chosenStances = [...new Set(chosenUnits
-      .filter((unit) => unit.type !== "worker" || unit.autoRepair)
+      .filter((unit) => isCombatUnit(unit) || (unit.type === "worker" && unit.autoRepair))
       .map((unit) => unit.stance || "pursue"))];
     const one = chosen[0],
       rank =
@@ -1940,15 +2016,17 @@ export default function Home() {
       alloy: Math.floor(g.alloy),
       intel: Math.floor(g.intel),
       objectives: (g.objectives || []).filter((objective) => objective.owner === "player").length,
-      army: g.units.filter((unit) => unit.team === "player" && unit.type !== "worker").length,
-      upkeep: upkeepPerSecond(g.units.filter((unit) => unit.team === "player" && unit.type !== "worker").length) * 60,
+      army: g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length,
+      upkeep: upkeepPerSecond(g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length) * 60,
       power: g.power,
       wave: g.wave,
       nextWave: Math.max(0, Math.ceil(g.aiAttackAt - g.time)),
       selected: chosen.length
         ? chosen.length === 1
           ? isUnit(one)
-            ? `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${Math.round(stats[one.type].damage * (1 + ((one.level || 1) - 1) * 0.18))} DMG · ${unitDuty(one)} · ${(one.supply ?? SUPPLY_CAPACITY) > 0 ? `SUPPLY ${Math.ceil(one.supply ?? SUPPLY_CAPACITY)}s` : "OUT OF SUPPLY −25%"}${(one.level || 1) > 1 ? ` · REGEN ${(veteranRegenRate(one) * 100).toFixed(0)}% HP/s` : ""}${one.retreating ? " · RETREATING" : ""}${rank}`
+            ? one.type === "cipher"
+              ? `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${unitDuty(one)}`
+              : `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${Math.round(stats[one.type].damage * (1 + ((one.level || 1) - 1) * 0.18))} DMG · ${unitDuty(one)} · ${(one.supply ?? SUPPLY_CAPACITY) > 0 ? `SUPPLY ${Math.ceil(one.supply ?? SUPPLY_CAPACITY)}s` : "OUT OF SUPPLY −25%"}${(one.level || 1) > 1 ? ` · REGEN ${(veteranRegenRate(one) * 100).toFixed(0)}% HP/s` : ""}${one.retreating ? " · RETREATING" : ""}${rank}`
             : (one.progress ?? 1) < 1
               ? `${one.type.toUpperCase()} WIREFRAME · ${one.constructionStarted ? `${Math.round((one.progress || 0) * 100)}% BUILT` : "WAITING FOR WORKER"}`
               : `${one.type === "turret" ? "SENTRY TURRET · 210 RANGE · 12 DMG" : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : one.type.toUpperCase()} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` · ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " · MOBILE · SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " · FORTIFIED" : ""}`
@@ -1987,20 +2065,24 @@ export default function Home() {
       fortifyProduction: g.fortifyProduction || null,
       doctrine: g.doctrine || null,
       doctrineProduction: g.doctrineProduction || null,
+      tradeNetwork: Boolean(g.tradeNetwork),
+      tradeNetworkProduction: g.tradeNetworkProduction || null,
+      cipherCount: cipherCountForTeam(g, "player"),
       enemyDoctrine: g.scoutedEnemyDoctrine === "air" || g.scoutedEnemyDoctrine === "armor" ? g.scoutedEnemyDoctrine : null,
       enemyDoctrineKnown: Boolean(g.enemyDoctrineKnown),
       canClear: chosen.length > 0 || g.mode !== "select",
       cancelMode: g.mode !== "select",
-      selectedCombat: chosen.filter((object) => isUnit(object) && object.type !== "worker").length,
+      selectedCombat: chosen.filter((object) => isUnit(object) && isCombatUnit(object)).length,
       selectedUnits: chosenUnits.length,
       selectedWorkers: chosenUnits.filter((unit) => unit.type === "worker").length,
       selectedUnitType: chosenTypes.length === 1 ? chosenTypes[0] : chosenTypes.length ? "mixed" : null,
+      selectedCipherMode: chosenCipherModes.length === 1 ? chosenCipherModes[0] : chosenCipherModes.length ? "mixed" : null,
       selectedStance: chosenStances.length === 1 ? chosenStances[0] : chosenStances.length ? "mixed" : null,
       autoRepair: chosenUnits.some((unit) => unit.type === "worker") && chosenUnits.filter((unit) => unit.type === "worker").every((unit) => unit.autoRepair),
       repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && (unit.repairTarget || unit.repairRelayTarget)).length,
       idleWorkers: g.units.filter((unit) => isIdleWorker(g, unit)).length,
       selectedUnitCards: chosenUnits
-        .filter((unit) => unit.team === "player" && unit.type !== "worker")
+        .filter((unit) => unit.team === "player" && isCombatUnit(unit))
         .map((unit) => ({ id: unit.id, type: unit.type, hp: unit.hp, max: unit.max, level: unit.level || 1 })),
     });
   };
@@ -2076,7 +2158,7 @@ export default function Home() {
       return;
     }
     if (mode === "set-patrol-a" || mode === "set-patrol-b") {
-      const patrollers = remoteUnits.filter((unit) => unit.type !== "worker" || unit.autoRepair);
+      const patrollers = remoteUnits.filter((unit) => isCombatUnit(unit) || (unit.type === "worker" && unit.autoRepair));
       if (mode === "set-patrol-a") {
         patrollers.forEach((unit) => { unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" }; });
       } else {
@@ -2117,7 +2199,7 @@ export default function Home() {
       });
       return;
     }
-    const units = remoteUnits;
+    const units = remoteUnits.filter((unit) => unit.type !== "cipher" || (unit.cipherMode || "mobile") === "mobile");
     if (!units.length) return;
     const relay = (g.objectives || [])
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
@@ -2135,7 +2217,7 @@ export default function Home() {
       if (!intelRelayOperational(relay)) return;
       const hostileOccupants = relayOccupants(g, relay, "player");
       if (hostileOccupants.length) {
-        units.filter((unit) => unit.type !== "worker").forEach((unit, index) => {
+        units.filter(isCombatUnit).forEach((unit, index) => {
           if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
           unit.retreating = false;
           unit.enemy = hostileOccupants[index % hostileOccupants.length].id;
@@ -2188,13 +2270,13 @@ export default function Home() {
     const forcedTravel = mode === "move" || mode === "move-engage";
     const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
     const formation = formationDestinations(units, { x: wx, y: wy });
-    const formationSpeed = units.length > 1 && units.every((unit) => unit.type !== "worker")
+    const formationSpeed = units.length > 1 && units.every(isCombatUnit)
       ? Math.min(...units.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
       : undefined;
     for (const [index, unit] of units.entries()) {
       if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
       unit.garrisonTarget = undefined;
-      if (attacking) {
+      if (attacking && isCombatUnit(unit)) {
         unit.enemy = victim!.id;
         unit.target = undefined;
         unit.moveEngage = false;
@@ -2202,7 +2284,7 @@ export default function Home() {
       } else {
         unit.enemy = undefined;
         unit.target = formation.get(unit.id) || { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
-        unit.moveEngage = unit.type !== "worker" && mode === "move-engage";
+        unit.moveEngage = isCombatUnit(unit) && mode === "move-engage";
         unit.formationSpeed = formationSpeed;
         if (unit.moveEngage) unit.stance = "pursue";
       }
@@ -2250,21 +2332,27 @@ export default function Home() {
       return;
     }
     if (name === "fortify") {
-      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyFortified || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyIntel < FORTIFY_INTEL_COST || building.production) return;
+      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyFortified || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction || g.enemyIntel < FORTIFY_INTEL_COST || building.production) return;
       g.enemyIntel -= FORTIFY_INTEL_COST;
       g.enemyFortifyProduction = { elapsed: 0, duration: FORTIFY_DURATION };
       return;
     }
     if (name === "doctrine-air" || name === "doctrine-armor") {
       const doctrine: Doctrine = name === "doctrine-air" ? "air" : "armor";
-      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyDoctrine || g.enemyDoctrineProduction || g.enemyFortifyProduction || g.enemyIntel < DOCTRINE_INTEL_COST || building.production) return;
+      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyDoctrine || g.enemyDoctrineProduction || g.enemyFortifyProduction || g.enemyTradeNetworkProduction || g.enemyIntel < DOCTRINE_INTEL_COST || building.production) return;
       g.enemyIntel -= DOCTRINE_INTEL_COST;
       g.enemyDoctrineProduction = { type: doctrine, elapsed: 0, duration: DOCTRINE_DURATION };
       return;
     }
+    if (name === "trade-network") {
+      if (!building || building.type !== "hq" || !buildingOperational(building) || g.enemyTradeNetwork || g.enemyTradeNetworkProduction || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyIntel < TRADE_NETWORK_INTEL_COST || building.production) return;
+      g.enemyIntel -= TRADE_NETWORK_INTEL_COST;
+      g.enemyTradeNetworkProduction = { elapsed: 0, duration: TRADE_NETWORK_DURATION };
+      return;
+    }
     if (name === "retreat") {
       const hq = g.buildings.find((building) => building.team === "enemy" && building.type === "hq" && buildingOperational(building));
-      const units = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id) && unit.type !== "worker");
+      const units = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id) && isCombatUnit(unit));
       if (!hq || !units.length) return;
       units.forEach((unit, index) => {
         unit.enemy = undefined;
@@ -2278,7 +2366,7 @@ export default function Home() {
     if (name === "pack-hq" || name === "deploy-hq") {
       const hq = g.buildings.find((candidate) =>
         candidate.team === "enemy" && candidate.type === "hq" && selectedIds.includes(candidate.id));
-      if (!hq || hq.production || g.enemyFortifyProduction || g.enemyDoctrineProduction || hq.relocation) return;
+      if (!hq || hq.production || g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction || hq.relocation) return;
       if (name === "pack-hq" && !hq.packed) hq.relocation = { mode: "pack", elapsed: 0, duration: 5 };
       if (name === "deploy-hq" && hq.packed) {
         if (hqBlockedAt(g, hq, hq.x, hq.y, true)) return;
@@ -2288,6 +2376,24 @@ export default function Home() {
       return;
     }
     const selectedUnits = g.units.filter((unit) => unit.team === "enemy" && selectedIds.includes(unit.id));
+    if (name === "deploy-cipher" || name === "pack-cipher") {
+      selectedUnits.filter((unit) => unit.type === "cipher").forEach((unit) => {
+        const mode = unit.cipherMode || "mobile";
+        if (name === "deploy-cipher" && mode === "mobile") {
+          unit.cipherMode = "deploying";
+          unit.cipherProgress = 0;
+          unit.target = undefined;
+          unit.enemy = undefined;
+          unit.nav = undefined;
+          unit.patrol = undefined;
+          unit.moveEngage = false;
+        } else if (name === "pack-cipher" && mode === "deployed") {
+          unit.cipherMode = "packing";
+          unit.cipherProgress = 0;
+        }
+      });
+      return;
+    }
     if (name === "auto-repair") {
       const workers = selectedUnits.filter((unit) => unit.type === "worker");
       const enable = workers.some((worker) => !worker.autoRepair);
@@ -2308,7 +2414,7 @@ export default function Home() {
     if (name === "repair" || name === "patrol" || name === "move" || name === "move-engage" || name === "move-hq") return;
     if (name === "hold" || name === "pursue") {
       selectedUnits.filter((unit) =>
-        unit.type !== "worker" && (name === "pursue" || unit.type === "trooper"),
+        isCombatUnit(unit) && (name === "pursue" || unit.type === "trooper"),
       ).forEach((unit) => {
         unit.stance = name;
         unit.retreating = false;
@@ -2323,11 +2429,12 @@ export default function Home() {
       return;
     }
     const type = name as Unit["type"];
-    if (!["worker", "trooper", "tank", "drone"].includes(type)) return;
-    const wanted = type === "worker" ? "hq" : "barracks";
+    if (!["worker", "trooper", "tank", "drone", "cipher"].includes(type)) return;
+    const wanted = type === "worker" || type === "cipher" ? "hq" : "barracks";
     building = g.buildings.find((b) =>
       b.team === "enemy" && selectedIds.includes(b.id) && b.type === wanted && buildingOperational(b));
-    if (!building || (type === "worker" && (g.enemyFortifyProduction || g.enemyDoctrineProduction))) return;
+    if (!building || ((type === "worker" || type === "cipher") && (g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction))) return;
+    if (type === "cipher" && (!g.enemyTradeNetwork || cipherCountForTeam(g, "enemy") >= CIPHER_MAX)) return;
     if (!building.production && (building.cooldown || 0) > 0) return;
     const pending = (building.production?.queue?.length || 0) + (building.production ? 1 : 0);
     if (pending >= MAX_QUEUE || g.enemyCredits < unitCost[type]) return;
@@ -2561,7 +2668,7 @@ export default function Home() {
       return;
     }
     const selectedWorkers = g.units.filter((unit) => unit.team === "player" && unit.type === "worker" && g.selected.includes(unit.id));
-    const selectedCombat = g.units.filter((unit) => unit.team === "player" && unit.type !== "worker" && g.selected.includes(unit.id));
+    const selectedCombat = g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
     const selectedPatrollers = [...selectedCombat, ...selectedWorkers.filter((worker) => worker.autoRepair)];
     const resourceHit = g.crystals
       .map((resource, index) => ({ resource, index }))
@@ -2703,7 +2810,7 @@ export default function Home() {
       sync();
       return;
     }
-    const ours = g.units.filter((u) => g.selected.includes(u.id));
+    const ours = g.units.filter((u) => g.selected.includes(u.id) && (u.type !== "cipher" || (u.cipherMode || "mobile") === "mobile"));
     if (!ours.length) return;
     const relay = (g.objectives || [])
       .filter((objective) => objectiveIntel(g, objective).visible)
@@ -2732,7 +2839,7 @@ export default function Home() {
       }
       const hostileOccupants = relayOccupants(g, relay).filter((unit) => unit.team === "enemy");
       if (hostileOccupants.length) {
-        const attackers = ours.filter((unit) => unit.type !== "worker");
+        const attackers = ours.filter(isCombatUnit);
         attackers.forEach((unit, index) => {
           unit.retreating = false;
           unit.enemy = hostileOccupants[index % hostileOccupants.length].id;
@@ -2799,11 +2906,19 @@ export default function Home() {
     const forcedTravel = g.mode === "move" || g.mode === "move-engage";
     const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
     const formation = formationDestinations(ours, { x: wx, y: wy });
-    const formationSpeed = ours.length > 1 && ours.every((unit) => unit.type !== "worker")
+    const formationSpeed = ours.length > 1 && ours.every(isCombatUnit)
       ? Math.min(...ours.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
       : undefined;
     if (attacking)
-      ours.forEach((u) => {
+      ours.forEach((u, index) => {
+        if (!isCombatUnit(u)) {
+          u.enemy = undefined;
+          u.target = { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
+          u.moveEngage = false;
+          u.formationSpeed = undefined;
+          u.nav = undefined;
+          return;
+        }
         u.retreating = false;
         u.enemy = victim!.id;
         u.target = undefined;
@@ -2823,7 +2938,7 @@ export default function Home() {
         u.retreating = false;
         u.enemy = undefined;
         u.target = formation.get(u.id) || { x: wx + (i % 3) * 26, y: wy + Math.floor(i / 3) * 26 };
-        u.moveEngage = u.type !== "worker" && g.mode === "move-engage";
+        u.moveEngage = isCombatUnit(u) && g.mode === "move-engage";
         u.formationSpeed = formationSpeed;
         if (u.moveEngage) u.stance = "pursue";
         u.nav = undefined;
@@ -3001,7 +3116,7 @@ export default function Home() {
         g.message = `${b.relocation.mode === "pack" ? "Packing" : "Deployment"} is already in progress.`;
       } else if (name === "pack-hq") {
         if (b.packed) g.message = "Headquarters is already packed.";
-        else if (b.production || g.fortifyProduction || g.doctrineProduction) g.message = "HQ is busy — finish production or research before packing.";
+        else if (b.production || g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction) g.message = "HQ is busy — finish production or research before packing.";
         else {
           b.relocation = { mode: "pack", elapsed: 0, duration: 5 };
           g.matchStats.meaningfulActions++;
@@ -3028,7 +3143,7 @@ export default function Home() {
         return;
       }
       g.mode = "set-rally";
-      g.message = `RALLY POINT: tap where new ${b.type === "hq" ? "Workers" : "combat units"} should go.`;
+      g.message = `RALLY POINT: tap where new ${b.type === "hq" ? "HQ units" : "combat units"} should go.`;
       sync();
       return;
     }
@@ -3087,6 +3202,8 @@ export default function Home() {
         g.message = `Fortify Base requires ${FORTIFY_INTEL_COST} intel.`;
       } else if (g.doctrineProduction) {
         g.message = "HQ is researching a doctrine — wait for it to complete.";
+      } else if (g.tradeNetworkProduction) {
+        g.message = "HQ is researching Trade Network — wait for it to complete.";
       } else if (b.production) {
         g.message = "HQ is producing a unit — finish its queue before starting Fortify Base.";
       } else {
@@ -3106,7 +3223,7 @@ export default function Home() {
         g.message = `${g.doctrine === "air" ? "Air Superiority" : "Armored Command"} is locked in for this match.`;
       } else if (g.doctrineProduction) {
         g.message = "Doctrine research is already in progress.";
-      } else if (g.fortifyProduction || b.production) {
+      } else if (g.fortifyProduction || g.tradeNetworkProduction || b.production) {
         g.message = "HQ is busy — finish its current operation first.";
       } else if (g.intel < DOCTRINE_INTEL_COST) {
         g.message = `${doctrine === "air" ? "Air Superiority" : "Armored Command"} requires ${DOCTRINE_INTEL_COST} intel.`;
@@ -3118,11 +3235,59 @@ export default function Home() {
       sync();
       return;
     }
+    if (name === "trade-network") {
+      if (!b || b.type !== "hq" || !buildingOperational(b)) {
+        g.message = "Select your HQ first to research Trade Network.";
+      } else if (g.tradeNetwork) {
+        g.message = "Trade Network is already online.";
+      } else if (g.tradeNetworkProduction) {
+        g.message = `Trade Network research is already in progress — ${Math.max(0, Math.ceil(g.tradeNetworkProduction.duration - g.tradeNetworkProduction.elapsed))} seconds remaining.`;
+      } else if (g.fortifyProduction || g.doctrineProduction || b.production) {
+        g.message = "HQ is busy — finish its current operation first.";
+      } else if (g.intel < TRADE_NETWORK_INTEL_COST) {
+        g.message = `Trade Network requires ${TRADE_NETWORK_INTEL_COST} intel.`;
+      } else {
+        g.intel -= TRADE_NETWORK_INTEL_COST;
+        g.tradeNetworkProduction = { elapsed: 0, duration: TRADE_NETWORK_DURATION };
+        g.matchStats.meaningfulActions++;
+        g.message = `TRADE NETWORK research started — Cipher access in ${TRADE_NETWORK_DURATION} seconds.`;
+      }
+      sync();
+      return;
+    }
     const selectedUnits = g.units.filter((unit) => unit.team === "player" && g.selected.includes(unit.id));
     const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
-    const selectedCombat = selectedUnits.filter((unit) => unit.type !== "worker");
+    const selectedCombat = selectedUnits.filter(isCombatUnit);
+    const selectedCiphers = selectedUnits.filter((unit) => unit.type === "cipher");
+    if (name === "deploy-cipher" || name === "pack-cipher") {
+      const eligible = selectedCiphers.filter((unit) =>
+        name === "deploy-cipher" ? (unit.cipherMode || "mobile") === "mobile" : unit.cipherMode === "deployed",
+      );
+      if (!eligible.length) {
+        g.message = name === "deploy-cipher" ? "Select a mobile Cipher first." : "Select a deployed Cipher first.";
+      } else {
+        eligible.forEach((unit) => {
+          unit.cipherMode = name === "deploy-cipher" ? "deploying" : "packing";
+          unit.cipherProgress = 0;
+          unit.target = undefined;
+          unit.enemy = undefined;
+          unit.nav = undefined;
+          unit.patrol = undefined;
+          unit.moveEngage = false;
+          unit.formationSpeed = undefined;
+        });
+        g.matchStats.meaningfulActions++;
+        g.message = name === "deploy-cipher"
+          ? `CIPHER DEPLOYING — income link opens in ${CIPHER_DEPLOY_DURATION} seconds.`
+          : `CIPHER PACKING — mobile in ${CIPHER_PACK_DURATION} seconds.`;
+      }
+      sync();
+      return;
+    }
     if (name === "move" || name === "move-engage") {
+      const movableUnits = selectedUnits.filter((unit) => unit.type !== "cipher" || (unit.cipherMode || "mobile") === "mobile");
       if (!selectedUnits.length) g.message = "Select units before issuing a move order.";
+      else if (!movableUnits.length) g.message = "Pack the deployed Cipher before moving it.";
       else {
         g.mode = name;
         g.message = name === "move-engage"
@@ -3207,7 +3372,7 @@ export default function Home() {
     }
     if (name === "retreat") {
       const hq = g.buildings.find((building) => building.team === "player" && building.type === "hq" && buildingOperational(building));
-      const units = g.units.filter((unit) => unit.team === "player" && g.selected.includes(unit.id) && unit.type !== "worker");
+      const units = g.units.filter((unit) => unit.team === "player" && g.selected.includes(unit.id) && isCombatUnit(unit));
       if (!hq || !units.length) {
         g.message = "Select combat units and keep your HQ deployed before issuing a retreat.";
       } else {
@@ -3225,8 +3390,8 @@ export default function Home() {
       return;
     }
     const type = name as Unit["type"];
-    if (!["worker", "trooper", "tank", "drone"].includes(type)) return;
-    const wanted = type === "worker" ? "hq" : "barracks";
+    if (!["worker", "trooper", "tank", "drone", "cipher"].includes(type)) return;
+    const wanted = type === "worker" || type === "cipher" ? "hq" : "barracks";
     const selectedProduction = g.buildings.find(
       (x) =>
         x.team === "player" &&
@@ -3236,16 +3401,26 @@ export default function Home() {
     );
     if (!selectedProduction) {
       g.message =
-        type === "worker"
-          ? "Select your HQ first to show and train Workers."
+        type === "worker" || type === "cipher"
+          ? `Select your HQ first to show and train ${type === "worker" ? "Workers" : "Ciphers"}.`
           : g.buildings.some((x) => x.team === "player" && x.type === "barracks")
             ? "Select a completed Barracks first to show and train combat units."
             : "Build and complete a Barracks first to unlock Troopers, Tanks, and Drones.";
       sync();
       return;
     }
-    if (type === "worker" && (g.fortifyProduction || g.doctrineProduction)) {
-      g.message = "HQ is busy with an upgrade — Worker production is paused.";
+    if ((type === "worker" || type === "cipher") && (g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction)) {
+      g.message = `HQ is busy with research — ${unitName(type)} production is paused.`;
+      sync();
+      return;
+    }
+    if (type === "cipher" && !g.tradeNetwork) {
+      g.message = "Research Trade Network at the HQ before training a Cipher.";
+      sync();
+      return;
+    }
+    if (type === "cipher" && cipherCountForTeam(g, "player") >= CIPHER_MAX) {
+      g.message = `Cipher limit reached (${CIPHER_MAX}).`;
       sync();
       return;
     }
@@ -3270,7 +3445,7 @@ export default function Home() {
     g.matchStats.totalCreditsSpent += unitCost[type];
     g.matchStats.meaningfulActions++;
     g.matchStats.unitsBuilt += type === "worker" ? 1 : 0;
-    g.matchStats.combatUnitsBuilt += type === "worker" ? 0 : 1;
+    g.matchStats.combatUnitsBuilt += isCombatType(type) ? 1 : 0;
     g.selected = [b.id];
     if (!b.production) {
       b.production = {
@@ -3399,7 +3574,7 @@ export default function Home() {
       if (key === "x") return action("deselect");
       if (key === "h") {
         if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type === "trooper"))) return action("hold");
-        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && unit.type !== "worker"))) {
+        if (g.selected.some((id) => g.units.some((unit) => unit.id === id && unit.team === "player" && isCombatUnit(unit)))) {
           g.message = "Sentry Mode is available only to Troopers.";
           sync();
           return;
@@ -3638,8 +3813,8 @@ export default function Home() {
         }
       }
     }
-    const playerArmyCount = g.units.filter((unit) => unit.team === "player" && unit.type !== "worker").length;
-    const enemyArmyCount = g.units.filter((unit) => unit.team === "enemy" && unit.type !== "worker").length;
+    const playerArmyCount = g.units.filter((unit) => unit.team === "player" && isCombatUnit(unit)).length;
+    const enemyArmyCount = g.units.filter((unit) => unit.team === "enemy" && isCombatUnit(unit)).length;
     g.credits = Math.max(0, g.credits - upkeepPerSecond(playerArmyCount) * dt);
     g.enemyCredits = Math.max(0, g.enemyCredits - upkeepPerSecond(enemyArmyCount) * dt);
     for (const building of g.buildings) {
@@ -3708,6 +3883,22 @@ export default function Home() {
         sync();
       }
     }
+    for (const team of ["player", "enemy"] as const) {
+      const production = team === "player" ? g.tradeNetworkProduction : g.enemyTradeNetworkProduction;
+      if (!production) continue;
+      production.elapsed = Math.min(production.duration, production.elapsed + dt);
+      if (production.elapsed >= production.duration) {
+        if (team === "player") {
+          g.tradeNetwork = true;
+          g.tradeNetworkProduction = undefined;
+          g.message = "TRADE NETWORK online — Cipher production unlocked at Headquarters.";
+        } else {
+          g.enemyTradeNetwork = true;
+          g.enemyTradeNetworkProduction = undefined;
+        }
+        sync();
+      }
+    }
     for (const b of g.buildings) {
       if (b.progress === undefined || b.progress >= 1) continue;
       const builders = g.units.filter((unit) => {
@@ -3745,7 +3936,7 @@ export default function Home() {
       if (
         b.production &&
         buildingOperational(b) &&
-        !(b.type === "hq" && ((b.team === "player" && (g.fortifyProduction || g.doctrineProduction)) || (b.team === "enemy" && (g.enemyFortifyProduction || g.enemyDoctrineProduction))))
+        !(b.type === "hq" && ((b.team === "player" && (g.fortifyProduction || g.doctrineProduction || g.tradeNetworkProduction)) || (b.team === "enemy" && (g.enemyFortifyProduction || g.enemyDoctrineProduction || g.enemyTradeNetworkProduction))))
       ) {
         b.production.elapsed += dt;
         if (b.production.elapsed >= b.production.duration) {
@@ -3785,6 +3976,7 @@ export default function Home() {
             xp: 0,
             level: 1,
             supply: SUPPLY_CAPACITY,
+            cipherMode: type === "cipher" ? "mobile" : undefined,
           });
           const next = b.production.queue?.shift();
           if (next)
@@ -3808,6 +4000,36 @@ export default function Home() {
     const objs = () => [...g.units, ...g.buildings];
     for (const u of g.units) {
       if (u.hp <= 0) continue;
+      if (u.type === "cipher") {
+        const mode = u.cipherMode || "mobile";
+        u.enemy = undefined;
+        if (mode !== "mobile") {
+          u.target = undefined;
+          u.nav = undefined;
+          u.patrol = undefined;
+          u.moveEngage = false;
+          u.formationSpeed = undefined;
+          u.moving = false;
+          if (mode === "deploying" || mode === "packing") {
+            const duration = mode === "deploying" ? CIPHER_DEPLOY_DURATION : CIPHER_PACK_DURATION;
+            u.cipherProgress = Math.min(duration, (u.cipherProgress || 0) + dt);
+            if (u.cipherProgress >= duration) {
+              u.cipherMode = mode === "deploying" ? "deployed" : "mobile";
+              u.cipherProgress = undefined;
+              if (u.team === "player") {
+                g.message = mode === "deploying"
+                  ? "CIPHER ONLINE — generating 60 credits per minute while undisturbed."
+                  : "CIPHER MOBILE — income link closed.";
+                sync();
+              }
+            }
+          } else if (mode === "deployed" && g.time - (u.lastCombatAt ?? -Infinity) >= CIPHER_COMBAT_LOCKOUT) {
+            if (u.team === "player") g.credits += CIPHER_INCOME_RATE * dt;
+            else g.enemyCredits += CIPHER_INCOME_RATE * dt;
+          }
+          continue;
+        }
+      }
       if (u.garrisonTarget && !u.garrisonedAt) {
         const relay = (g.objectives || []).find((objective) => objective.id === u.garrisonTarget);
         if (!relay || u.type !== "trooper" || !intelRelayOperational(relay)) {
@@ -3841,7 +4063,7 @@ export default function Home() {
         u.enemy = undefined;
         u.nav = undefined;
       }
-      const aiObjectiveTravel = u.team === "enemy" && u.type !== "worker" && u.target
+      const aiObjectiveTravel = u.team === "enemy" && isCombatUnit(u) && u.target
         ? (g.objectives || []).find((objective) => Math.hypot(objective.x - u.target!.x, objective.y - u.target!.y) <= 50)
         : undefined;
       const objectiveDefended = Boolean(aiObjectiveTravel && (
@@ -3935,7 +4157,7 @@ export default function Home() {
       // travel may break course to fight nearby targets, then resumes.
       const engagingWhileTraveling = Boolean(u.moveEngage && u.target);
       const firingWhileDirectTravel = Boolean(!u.moveEngage && u.target && u.stance !== "patrol");
-      if (u.type !== "worker" && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling || firingWhileDirectTravel)) {
+      if (isCombatUnit(u) && !u.retreating && (!u.target || u.stance === "patrol" || engagingWhileTraveling || firingWhileDirectTravel)) {
         const sight = firingWhileDirectTravel
           ? unitCombatRange(u)
           : u.stance === "hold"
@@ -4037,10 +4259,10 @@ export default function Home() {
             if (wasAlive && combatTarget.hp <= 0) {
               if (!isBuilding && isUnit(combatTarget)) {
                 const ownValue = g.units
-                  .filter((unit) => unit.team === u.team && unit.type !== "worker" && unit.hp > 0)
+                  .filter((unit) => unit.team === u.team && isCombatUnit(unit) && unit.hp > 0)
                   .reduce((sum, unit) => sum + unitCost[unit.type], 0);
                 const opposingValue = g.units
-                  .filter((unit) => unit.team !== u.team && unit.type !== "worker" && unit.hp > 0)
+                  .filter((unit) => unit.team !== u.team && isCombatUnit(unit) && unit.hp > 0)
                   .reduce((sum, unit) => sum + unitCost[unit.type], 0);
                 if (ownValue < opposingValue * .8) {
                   const bounty = Math.max(20, Math.round(unitCost[combatTarget.type] * .22));
@@ -4295,12 +4517,20 @@ export default function Home() {
           const angle = d > 0.01 ? Math.atan2(b.y - a.y, b.x - a.x) : (a.id + b.id) * 2.399;
           const shift = (min - d) / 2 + 0.15;
           const dx = Math.cos(angle) * shift, dy = Math.sin(angle) * shift;
-          a.x -= dx; a.y -= dy; b.x += dx; b.y += dy;
+          const aFixed = a.type === "cipher" && (a.cipherMode || "mobile") !== "mobile";
+          const bFixed = b.type === "cipher" && (b.cipherMode || "mobile") !== "mobile";
+          if (!aFixed && !bFixed) {
+            a.x -= dx; a.y -= dy; b.x += dx; b.y += dy;
+          } else if (!aFixed) {
+            a.x -= dx * 2; a.y -= dy * 2;
+          } else if (!bFixed) {
+            b.x += dx * 2; b.y += dy * 2;
+          }
         }
       }
     for (const u of g.units)
       for (const b of g.buildings) {
-        if (u.type === "drone" || u.garrisonedAt) continue;
+        if (u.type === "drone" || u.garrisonedAt || (u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile")) continue;
         const d = Math.hypot(u.x - b.x, u.y - b.y);
         const min = stats[u.type].r + buildingStats[b.type].r * 0.72;
         if (d < min) {
@@ -4310,7 +4540,7 @@ export default function Home() {
         }
       }
     for (const u of g.units) {
-      if (u.type === "drone" || u.garrisonedAt) continue;
+      if (u.type === "drone" || u.garrisonedAt || (u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile")) continue;
       for (const objective of g.objectives || []) {
         const d = Math.hypot(u.x - objective.x, u.y - objective.y);
         const min = stats[u.type].r + 36;
@@ -4348,7 +4578,7 @@ export default function Home() {
       else g.matchStats.enemyUnitsDestroyed++;
     }
     g.units = g.units.filter((u) => u.hp > 0);
-    g.matchStats.peakArmy = Math.max(g.matchStats.peakArmy, g.units.filter((u) => u.team === "player" && u.type !== "worker").length);
+    g.matchStats.peakArmy = Math.max(g.matchStats.peakArmy, g.units.filter((u) => u.team === "player" && isCombatUnit(u)).length);
     g.buildings = g.buildings.filter((b) => b.hp > 0);
     if (multiplayerRole.current === "solo" && g.time >= g.aiThinkAt) {
       g.aiThinkAt = g.time + 0.2;
@@ -4394,7 +4624,7 @@ export default function Home() {
       workers = g.units.filter(
         (u) => u.team === "enemy" && u.type === "worker",
       ),
-      army = g.units.filter((u) => u.team === "enemy" && u.type !== "worker");
+      army = g.units.filter((u) => u.team === "enemy" && isCombatUnit(u));
     if (!hq) return;
     if (!g.enemyDoctrine && !g.enemyDoctrineProduction && !g.enemyFortifyProduction && !hq.production && g.enemyIntel >= DOCTRINE_INTEL_COST) {
       const playerTanks = g.units.filter((unit) => unit.team === "player" && unit.type === "tank").length;
@@ -5165,8 +5395,9 @@ export default function Home() {
         sel = g.selected.includes(u.id),
         player = u.team === "player",
         accent = player ? "#70e2ce" : "#f05b76",
-        sentryMode = u.type === "trooper" && u.stance === "hold";
-      if (sel) {
+        sentryMode = u.type === "trooper" && u.stance === "hold",
+        deployedCipher = u.type === "cipher" && (u.cipherMode || "mobile") !== "mobile";
+      if (sel && unitCombatRange(u) > 0) {
         x.save();
         x.strokeStyle = "rgba(246, 211, 102, .78)";
         x.fillStyle = "rgba(246, 211, 102, .025)";
@@ -5195,6 +5426,7 @@ export default function Home() {
         trooper: art.current.trooperDirections,
         tank: art.current.tankDirections,
         drone: art.current.droneDirections,
+        cipher: art.current.cipherDirections,
       }[u.type];
       const movementAtlases = {
         worker: [restingAtlas, art.current.workerWalk, art.current.workerWalkC],
@@ -5203,12 +5435,14 @@ export default function Home() {
         // scrolling tread overlay instead of swapping whole-body poses.
         tank: [restingAtlas],
         drone: [restingAtlas, art.current.droneMove],
+        cipher: [restingAtlas],
       }[u.type].filter((atlas): atlas is HTMLImageElement => Boolean(atlas));
       const attackAtlas = {
         worker: undefined,
         trooper: art.current.trooperFire,
         tank: art.current.tankFire,
         drone: art.current.droneDirections,
+        cipher: undefined,
       }[u.type];
       const firing = (u.attackUntil || 0) > g.time;
       const miningFrame = Boolean(u.mining) && Math.floor((g.time + u.id * .041) * 8) % 2 === 1;
@@ -5222,7 +5456,7 @@ export default function Home() {
             : u.moving
               ? movementAtlases[movementFrame] || restingAtlas
               : restingAtlas;
-      const unitAtlas = directionalAtlas || art.current.units;
+      const unitAtlas = deployedCipher ? art.current.cipherDeployed : directionalAtlas || art.current.units;
       if (unitAtlas) {
         if (sel) {
           x.shadowBlur = 0;
@@ -5233,7 +5467,9 @@ export default function Home() {
           x.stroke();
         }
         let source: { x: number; y: number; w: number; h: number };
-        if (directionalAtlas) {
+        if (deployedCipher) {
+          source = { x: 0, y: 0, w: unitAtlas.naturalWidth, h: unitAtlas.naturalHeight };
+        } else if (directionalAtlas) {
           const cellWidth = unitAtlas.naturalWidth / 4;
           const cellHeight = unitAtlas.naturalHeight / 2;
           const angle = Number.isFinite(u.facing)
@@ -5258,9 +5494,12 @@ export default function Home() {
             trooper: { x: cellWidth, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
             tank: { x: cellWidth * 2, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
             drone: { x: cellWidth * 2, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
+            cipher: { x: 0, y: unitAtlas.naturalHeight * .27, w: cellWidth, h: unitAtlas.naturalHeight * .45 },
           }[u.type];
         }
-        const size = directionalAtlas
+        const size = deployedCipher
+          ? { w: 76, h: 58 }
+          : directionalAtlas
           ? sentryMode
             ? u.type === "tank" ? { w: 88, h: 88 } : u.type === "drone" ? { w: 78, h: 78 } : { w: 70, h: 70 }
             : u.type === "tank"
@@ -5269,15 +5508,16 @@ export default function Home() {
               ? { w: 88, h: 72 }
             : u.type === "trooper"
               ? { w: 68, h: 68 }
-              : { w: 66, h: 66 }
+              : u.type === "cipher" ? { w: 68, h: 68 } : { w: 66, h: 66 }
           : u.type === "tank"
             ? { w: 84, h: 82 }
             : u.type === "drone"
               ? { w: 84, h: 70 }
             : u.type === "trooper"
               ? { w: 62, h: 68 }
-              : { w: 54, h: 60 };
+              : u.type === "cipher" ? { w: 60, h: 62 } : { w: 54, h: 60 };
         x.shadowBlur = 0;
+        if (deployedCipher && u.cipherMode !== "deployed") x.globalAlpha = .68;
         if (sentryMode) {
           x.save();
           x.strokeStyle = player ? "rgba(112, 226, 206, .88)" : "rgba(240, 91, 118, .86)";
@@ -5401,6 +5641,10 @@ export default function Home() {
         u.hp / u.max,
         player ? "#55d6b5" : "#ed526d",
       );
+      if (u.type === "cipher" && (u.cipherMode === "deploying" || u.cipherMode === "packing")) {
+        const duration = u.cipherMode === "deploying" ? CIPHER_DEPLOY_DURATION : CIPHER_PACK_DURATION;
+        bar(x, u.x - s.r, u.y - s.r - 15, s.r * 2, (u.cipherProgress || 0) / duration, "#f6d366");
+      }
       if ((u.level || 1) > 1) {
         x.fillStyle = "#f6d366";
         x.font = "900 9px system-ui";
@@ -5587,7 +5831,7 @@ export default function Home() {
   const commitTravelChoice = (world: P, choice: "engage" | "direct") => {
     const g = game.current;
     const combat = g.units.filter((unit) =>
-      unit.team === "player" && unit.type !== "worker" && g.selected.includes(unit.id));
+      unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
     setMoveChooser(null);
     if (!combat.length) {
       g.message = "Select Soldiers, Tanks, or Drones before issuing a travel order.";
@@ -5633,7 +5877,7 @@ export default function Home() {
     canvas.current!.setPointerCapture(e.pointerId);
     const g = game.current;
     const hasSelectedCombat = g.units.some((unit) =>
-      unit.team === "player" && unit.type !== "worker" && g.selected.includes(unit.id));
+      unit.team === "player" && isCombatUnit(unit) && g.selected.includes(unit.id));
     const hitFriendly = [...g.units, ...g.buildings].some((object) =>
       object.team === "player" && Math.hypot(object.x - wp.x, object.y - wp.y) < 55);
     const mw = 132, mh = 82, mx = canvas.current!.clientWidth - mw - 12, my = 12;
@@ -5910,16 +6154,16 @@ export default function Home() {
         ) {
           g.selected = [building.id];
           g.mode = "set-rally";
-          g.message = `RALLY POINT: tap where new ${building.type === "hq" ? "Workers" : "combat units"} should go.`;
+          g.message = `RALLY POINT: tap where new ${building.type === "hq" ? "HQ units" : "combat units"} should go.`;
           lastTap.current = null;
         } else {
           if (e.shiftKey) {
             g.selected = g.selected.includes(hit.id)
               ? g.selected.filter((id) => id !== hit.id)
               : [...g.selected, hit.id];
-          } else if (unit && unit.type !== "worker") {
+          } else if (unit && isCombatUnit(unit)) {
             const currentCombatSelection = g.units.filter((candidate) =>
-              candidate.team === "player" && candidate.type !== "worker" && g.selected.includes(candidate.id));
+              candidate.team === "player" && isCombatUnit(candidate) && g.selected.includes(candidate.id));
             const selectionContainsOnlyCombat = currentCombatSelection.length === g.selected.length;
             g.selected = selectionContainsOnlyCombat
               ? [...new Set([...g.selected, unit.id])]
@@ -6001,13 +6245,16 @@ export default function Home() {
     const cost = unitCost[type];
     const shortfall = Math.max(0, cost - ui.credits);
     const unaffordable = shortfall > 0;
+    const cipherLocked = type === "cipher" && (!ui.tradeNetwork || ui.cipherCount >= CIPHER_MAX);
     const locked =
-      type === "worker"
-        ? ui.productionBuilding !== "hq" || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || coolingDown
+      type === "worker" || type === "cipher"
+        ? ui.productionBuilding !== "hq" || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) || coolingDown || cipherLocked
         : ui.productionBuilding !== "barracks" || coolingDown;
     const idle =
       type === "worker"
         ? `150 CREDITS · 8s · ${unitHealth.worker} HP`
+        : type === "cipher"
+          ? `${unitCost.cipher} CREDITS · ${unitBuildTime.cipher}s · ${unitHealth.cipher} HP · ${ui.cipherCount}/${CIPHER_MAX}`
         : type === "trooper"
           ? `125 CREDITS · 6s · COUNTERS AIR`
           : type === "tank"
@@ -6015,7 +6262,11 @@ export default function Home() {
             : `300 CREDITS · 12s · COUNTERS ARMOR`;
     const lockText = coolingDown
       ? `COOLDOWN ${Math.ceil(ui.productionCooldown)}s`
-      : type === "worker"
+      : type === "cipher" && !ui.tradeNetwork
+        ? "RESEARCH TRADE NETWORK"
+        : type === "cipher" && ui.cipherCount >= CIPHER_MAX
+          ? `LIMIT ${CIPHER_MAX} REACHED`
+      : type === "worker" || type === "cipher"
         ? "HQ BUSY"
         : "BARRACKS UNAVAILABLE";
     return (
@@ -6026,7 +6277,7 @@ export default function Home() {
         onClick={() => action(type)}
         title={unaffordable ? `${shortfall} more credits required` : undefined}
       >
-        <kbd>{type === "worker" ? "V" : type === "trooper" ? "I" : type === "tank" ? "K" : "N"}</kbd>
+        <kbd>{type === "worker" ? "V" : type === "cipher" ? "Ξ" : type === "trooper" ? "I" : type === "tank" ? "K" : "N"}</kbd>
         <span className={`command-art unit-${type}`} aria-hidden="true">
           {(locked || unaffordable) && <b className="command-art-badge">{unaffordable ? "−" : "🔒"}</b>}
         </span>
@@ -6440,9 +6691,24 @@ export default function Home() {
               </>
             ) : ui.selectedUnits > 0 ? (
               <>
-                <button onClick={() => action("move")} title={tutorialsEnabled ? "Keep the destination locked and fire at enemies already within weapon range without chasing them." : undefined}>
-                  <kbd>Z</kbd><i>➤</i><span>DIRECT MOVE<small>FIRE IN RANGE · NO CHASE</small></span>
+                <button disabled={ui.selectedUnitType === "cipher" && ui.selectedCipherMode !== "mobile"} onClick={() => action("move")} title={tutorialsEnabled ? "Keep the destination locked and fire at enemies already within weapon range without chasing them." : undefined}>
+                  <kbd>Z</kbd><i>➤</i><span>DIRECT MOVE<small>{ui.selectedUnitType === "cipher" ? "MOBILE TRAVEL" : "FIRE IN RANGE · NO CHASE"}</small></span>
                 </button>
+                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "mobile" || ui.selectedCipherMode === "mixed") && (
+                  <button onClick={() => action("deploy-cipher")} title={tutorialsEnabled ? "Deploy for eight seconds. Once online and out of combat, this Cipher generates one credit each second." : undefined}>
+                    <i>⌁</i><span>DEPLOY CIPHER<small>{CIPHER_DEPLOY_DURATION}s · +60 CREDITS/MIN</small></span>
+                  </button>
+                )}
+                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "deployed" || ui.selectedCipherMode === "mixed") && (
+                  <button onClick={() => action("pack-cipher")} title={tutorialsEnabled ? "Shut down the income link and return the Cipher to its mobile form." : undefined}>
+                    <i>▣</i><span>PACK CIPHER<small>{CIPHER_PACK_DURATION}s · STOPS INCOME</small></span>
+                  </button>
+                )}
+                {ui.selectedUnitType === "cipher" && (ui.selectedCipherMode === "deploying" || ui.selectedCipherMode === "packing") && (
+                  <button disabled className="placing">
+                    <i>⌁</i><span>{ui.selectedCipherMode === "deploying" ? "DEPLOYING" : "PACKING"}<small>TRANSITION IN PROGRESS</small></span>
+                  </button>
+                )}
                 {ui.selectedCombat > 0 && (<>
                   <button className={ui.selectedStance === "pursue" ? "active-order" : ""} aria-pressed={ui.selectedStance === "pursue"} onClick={() => action("pursue")} title={tutorialsEnabled ? "Chase visible enemies within sight range." : undefined}>
                     <kbd>C</kbd><i>⌖</i><span>PURSUE<small>CHASE VISIBLE TARGETS</small></span>
@@ -6482,7 +6748,7 @@ export default function Home() {
               </button>
             ) : ui.selectedBuilding === "hq" && !ui.hqPacked && !ui.hqRelocation && commandTab === "tech" ? (
               <>
-                <button disabled={ui.fortified || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || ui.intel < FORTIFY_INTEL_COST} className={ui.fortified ? "locked" : ui.fortifyProduction ? "placing" : ui.intel < FORTIFY_INTEL_COST ? "unaffordable" : ""} onClick={() => action("fortify")} title={ui.intel < FORTIFY_INTEL_COST ? `${FORTIFY_INTEL_COST - ui.intel} more intel required` : undefined}>
+                <button disabled={ui.fortified || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) || ui.intel < FORTIFY_INTEL_COST} className={ui.fortified || Boolean(ui.doctrineProduction) || Boolean(ui.tradeNetworkProduction) ? "locked" : ui.fortifyProduction ? "placing" : ui.intel < FORTIFY_INTEL_COST ? "unaffordable" : ""} onClick={() => action("fortify")} title={ui.intel < FORTIFY_INTEL_COST ? `${FORTIFY_INTEL_COST - ui.intel} more intel required` : undefined}>
                   <kbd>F</kbd><span className="command-art building-hq" aria-hidden="true">{ui.fortified && <b className="command-art-badge">✓</b>}</span>
                   <span>{ui.fortified ? "BASE FORTIFIED" : ui.fortifyProduction ? "FORTIFYING BASE" : "FORTIFY BASE"}<small>{ui.fortified ? "+25% STRUCTURE HP ACTIVE" : ui.fortifyProduction ? `${Math.max(0, Math.ceil(ui.fortifyProduction.duration - ui.fortifyProduction.elapsed))}s REMAINING` : ui.intel < FORTIFY_INTEL_COST ? `NEED ${FORTIFY_INTEL_COST - ui.intel} MORE INTEL` : `${FORTIFY_INTEL_COST} INTEL · 40s · +25% STRUCTURE HP`}</small></span>
                 </button>
@@ -6491,12 +6757,15 @@ export default function Home() {
                   const researching = ui.doctrineProduction?.type === doctrine;
                   const locked = Boolean(ui.doctrine && !chosen) || Boolean(ui.doctrineProduction && !researching);
                   return (
-                    <button key={doctrine} disabled={Boolean(ui.doctrine) || Boolean(ui.doctrineProduction) || Boolean(ui.fortifyProduction) || ui.intel < DOCTRINE_INTEL_COST} className={chosen || locked ? "locked" : researching ? "placing" : ui.intel < DOCTRINE_INTEL_COST ? "unaffordable" : ""} onClick={() => action(`doctrine-${doctrine}`)} title={ui.intel < DOCTRINE_INTEL_COST ? `${DOCTRINE_INTEL_COST - ui.intel} more intel required` : undefined}>
+                    <button key={doctrine} disabled={Boolean(ui.doctrine) || Boolean(ui.doctrineProduction) || Boolean(ui.fortifyProduction) || Boolean(ui.tradeNetworkProduction) || ui.intel < DOCTRINE_INTEL_COST} className={chosen || locked || Boolean(ui.fortifyProduction) || Boolean(ui.tradeNetworkProduction) ? "locked" : researching ? "placing" : ui.intel < DOCTRINE_INTEL_COST ? "unaffordable" : ""} onClick={() => action(`doctrine-${doctrine}`)} title={ui.intel < DOCTRINE_INTEL_COST ? `${DOCTRINE_INTEL_COST - ui.intel} more intel required` : undefined}>
                       <kbd>{doctrine === "air" ? "U" : "M"}</kbd><i>{doctrine === "air" ? "✦" : "⬢"}</i>
                       <span>{doctrine === "air" ? "AIR SUPERIORITY" : "ARMORED COMMAND"}<small>{chosen ? doctrine === "air" ? "LOCKED · +18% DRONE DMG · +15% SPEED" : "LOCKED · +18% TANK HP & DMG" : locked ? "LOCKED BY OTHER DOCTRINE" : researching ? `${Math.max(0, Math.ceil(ui.doctrineProduction!.duration - ui.doctrineProduction!.elapsed))}s REMAINING` : ui.intel < DOCTRINE_INTEL_COST ? `NEED ${DOCTRINE_INTEL_COST - ui.intel} MORE INTEL` : `${DOCTRINE_INTEL_COST} INTEL · ${DOCTRINE_DURATION}s · PERMANENT CHOICE`}</small></span>
                     </button>
                   );
                 })}
+                <button disabled={ui.tradeNetwork || Boolean(ui.tradeNetworkProduction) || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) || ui.intel < TRADE_NETWORK_INTEL_COST} className={ui.tradeNetwork || Boolean(ui.fortifyProduction) || Boolean(ui.doctrineProduction) ? "locked" : ui.tradeNetworkProduction ? "placing" : ui.intel < TRADE_NETWORK_INTEL_COST ? "unaffordable" : ""} onClick={() => action("trade-network")} title={ui.intel < TRADE_NETWORK_INTEL_COST ? `${TRADE_NETWORK_INTEL_COST - ui.intel} more intel required` : undefined}>
+                  <i>⌁</i><span>{ui.tradeNetwork ? "TRADE NETWORK ONLINE" : ui.tradeNetworkProduction ? "OPENING TRADE NETWORK" : "TRADE NETWORK"}<small>{ui.tradeNetwork ? "CIPHER PRODUCTION UNLOCKED" : ui.tradeNetworkProduction ? `${Math.max(0, Math.ceil(ui.tradeNetworkProduction.duration - ui.tradeNetworkProduction.elapsed))}s REMAINING` : ui.intel < TRADE_NETWORK_INTEL_COST ? `NEED ${TRADE_NETWORK_INTEL_COST - ui.intel} MORE INTEL` : `${TRADE_NETWORK_INTEL_COST} INTEL · ${TRADE_NETWORK_DURATION}s · UNLOCK CIPHER`}</small></span>
+                </button>
                 <div className="tech-report">
                   <strong>ENEMY TECH · LAST SCOUTED</strong>
                   <small>{ui.enemyDoctrineKnown
@@ -6512,7 +6781,8 @@ export default function Home() {
                 <button disabled={Boolean(ui.hqRelocation)} className={ui.hqRelocation?.mode === "deploy" ? "placing" : ""} onClick={() => action("deploy-hq")}><kbd>J</kbd><i>⌂</i><span>{ui.hqRelocation?.mode === "deploy" ? "DEPLOYING HQ" : "DEPLOY HQ"}<small>{ui.hqRelocation ? `${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s REMAINING` : "6s · REQUIRES CLEAR TERRAIN"}</small></span></button>
               </> : <>
                 {productionButton("worker")}
-                <button disabled={Boolean(ui.hqRelocation)} onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>WORKER DEPLOYMENT POINT</small></span></button>
+                {productionButton("cipher")}
+                <button disabled={Boolean(ui.hqRelocation)} onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>HQ UNIT DEPLOYMENT</small></span></button>
                 <button disabled={Boolean(ui.hqRelocation)} onClick={() => setCommandTab("tech")}><kbd>Q</kbd><i>⌬</i><span>RESEARCH<small>SPEND INTEL ON UPGRADES</small></span></button>
                 <button disabled={Boolean(ui.hqRelocation)} className={ui.hqRelocation?.mode === "pack" ? "placing" : ""} onClick={() => action("pack-hq")}><kbd>J</kbd><i>▣</i><span>{ui.hqRelocation?.mode === "pack" ? "PACKING HQ" : "PACK HQ"}<small>{ui.hqRelocation ? `${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s REMAINING` : "5s · BECOMES COMMAND CRAWLER"}</small></span></button>
               </>
@@ -6527,7 +6797,7 @@ export default function Home() {
             ) : (
               <div className="production-empty">
                 <strong>SELECT A COMMAND SOURCE</strong>
-                <small>Worker: construction and repair · HQ: Workers and research · completed Barracks: combat units.</small>
+                <small>Worker: construction and repair · HQ: economy units and research · completed Barracks: combat units.</small>
               </div>
             )}
           </div>

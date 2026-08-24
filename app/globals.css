@@ -886,6 +886,12 @@ canvas {
   background-size: 400% 200%;
   background-position: 0 100%;
 }
+.command-art.unit-cipher,
+.command-tab-art.unit-cipher {
+  background-image: url("/game-art/frontier-cipher-directions-v1.png");
+  background-size: 400% 200%;
+  background-position: 0 100%;
+}
 .command-art.building-hq,
 .command-tab-art.building-hq,
 .command-art.building-refinery,
