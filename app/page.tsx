@@ -433,8 +433,8 @@ function revealFog(g: Game) {
 }
 const stats = {
   worker: { r: 13, speed: 52, damage: 3, range: 55, rate: 0.85 },
-  trooper: { r: 12, speed: 66, damage: 7, range: 105, rate: 0.55 },
-  tank: { r: 19, speed: 38, damage: 20, range: 145, rate: 1.15 },
+  trooper: { r: 11, speed: 66, damage: 7, range: 105, rate: 0.55 },
+  tank: { r: 22, speed: 38, damage: 20, range: 145, rate: 1.15 },
   drone: { r: 17, speed: 82, damage: 13, range: 130, rate: 0.78 },
   cipher: { r: 14, speed: 46, damage: 0, range: 0, rate: 1 },
 };
@@ -442,8 +442,28 @@ const buildingStats = {
   hq: { r: 54 },
   refinery: { r: 42 },
   barracks: { r: 44 },
-  turret: { r: 28 },
+  turret: { r: 24 },
 };
+/**
+ * Sprite sheets have very different transparent margins, so battlefield scale
+ * cannot be inferred from their source-frame dimensions. These draw boxes are
+ * tuned to the visible silhouettes: armor reads heavier than infantry, while
+ * defensive turrets remain subordinate to the Intel Relay and base structures.
+ */
+const unitRenderSize = {
+  worker: { w: 58, h: 62 },
+  trooper: { w: 56, h: 60 },
+  tank: { w: 112, h: 104 },
+  drone: { w: 86, h: 70 },
+  cipher: { w: 62, h: 62 },
+} as const;
+const buildingRenderSize = {
+  hq: { w: 142, h: 118 },
+  refinery: { w: 110, h: 92 },
+  barracks: { w: 116, h: 96 },
+  turret: { w: 88, h: 86 },
+} as const;
+const INTEL_RELAY_RENDER_SIZE = 130;
 const buildingHealth = { hq: 900, refinery: 440, barracks: 520, turret: 360 };
 const turretStats = { damage: 12, range: 210, rate: 0.68 };
 const buildingBuildTime = { refinery: 6, barracks: 6, turret: 15 };
@@ -5000,7 +5020,10 @@ export default function Home() {
       x.fillStyle = "rgba(0,0,0,.3)";
       x.beginPath(); x.ellipse(0, 31, 46, 13, 0, 0, Math.PI * 2); x.fill();
       x.globalAlpha = operational ? 1 : coolingDown ? .28 : .42 + (objective.rebuildProgress || 0) * .5;
-      if (art.current.intelRelay) x.drawImage(art.current.intelRelay, -57, -62, 114, 114);
+      if (art.current.intelRelay) {
+        const relaySize = INTEL_RELAY_RENDER_SIZE;
+        x.drawImage(art.current.intelRelay, -relaySize / 2, -relaySize * .54, relaySize, relaySize);
+      }
       else {
         x.fillStyle = "#172529";
         x.strokeStyle = color;
@@ -5094,17 +5117,7 @@ export default function Home() {
           x.ellipse(0, r * .45, r * 1.12, r * .52, 0, 0, Math.PI * 2);
           x.stroke();
         }
-        const size = crawlerAtlas
-          ? { w: 174, h: 145 }
-          : turretAtlas
-          ? { w: 110, h: 108 }
-          : b.type === "hq"
-            ? { w: 142, h: 118 }
-            : b.type === "barracks"
-              ? { w: 116, h: 96 }
-              : b.type === "refinery"
-                ? { w: 110, h: 92 }
-                : { w: 82, h: 80 };
+        const size = crawlerAtlas ? { w: 174, h: 145 } : buildingRenderSize[b.type];
         x.shadowBlur = 0;
         if (crawlerAtlas) {
           x.drawImage(crawlerAtlas, -size.w / 2, -size.h / 2, size.w, size.h);
@@ -5499,23 +5512,9 @@ export default function Home() {
         }
         const size = deployedCipher
           ? { w: 76, h: 58 }
-          : directionalAtlas
-          ? sentryMode
-            ? u.type === "tank" ? { w: 88, h: 88 } : u.type === "drone" ? { w: 78, h: 78 } : { w: 70, h: 70 }
-            : u.type === "tank"
-            ? { w: 90, h: 90 }
-            : u.type === "drone"
-              ? { w: 88, h: 72 }
-            : u.type === "trooper"
-              ? { w: 68, h: 68 }
-              : u.type === "cipher" ? { w: 68, h: 68 } : { w: 66, h: 66 }
-          : u.type === "tank"
-            ? { w: 84, h: 82 }
-            : u.type === "drone"
-              ? { w: 84, h: 70 }
-            : u.type === "trooper"
-              ? { w: 62, h: 68 }
-              : u.type === "cipher" ? { w: 60, h: 62 } : { w: 54, h: 60 };
+          : sentryMode
+            ? { w: 64, h: 64 }
+            : unitRenderSize[u.type];
         x.shadowBlur = 0;
         if (deployedCipher && u.cipherMode !== "deployed") x.globalAlpha = .68;
         if (sentryMode) {
