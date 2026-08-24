@@ -4177,9 +4177,17 @@ export default function Home() {
         }
         if (u.autoRepair) continue;
         if (u.workerMode === "hold") continue;
-        const ref = g.buildings.find(
-          (b) => b.team === u.team && b.type === "refinery" && b.progress === 1,
-        );
+        // Re-evaluate the drop-off every mining tick so Workers use the
+        // closest completed Refinery instead of staying tied to whichever one
+        // happened to be created first. Destroyed and unfinished Refineries
+        // disappear from consideration immediately.
+        const ref = g.buildings
+          .filter((b) => b.team === u.team && b.type === "refinery" && buildingOperational(b))
+          .sort(
+            (a, b) =>
+              Math.hypot(a.x - u.x, a.y - u.y) -
+              Math.hypot(b.x - u.x, b.y - u.y),
+          )[0];
         if (ref) {
           const cargoKind = u.carryingType || "credits";
           const assignedCrystal = Number.isInteger(u.resourceTarget)
