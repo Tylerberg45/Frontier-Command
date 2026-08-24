@@ -50,6 +50,8 @@ type Unit = {
   moving?: boolean;
   /** When true, the unit fights nearby threats but keeps its travel destination. */
   moveEngage?: boolean;
+  /** Temporary speed cap shared by a multi-unit formation during travel. */
+  formationSpeed?: number;
   /** Brief firing pose window, expressed in active match time. */
   attackUntil?: number;
   /** Intel relay occupied by this Trooper. Garrisoned units stay in combat but cannot move. */
@@ -498,6 +500,41 @@ function counterMultiplier(attacker: Unit, target: Unit | Building) {
   if (attacker.type === "drone" && targetType === "tank") return 1.55;
   if (attacker.type === "tank" && targetType === "trooper") return 1.55;
   return 1;
+}
+function structureMultiplier(attacker: Unit, target: Unit | Building) {
+  return !isUnit(target) && attacker.type === "drone" ? 1.6 : 1;
+}
+function formationDestinations(units: Unit[], destination: P) {
+  const result = new Map<number, P>();
+  if (units.length < 2 || units.some((unit) => unit.type === "worker")) {
+    units.forEach((unit, index) => result.set(unit.id, {
+      x: destination.x + (index % 3) * 26,
+      y: destination.y + Math.floor(index / 3) * 26,
+    }));
+    return result;
+  }
+  const center = units.reduce((point, unit) => ({ x: point.x + unit.x, y: point.y + unit.y }), { x: 0, y: 0 });
+  center.x /= units.length;
+  center.y /= units.length;
+  const angle = Math.atan2(destination.y - center.y, destination.x - center.x);
+  const forward = { x: Math.cos(angle), y: Math.sin(angle) };
+  const side = { x: -forward.y, y: forward.x };
+  const rows: Array<{ type: Unit["type"]; forwardOffset: number }> = [
+    { type: "tank", forwardOffset: 42 },
+    { type: "trooper", forwardOffset: 0 },
+    { type: "drone", forwardOffset: -48 },
+  ];
+  rows.forEach(({ type, forwardOffset }) => {
+    const row = units.filter((unit) => unit.type === type);
+    row.forEach((unit, index) => {
+      const sideOffset = (index - (row.length - 1) / 2) * 38;
+      result.set(unit.id, {
+        x: Math.max(30, Math.min(W - 30, destination.x + forward.x * forwardOffset + side.x * sideOffset)),
+        y: Math.max(30, Math.min(H - 30, destination.y + forward.y * forwardOffset + side.y * sideOffset)),
+      });
+    });
+  });
+  return result;
 }
 function terrainMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
   const controlled = (g.objectives || []).filter((objective) => objective.owner === attacker.team).length;
@@ -1037,7 +1074,9 @@ function moveUnitToward(
   const distance = Math.hypot(dx, dy);
   if (distance < 0.01) return;
   u.facing = Math.atan2(dy, dx);
-  const step = Math.min(distance, stats[u.type].speed * supplyMultiplier(u) * (teamDoctrine(g, u.team) === "air" && u.type === "drone" ? 1.15 : 1) * (u.retreating ? 1.2 : 1) * dt);
+  const doctrineSpeed = stats[u.type].speed * (teamDoctrine(g, u.team) === "air" && u.type === "drone" ? 1.15 : 1);
+  const travelSpeed = u.formationSpeed ? Math.min(doctrineSpeed, u.formationSpeed) : doctrineSpeed;
+  const step = Math.min(distance, travelSpeed * supplyMultiplier(u) * (u.retreating ? 1.2 : 1) * dt);
   u.moving = step > 0.01;
   u.x = Math.max(stats[u.type].r, Math.min(W - stats[u.type].r, u.x + (dx / distance) * step));
   u.y = Math.max(stats[u.type].r, Math.min(H - stats[u.type].r, u.y + (dy / distance) * step));
@@ -1724,6 +1763,7 @@ export default function Home() {
     autoRepair: false,
     repairingWorkers: 0,
     idleWorkers: 0,
+    selectedUnitCards: [] as Array<{ id: number; type: Unit["type"]; hp: number; max: number; level: number }>,
   });
   const [saveStatus, setSaveStatus] = useState("AUTOSAVE ON");
   const [moveChooser, setMoveChooser] = useState<{
@@ -1959,7 +1999,18 @@ export default function Home() {
       autoRepair: chosenUnits.some((unit) => unit.type === "worker") && chosenUnits.filter((unit) => unit.type === "worker").every((unit) => unit.autoRepair),
       repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && (unit.repairTarget || unit.repairRelayTarget)).length,
       idleWorkers: g.units.filter((unit) => isIdleWorker(g, unit)).length,
+      selectedUnitCards: chosenUnits
+        .filter((unit) => unit.team === "player" && unit.type !== "worker")
+        .map((unit) => ({ id: unit.id, type: unit.type, hp: unit.hp, max: unit.max, level: unit.level || 1 })),
     });
+  };
+
+  const removeSelectedUnit = (id: number) => {
+    const g = game.current;
+    g.selected = g.selected.filter((selectedId) => selectedId !== id);
+    g.message = g.selected.length ? `${g.selected.length} units selected.` : "Selection cleared.";
+    lastTap.current = null;
+    sync();
   };
 
   const peerSend = (message: unknown) => peer.current?.send(message);
@@ -2038,6 +2089,7 @@ export default function Home() {
           unit.moveEngage = false;
           unit.enemy = undefined;
           unit.target = { x: a.x + (index % 3) * 22, y: a.y + Math.floor(index / 3) * 22 };
+          unit.formationSpeed = undefined;
           unit.nav = undefined;
         });
       }
@@ -2135,6 +2187,10 @@ export default function Home() {
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     const forcedTravel = mode === "move" || mode === "move-engage";
     const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
+    const formation = formationDestinations(units, { x: wx, y: wy });
+    const formationSpeed = units.length > 1 && units.every((unit) => unit.type !== "worker")
+      ? Math.min(...units.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
+      : undefined;
     for (const [index, unit] of units.entries()) {
       if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
       unit.garrisonTarget = undefined;
@@ -2142,10 +2198,12 @@ export default function Home() {
         unit.enemy = victim!.id;
         unit.target = undefined;
         unit.moveEngage = false;
+        unit.formationSpeed = undefined;
       } else {
         unit.enemy = undefined;
-        unit.target = { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
+        unit.target = formation.get(unit.id) || { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
         unit.moveEngage = unit.type !== "worker" && mode === "move-engage";
+        unit.formationSpeed = formationSpeed;
         if (unit.moveEngage) unit.stance = "pursue";
       }
       unit.retreating = false;
@@ -2583,6 +2641,7 @@ export default function Home() {
         unit.moveEngage = false;
         unit.enemy = undefined;
         unit.target = { x: a.x + (index % 3) * 22, y: a.y + Math.floor(index / 3) * 22 };
+        unit.formationSpeed = undefined;
         unit.nav = undefined;
       });
       g.mode = "select";
@@ -2739,12 +2798,17 @@ export default function Home() {
       )[0];
     const forcedTravel = g.mode === "move" || g.mode === "move-engage";
     const attacking = !forcedTravel && Boolean(victim && Math.hypot(victim.x - wx, victim.y - wy) < 65);
+    const formation = formationDestinations(ours, { x: wx, y: wy });
+    const formationSpeed = ours.length > 1 && ours.every((unit) => unit.type !== "worker")
+      ? Math.min(...ours.map((unit) => stats[unit.type].speed * (teamDoctrine(g, unit.team) === "air" && unit.type === "drone" ? 1.15 : 1)))
+      : undefined;
     if (attacking)
       ours.forEach((u) => {
         u.retreating = false;
         u.enemy = victim!.id;
         u.target = undefined;
         u.moveEngage = false;
+        u.formationSpeed = undefined;
         u.nav = undefined;
         u.repairTarget = undefined;
         if (u.type === "worker") {
@@ -2758,8 +2822,9 @@ export default function Home() {
         if (u.garrisonedAt) ejectFromIntelRelay(g, u);
         u.retreating = false;
         u.enemy = undefined;
-        u.target = { x: wx + (i % 3) * 26, y: wy + Math.floor(i / 3) * 26 };
+        u.target = formation.get(u.id) || { x: wx + (i % 3) * 26, y: wy + Math.floor(i / 3) * 26 };
         u.moveEngage = u.type !== "worker" && g.mode === "move-engage";
+        u.formationSpeed = formationSpeed;
         if (u.moveEngage) u.stance = "pursue";
         u.nav = undefined;
         u.repairTarget = undefined;
@@ -3113,6 +3178,7 @@ export default function Home() {
           unit.retreating = false;
           unit.moveEngage = false;
           unit.patrol = undefined;
+          unit.formationSpeed = undefined;
           if (name === "hold") {
             unit.target = undefined;
             unit.enemy = undefined;
@@ -3150,6 +3216,7 @@ export default function Home() {
           unit.nav = undefined;
           unit.retreating = true;
           unit.moveEngage = false;
+          unit.formationSpeed = undefined;
           unit.target = { x: hq.x + (index % 3) * 28 - 28, y: hq.y + 95 + Math.floor(index / 3) * 24 };
         });
         g.message = "RETREAT ORDER — units move 20% faster and reinforce at HQ, but will not engage en route.";
@@ -3908,6 +3975,7 @@ export default function Home() {
             u.target = undefined;
             u.nav = undefined;
             u.moveEngage = false;
+            u.formationSpeed = undefined;
           } else {
             moveUnitToward(g, u, u.target, dt);
           }
@@ -3931,7 +3999,7 @@ export default function Home() {
           if (attackTimers.current[u.id] <= 0) {
             const wasAlive = combatTarget.hp > 0,
               level = u.level || 1,
-              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * terrainMultiplier(g, u, combatTarget));
+              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * structureMultiplier(u, combatTarget) * terrainMultiplier(g, u, combatTarget));
             const relayShield = isUnit(combatTarget) && combatTarget.garrisonedAt
               ? (g.objectives || []).find((objective) => objective.id === combatTarget.garrisonedAt && intelRelayOperational(objective))
               : undefined;
@@ -4011,6 +4079,7 @@ export default function Home() {
             u.target = undefined;
             u.nav = undefined;
             u.moveEngage = false;
+            u.formationSpeed = undefined;
           }
         } else moveUnitToward(g, u, u.target, dt);
       }
@@ -5859,6 +5928,13 @@ export default function Home() {
             g.selected = g.selected.includes(hit.id)
               ? g.selected.filter((id) => id !== hit.id)
               : [...g.selected, hit.id];
+          } else if (unit && unit.type !== "worker") {
+            const currentCombatSelection = g.units.filter((candidate) =>
+              candidate.team === "player" && candidate.type !== "worker" && g.selected.includes(candidate.id));
+            const selectionContainsOnlyCombat = currentCombatSelection.length === g.selected.length;
+            g.selected = selectionContainsOnlyCombat
+              ? [...new Set([...g.selected, unit.id])]
+              : [unit.id];
           } else {
             g.selected = [hit.id];
           }
@@ -6302,6 +6378,38 @@ export default function Home() {
           <span>Secured Intel Relays grant +5% DMG each · stacks to +10%</span>
         </div>
         <div className="command-center">
+          {ui.selectedCombat > 1 && ui.selectedWorkers === 0 ? (
+            <div className="formation-panel">
+              <div className="formation-header">
+                <div><small>FORMATION</small><b>{ui.selectedCombat} UNITS</b></div>
+                <button onClick={() => action("deselect")}>CLEAR</button>
+              </div>
+              <div className="formation-grid" aria-label="Selected formation units">
+                {ui.selectedUnitCards.map((unit) => (
+                  <button
+                    key={unit.id}
+                    className={`formation-unit-card unit-${unit.type}`}
+                    onClick={() => removeSelectedUnit(unit.id)}
+                    aria-label={`Remove ${unitName(unit.type)} from formation`}
+                  >
+                    <span className={`command-art unit-${unit.type}`} aria-hidden="true" />
+                    <span className="formation-unit-info">
+                      <b>{unitName(unit.type)}</b>
+                      <small>R{unit.level}</small>
+                      <i><em style={{ width: `${Math.max(0, unit.hp / unit.max * 100)}%` }} /></i>
+                    </span>
+                    <span className="formation-remove" aria-hidden="true">−</span>
+                  </button>
+                ))}
+              </div>
+              <div className="formation-orders" aria-label="Formation orders">
+                <button onClick={() => action("move")} aria-label="Direct move" title="Direct move">➤</button>
+                <button onClick={() => action("pursue")} aria-label="Pursue" title="Pursue">⌖</button>
+                <button onClick={() => action("patrol")} aria-label="Patrol" title="Patrol">⇄</button>
+                <button className="retreat" onClick={() => action("retreat")} aria-label="Retreat" title="Retreat">↩</button>
+              </div>
+            </div>
+          ) : (<>
           <div className="command-context" aria-label="Current command menu">
             {(commandTab === "buildings" || commandTab === "tech") ? (
               <button className="context-back" onClick={() => setCommandTab("units")}>
@@ -6434,6 +6542,7 @@ export default function Home() {
               </div>
             )}
           </div>
+          </>)}
         </div>
       </section>
       <footer>
