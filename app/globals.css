@@ -18,6 +18,8 @@ body {
   font-family: Arial, Helvetica, sans-serif;
   overflow: hidden;
   touch-action: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 .game-shell {
   height: 100dvh;
@@ -1644,6 +1646,17 @@ header {
   box-shadow: inset 0 3px var(--gold);
 }
 .actions small { white-space: normal; }
+.command-center button,
+.command-center button > span,
+.command-center button small,
+.production-empty,
+.production-empty small,
+.tech-report,
+.tech-report small {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
 .production-empty {
   min-width: min(440px, 100%);
   min-height: 72px;
@@ -1706,6 +1719,9 @@ header {
   color: #effff9;
 }
 .selection-command-header .command-tab-art {
+  grid-row: 1 / 3;
+}
+.selection-command-header .command-tab-tech {
   grid-row: 1 / 3;
 }
 .selection-command-header b {
@@ -2039,11 +2055,15 @@ header {
   .selection-command-header b,
   .selection-command-header small {
     line-height: 1.1;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   .actions {
     min-height: 0;
-    grid-auto-rows: 74px;
+    grid-auto-rows: minmax(74px, auto);
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior-y: contain;
@@ -2053,7 +2073,28 @@ header {
   }
 
   .actions button {
-    height: 74px;
+    height: auto;
+    min-height: 74px;
+    overflow: visible;
+  }
+
+  .actions button > span:last-child {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .actions button span,
+  .actions button small,
+  .production-empty,
+  .production-empty small,
+  .tech-report,
+  .tech-report small,
+  .context-back span,
+  .context-back small {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   .pause-menu {
