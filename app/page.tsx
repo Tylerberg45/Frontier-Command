@@ -212,6 +212,8 @@ type Game = {
   enemyStrategy?: "rush" | "balanced" | "tech";
   enemyDoctrineKnown?: boolean;
   scoutedEnemyDoctrine?: Doctrine | "none";
+  /** Player-local, persistent unit squads. Slots are intentionally limited to 1–4. */
+  squads?: Record<number, number[]>;
   mapVersion?: number;
 };
 
@@ -1476,6 +1478,7 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
     fogEnabled,
     matchStats: emptyStats(),
     selected: [],
+    squads: {},
     camera: { x: 440, y: PLAYER_BASE.y },
     zoom: 1,
     mode: "select",
@@ -1649,6 +1652,7 @@ function guestPerspective(authoritative: Game, local: Game | null, firstSnapshot
   view.selected = (local?.selected || []).filter((id) =>
     [...view.units, ...view.buildings].some((object) => object.id === id && object.team === "player"),
   );
+  view.squads = structuredClone(local?.squads || {});
   view.mode = local?.mode || "select";
   view.message = local?.message || "PRIVATE 1V1 CONNECTED — destroy the opposing command core.";
   view.fogSeen = local?.fogSeen?.length === FOG_COUNT ? [...local.fogSeen] : Array(FOG_COUNT).fill(0);
@@ -1753,6 +1757,14 @@ function hydrateGame(parsed: Game, message: string): Game {
     aiAttackAt,
     adaptive: savedAdaptive,
     matchStats: { ...emptyStats(), ...(parsed.matchStats || {}) },
+    squads: Object.fromEntries(
+      [1, 2, 3, 4].map((slot) => [
+        slot,
+        (Array.isArray(parsed.squads?.[slot]) ? parsed.squads![slot] : []).filter((id) =>
+          parsed.units.some((unit) => unit.id === id && unit.team === "player" && unit.hp > 0),
+        ),
+      ]),
+    ),
     fogSeen: Array.isArray(parsed.fogSeen) && parsed.fogSeen.length === FOG_COUNT
       ? parsed.fogSeen.map((cell) => (cell ? 1 : 0))
       : Array(FOG_COUNT).fill(0),
@@ -1961,7 +1973,6 @@ export default function Home() {
     last = useRef(0),
     attackTimers = useRef<Record<number, number>>({}),
     lastTap = useRef<{ id: number; time: number } | null>(null),
-    controlGroups = useRef<Record<number, number[]>>({}),
     lastGroupKey = useRef<{ group: number; time: number } | null>(null),
     matchStarted = useRef(false),
     peer = useRef<PeerSession | null>(null),
@@ -2021,6 +2032,7 @@ export default function Home() {
     repairingWorkers: 0,
     idleWorkers: 0,
     selectedUnitCards: [] as Array<{ id: number; type: Unit["type"]; hp: number; max: number; level: number }>,
+    squadSlots: [1, 2, 3, 4].map((slot) => ({ slot, count: 0, selected: false })),
   });
   const [saveStatus, setSaveStatus] = useState("AUTOSAVE ON");
   const [moveChooser, setMoveChooser] = useState<{
@@ -2044,6 +2056,8 @@ export default function Home() {
   const [commandTab, setCommandTab] = useState<"buildings" | "units" | "tech">(
     "units",
   );
+  const [activeSquad, setActiveSquad] = useState<number | null>(null);
+  const [squadEdit, setSquadEdit] = useState(false);
   const commandSelection = useRef("");
   const [tutorialsEnabled, setTutorialsEnabled] = useState(true);
   const [dismissedTips, setDismissedTips] = useState<string[]>([]);
@@ -2178,6 +2192,14 @@ export default function Home() {
       setCommandTab("units");
     }
     const chosenUnits = chosen.filter(isUnit);
+    const livePlayerUnitIds = new Set(g.units.filter((unit) => unit.team === "player" && unit.hp > 0).map((unit) => unit.id));
+    const squads = g.squads ||= {};
+    for (const slot of [1, 2, 3, 4]) squads[slot] = [...new Set((squads[slot] || []).filter((id) => livePlayerUnitIds.has(id)))];
+    const selectedUnitIds = chosenUnits.filter((unit) => unit.team === "player").map((unit) => unit.id).sort((a, b) => a - b);
+    const squadSlots = [1, 2, 3, 4].map((slot) => {
+      const ids = [...(squads[slot] || [])].sort((a, b) => a - b);
+      return { slot, count: ids.length, selected: ids.length > 0 && ids.length === selectedUnitIds.length && ids.every((id, index) => id === selectedUnitIds[index]) };
+    });
     const chosenTypes = [...new Set(chosenUnits.map((unit) => unit.type))];
     const chosenCipherModes = [...new Set(chosenUnits.filter((unit) => unit.type === "cipher").map((unit) => unit.cipherMode || "mobile"))];
     const chosenStances = [...new Set(chosenUnits
@@ -2276,13 +2298,24 @@ export default function Home() {
       selectedUnitCards: chosenUnits
         .filter((unit) => unit.team === "player" && isCombatUnit(unit))
         .map((unit) => ({ id: unit.id, type: unit.type, hp: unit.hp, max: unit.max, level: unit.level || 1 })),
+      squadSlots,
     });
   };
 
   const removeSelectedUnit = (id: number) => {
     const g = game.current;
+    if (squadEdit && activeSquad) {
+      const squads = g.squads ||= {};
+      squads[activeSquad] = (squads[activeSquad] || []).filter((memberId) => memberId !== id);
+      if (!squads[activeSquad].length) {
+        setSquadEdit(false);
+        setActiveSquad(null);
+      }
+    }
     g.selected = g.selected.filter((selectedId) => selectedId !== id);
-    g.message = g.selected.length ? `${g.selected.length} units selected.` : "Selection cleared.";
+    g.message = squadEdit && activeSquad
+      ? `Squad ${activeSquad} updated · ${g.selected.length} unit${g.selected.length === 1 ? "" : "s"}.`
+      : g.selected.length ? `${g.selected.length} units selected.` : "Selection cleared.";
     lastTap.current = null;
     sync();
   };
@@ -3188,6 +3221,8 @@ export default function Home() {
     leaveMultiplayer();
     localStorage.removeItem(SAVE_KEY);
     game.current = initial({ fogEnabled });
+    setActiveSquad(null);
+    setSquadEdit(false);
     attackTimers.current = {};
     matchStarted.current = true;
     setSaveStatus("NEW MATCH");
@@ -3198,6 +3233,8 @@ export default function Home() {
   };
   const continueMatch = () => {
     game.current = loadGame();
+    setActiveSquad(null);
+    setSquadEdit(false);
     attackTimers.current = {};
     matchStarted.current = true;
     setHomeOpen(false);
@@ -3276,9 +3313,12 @@ export default function Home() {
       return;
     }
     g.matchStats.playerActions++;
+    if (squadEdit) setSquadEdit(false);
     if (name === "deselect") {
       g.selected = [];
       g.mode = "select";
+      setActiveSquad(null);
+      setSquadEdit(false);
       g.message = "Selection cleared.";
       lastTap.current = null;
       sync();
@@ -3288,6 +3328,8 @@ export default function Home() {
       localStorage.removeItem(SAVE_KEY);
       setHasAutosave(false);
       game.current = initial({ fogEnabled: g.fogEnabled });
+      setActiveSquad(null);
+      setSquadEdit(false);
       attackTimers.current = {};
       setSaveStatus("NEW MATCH");
       sync();
@@ -3712,6 +3754,65 @@ export default function Home() {
     sync();
   };
 
+  const recallSquad = (slot: number, center = false) => {
+    const g = game.current;
+    const live = new Set(g.units.filter((unit) => unit.team === "player" && unit.hp > 0).map((unit) => unit.id));
+    const squads = g.squads ||= {};
+    const members = [...new Set((squads[slot] || []).filter((id) => live.has(id)))];
+    squads[slot] = members;
+    if (!members.length) {
+      g.message = `Squad ${slot} is empty · select units, then tap this slot.`;
+      sync();
+      return;
+    }
+    g.selected = members;
+    g.mode = "select";
+    setActiveSquad(slot);
+    setSquadEdit(false);
+    g.message = `Squad ${slot} selected · ${members.length} unit${members.length === 1 ? "" : "s"}.`;
+    if (center) centerOnSelection();
+    else sync();
+  };
+
+  const handleSquadSlot = (slot: number) => {
+    const g = game.current;
+    const members = g.squads?.[slot] || [];
+    if (!members.length) {
+      const selectedUnits = g.units.filter((unit) => unit.team === "player" && unit.hp > 0 && g.selected.includes(unit.id));
+      if (!selectedUnits.length) {
+        g.message = `Select units first, then tap empty Squad ${slot}.`;
+        sync();
+        return;
+      }
+      (g.squads ||= {})[slot] = selectedUnits.map((unit) => unit.id);
+      setActiveSquad(slot);
+      setSquadEdit(false);
+      lastGroupKey.current = null;
+      g.message = `Squad ${slot} created · ${selectedUnits.length} unit${selectedUnits.length === 1 ? "" : "s"}.`;
+      sync();
+      return;
+    }
+    const now = performance.now();
+    const doubleTap = lastGroupKey.current?.group === slot && now - lastGroupKey.current.time < 420;
+    lastGroupKey.current = { group: slot, time: now };
+    recallSquad(slot, doubleTap);
+  };
+
+  const toggleSquadEditor = () => {
+    const g = game.current;
+    if (!activeSquad || !(g.squads?.[activeSquad] || []).length) return;
+    const next = !squadEdit;
+    setSquadEdit(next);
+    if (next) {
+      g.selected = [...g.squads![activeSquad]];
+      g.mode = "select";
+      g.message = `EDIT SQUAD ${activeSquad} · tap friendly units to add or remove them.`;
+    } else {
+      g.message = `Squad ${activeSquad} saved.`;
+    }
+    sync();
+  };
+
   const selectNextIdleWorker = () => {
     const g = game.current;
     const idleWorkers = g.units.filter((unit) => isIdleWorker(g, unit));
@@ -3769,34 +3870,25 @@ export default function Home() {
       }
       if (pausedRef.current || g.over) return;
 
-      if (/^[1-9]$/.test(key)) {
+      if (/^[1-4]$/.test(key)) {
         const group = Number(key);
         if (e.ctrlKey || e.metaKey) {
           e.preventDefault();
-          const valid = new Set([...g.units, ...g.buildings].map((o) => o.id));
-          controlGroups.current[group] = g.selected.filter((id) => valid.has(id));
-          g.message = controlGroups.current[group].length
-            ? `Control group ${group} assigned (${controlGroups.current[group].length}).`
-            : `Control group ${group} cleared.`;
+          const valid = new Set(g.units.filter((unit) => unit.team === "player" && unit.hp > 0).map((unit) => unit.id));
+          const members = g.selected.filter((id) => valid.has(id));
+          (g.squads ||= {})[group] = members;
+          setActiveSquad(members.length ? group : null);
+          setSquadEdit(false);
+          g.message = members.length
+            ? `Squad ${group} assigned (${members.length}).`
+            : `Squad ${group} cleared.`;
           lastGroupKey.current = null;
           sync();
         } else {
-          const valid = new Set([...g.units, ...g.buildings].map((o) => o.id));
-          const recalled = (controlGroups.current[group] || []).filter((id) => valid.has(id));
-          controlGroups.current[group] = recalled;
-          if (recalled.length) {
-            const now = performance.now();
-            const doublePress = lastGroupKey.current?.group === group && now - lastGroupKey.current.time < 400;
-            g.selected = recalled;
-            g.mode = "select";
-            g.message = `Control group ${group} selected (${recalled.length}).`;
-            lastGroupKey.current = { group, time: now };
-            if (doublePress) centerOnSelection();
-            else sync();
-          } else {
-            g.message = `Control group ${group} is empty.`;
-            sync();
-          }
+          const now = performance.now();
+          const doublePress = lastGroupKey.current?.group === group && now - lastGroupKey.current.time < 420;
+          lastGroupKey.current = { group, time: now };
+          recallSquad(group, doublePress);
         }
         return;
       }
@@ -6360,11 +6452,17 @@ export default function Home() {
             u.team === "player" && !u.garrisonedAt && u.x > x1 && u.x < x2 && u.y > y1 && u.y < y2,
         )
         .map((u) => u.id);
-      g.selected = e.shiftKey
-        ? [...new Set([...g.selected, ...boxed])]
-        : boxed;
+      if (squadEdit && activeSquad) {
+        const squads = g.squads ||= {};
+        squads[activeSquad] = [...new Set([...(squads[activeSquad] || []), ...boxed])];
+        g.selected = [...squads[activeSquad]];
+      } else {
+        g.selected = e.shiftKey
+          ? [...new Set([...g.selected, ...boxed])]
+          : boxed;
+      }
       g.message = g.selected.length
-        ? `${g.selected.length} units selected.`
+        ? squadEdit && activeSquad ? `Squad ${activeSquad} updated · ${g.selected.length} units.` : `${g.selected.length} units selected.`
         : "No units in selection box.";
     } else if (!p.drag) {
       const selectedUnits = g.units.filter(
@@ -6379,6 +6477,29 @@ export default function Home() {
         .filter((unit) => unit.team === "player" && !unit.garrisonedAt)
         .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))
         .find((unit) => Math.hypot(unit.x - wp.x, unit.y - wp.y) < Math.max(42, stats[unit.type].r + 28));
+      if (g.mode === "select" && squadEdit && activeSquad && friendlyUnitTap) {
+        const squads = g.squads ||= {};
+        const members = squads[activeSquad] || [];
+        squads[activeSquad] = members.includes(friendlyUnitTap.id)
+          ? members.filter((id) => id !== friendlyUnitTap.id)
+          : [...members, friendlyUnitTap.id];
+        g.selected = [...squads[activeSquad]];
+        g.message = `Squad ${activeSquad} updated · ${g.selected.length} unit${g.selected.length === 1 ? "" : "s"}.`;
+        if (!g.selected.length) {
+          setSquadEdit(false);
+          setActiveSquad(null);
+        }
+        lastTap.current = null;
+        pointer.current = null;
+        sync();
+        return;
+      }
+      if (g.mode === "select" && squadEdit && activeSquad) {
+        g.message = `EDIT SQUAD ${activeSquad} · tap a friendly unit, or tap Done.`;
+        pointer.current = null;
+        sync();
+        return;
+      }
       const relayTap = (g.objectives || [])
         .filter((objective) => objectiveIntel(g, objective).visible)
         .sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y))[0];
@@ -6842,6 +6963,24 @@ export default function Home() {
             −
           </button>
         </div>
+        <div className="squad-dock" aria-label="Saved squads">
+          {ui.squadSlots.map((squad) => (
+            <button
+              key={squad.slot}
+              className={`${squad.selected ? "selected " : ""}${activeSquad === squad.slot ? "active " : ""}${squad.count ? "" : "empty"}`}
+              onClick={() => handleSquadSlot(squad.slot)}
+              aria-label={squad.count ? `Select Squad ${squad.slot} with ${squad.count} units. Double tap to center.` : `Create Squad ${squad.slot} from selected units`}
+              title={squad.count ? `Squad ${squad.slot} · ${squad.count} units` : `Create Squad ${squad.slot}`}
+            >
+              <b>{squad.slot}</b><small>{squad.count || "+"}</small>
+            </button>
+          ))}
+          {activeSquad && (ui.squadSlots.find((squad) => squad.slot === activeSquad)?.count || 0) > 0 && (
+            <button className={`squad-edit ${squadEdit ? "editing" : ""}`} onClick={toggleSquadEditor} aria-pressed={squadEdit} aria-label={`${squadEdit ? "Finish editing" : "Edit"} Squad ${activeSquad}`}>
+              <b>{squadEdit ? "✓" : "±"}</b><small>{squadEdit ? "DONE" : "EDIT"}</small>
+            </button>
+          )}
+        </div>
         {ui.idleWorkers > 0 && (
           <button
             className="idle-worker-button"
@@ -6884,7 +7023,7 @@ export default function Home() {
                 <b>DESKTOP CONTROLS</b>
                 <span>RIGHT-CLICK MOVE / ATTACK · SHIFT ADD SELECT</span>
                 <span>WASD / ARROWS PAN · WHEEL ZOOM · SPACE CENTER</span>
-                <span>CTRL+1–9 SAVE GROUP · 1–9 RECALL · DOUBLE-PRESS CENTER</span>
+                <span>CTRL+1–4 SAVE SQUAD · 1–4 RECALL · DOUBLE-PRESS CENTER</span>
                 <span>WORKER SELECTED: R REFINERY · B BARRACKS · T TURRET</span>
                 <span>HQ SELECTED: V WORKER · Q RESEARCH · G WAYPOINT · J PACK/DEPLOY · L MOVE CRAWLER</span>
                 <span>BARRACKS SELECTED: I TROOPER · K TANK · N DRONE · G WAYPOINT</span>
