@@ -499,6 +499,22 @@ function counterMultiplier(attacker: Unit, target: Unit | Building) {
   if (attacker.type === "tank" && targetType === "trooper") return 1.55;
   return 1;
 }
+function structureAssaultMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
+  if (isUnit(target)) return 1;
+  const nearbyTypes = new Set(
+    g.units
+      .filter((unit) =>
+        unit.team === attacker.team &&
+        unit.hp > 0 &&
+        unit.type !== "worker" &&
+        Math.hypot(unit.x - target.x, unit.y - target.y) <= 230,
+      )
+      .map((unit) => unit.type),
+  );
+  const combinedArms = nearbyTypes.size >= 3 ? 1.2 : nearbyTypes.size >= 2 ? 1.08 : 1;
+  const tankSiege = attacker.type === "tank" ? 1.25 : 1;
+  return combinedArms * tankSiege;
+}
 function terrainMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
   const controlled = (g.objectives || []).filter((objective) => objective.owner === attacker.team).length;
   const attackerPlateau = attacker.type !== "drone" && plateauAt(attacker);
@@ -3931,7 +3947,7 @@ export default function Home() {
           if (attackTimers.current[u.id] <= 0) {
             const wasAlive = combatTarget.hp > 0,
               level = u.level || 1,
-              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * terrainMultiplier(g, u, combatTarget));
+              damage = Math.max(1, s.damage * (1 + (level - 1) * 0.18) * supplyMultiplier(u) * doctrineMultiplier(g, u) * counterMultiplier(u, combatTarget) * structureAssaultMultiplier(g, u, combatTarget) * terrainMultiplier(g, u, combatTarget));
             const relayShield = isUnit(combatTarget) && combatTarget.garrisonedAt
               ? (g.objectives || []).find((objective) => objective.id === combatTarget.garrisonedAt && intelRelayOperational(objective))
               : undefined;
