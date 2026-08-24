@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import balance from "@/game-content/v1/balance.json";
 import {
   hostRoom,
   joinRoom,
@@ -67,6 +66,8 @@ type Unit = {
   /** Workers with this enabled repair friendly units and structures instead of mining. */
   autoRepair?: boolean;
   repairTarget?: number;
+  /** Intel relay being repaired. Separate because relay IDs overlap unit/building IDs. */
+  repairRelayTarget?: number;
   /** Persistent worker duty. Move orders become hold duty instead of resuming mining. */
   workerMode?: "mine" | "hold" | "construct" | "repair";
   buildTarget?: number;
@@ -340,8 +341,8 @@ function saveResult(result: "won" | "lost", g: Game) {
 
 // The battlefield is intentionally larger than the viewport. The minimap is the
 // fast way to jump around it on touch screens.
-const W = balance.world.width,
-  H = balance.world.height;
+const W = 3000,
+  H = 1900;
 const PLAYER_BASE = { x: 320, y: H / 2 } as const;
 const ENEMY_BASE = { x: W - 320, y: H / 2 } as const;
 const FOG_CELL = 50;
@@ -371,7 +372,7 @@ const TERRAIN_RIDGES = TACTICAL_PLATEAUS.flatMap((plateau, plateauIndex) =>
   }).filter((ridge): ridge is { id: number; x: number; y: number; r: number; plateauId: number } => Boolean(ridge)),
 );
 const HIGH_GROUND_RADIUS = 92;
-const UPLINK_DAMAGE_BONUS = balance.objectives.damageBonusEach;
+const UPLINK_DAMAGE_BONUS = 0.05;
 type VisionSource = P & { r: number };
 
 function teamVision(g: Game, team: Unit["team"]): VisionSource[] {
@@ -421,43 +422,44 @@ function revealFog(g: Game) {
     }
 }
 const stats = {
-  worker: { r: balance.units.worker.radius, speed: balance.units.worker.speed, damage: balance.units.worker.damage, range: balance.units.worker.range, rate: balance.units.worker.attackSeconds },
-  trooper: { r: balance.units.trooper.radius, speed: balance.units.trooper.speed, damage: balance.units.trooper.damage, range: balance.units.trooper.range, rate: balance.units.trooper.attackSeconds },
-  tank: { r: balance.units.tank.radius, speed: balance.units.tank.speed, damage: balance.units.tank.damage, range: balance.units.tank.range, rate: balance.units.tank.attackSeconds },
-  drone: { r: balance.units.drone.radius, speed: balance.units.drone.speed, damage: balance.units.drone.damage, range: balance.units.drone.range, rate: balance.units.drone.attackSeconds },
+  worker: { r: 13, speed: 52, damage: 3, range: 55, rate: 0.85 },
+  trooper: { r: 12, speed: 66, damage: 7, range: 105, rate: 0.55 },
+  tank: { r: 19, speed: 38, damage: 20, range: 145, rate: 1.15 },
+  drone: { r: 17, speed: 82, damage: 13, range: 130, rate: 0.78 },
 };
 const buildingStats = {
-  hq: { r: balance.structures.hq.radius },
-  refinery: { r: balance.structures.refinery.radius },
-  barracks: { r: balance.structures.barracks.radius },
-  turret: { r: balance.structures.turret.radius },
+  hq: { r: 54 },
+  refinery: { r: 42 },
+  barracks: { r: 44 },
+  turret: { r: 28 },
 };
-const buildingHealth = { hq: balance.structures.hq.health, refinery: balance.structures.refinery.health, barracks: balance.structures.barracks.health, turret: balance.structures.turret.health };
-const turretStats = { damage: balance.turret.damage, range: balance.turret.range, rate: balance.turret.attackSeconds };
-const buildingBuildTime = { refinery: balance.structures.refinery.buildSeconds, barracks: balance.structures.barracks.buildSeconds, turret: balance.structures.turret.buildSeconds };
-const FORTIFY_DURATION = balance.research.fortifySeconds;
-const unitHealth = { worker: balance.units.worker.health, trooper: balance.units.trooper.health, tank: balance.units.tank.health, drone: balance.units.drone.health };
-const unitCost = { worker: balance.units.worker.cost, trooper: balance.units.trooper.cost, tank: balance.units.tank.cost, drone: balance.units.drone.cost };
-const unitBuildTime = { worker: balance.units.worker.buildSeconds, trooper: balance.units.trooper.buildSeconds, tank: balance.units.tank.buildSeconds, drone: balance.units.drone.buildSeconds };
-const MAX_QUEUE = balance.production.maxQueue;
-const BUILD_COST = { refinery: balance.structures.refinery.alloyCost, barracks: balance.structures.barracks.alloyCost, turret: balance.structures.turret.alloyCost } as const;
-const FORTIFY_INTEL_COST = balance.research.fortifyIntelCost;
-const OBJECTIVE_CAPTURE_TIME = balance.objectives.captureSeconds;
-const OBJECTIVE_CAPTURE_RADIUS = balance.objectives.captureRadius;
-const RELAY_GARRISON_CAPACITY = balance.objectives.garrisonCapacity;
-const RELAY_RANGE_MULTIPLIER = balance.objectives.garrisonRangeMultiplier;
-const RELAY_MAX_HP = balance.objectives.relayMaxHp;
-const RELAY_REBUILD_COOLDOWN = balance.objectives.rebuildCooldownSeconds;
-const RELAY_REBUILD_DURATION = balance.objectives.rebuildDurationSeconds;
-const OBJECTIVE_INTEL_RATE = balance.objectives.intelPerSecond;
-const SUPPLY_CAPACITY = balance.supply.capacitySeconds;
-const SUPPLY_RADIUS = balance.supply.radius;
-const DOCTRINE_INTEL_COST = balance.research.doctrineIntelCost;
-const DOCTRINE_DURATION = balance.research.doctrineSeconds;
-const PRODUCTION_COOLDOWN = balance.production.cooldownSeconds;
-const UPKEEP_SOFT_CAP = balance.economy.upkeepSoftCap;
-const REPAIR_RATE = balance.repair.healthPerSecond;
-const REPAIR_ALLOY_PER_HP = balance.repair.alloyPerHealth;
+const buildingHealth = { hq: 900, refinery: 440, barracks: 520, turret: 360 };
+const turretStats = { damage: 12, range: 210, rate: 0.68 };
+const buildingBuildTime = { refinery: 6, barracks: 6, turret: 15 };
+const FORTIFY_DURATION = 40;
+const unitHealth = { worker: 70, trooper: 95, tank: 240, drone: 135 };
+const unitCost = { worker: 150, trooper: 125, tank: 400, drone: 300 };
+const unitBuildTime = { worker: 8, trooper: 6, tank: 15, drone: 12 };
+const MAX_QUEUE = 6;
+const BUILD_COST = { refinery: 260, barracks: 360, turret: 240 } as const;
+const FORTIFY_INTEL_COST = 180;
+const OBJECTIVE_CAPTURE_TIME = 10;
+const OBJECTIVE_CAPTURE_RADIUS = 105;
+const OBJECTIVE_INTEL_RATE = 0.5;
+const RELAY_GARRISON_CAPACITY = 4;
+const RELAY_RANGE_MULTIPLIER = 1.25;
+const RELAY_MAX_HP = 700;
+const RELAY_REBUILD_COOLDOWN = 12;
+const RELAY_REBUILD_DURATION = 18;
+const RELAY_RESOURCE_CLEARANCE = 190;
+const SUPPLY_CAPACITY = 12;
+const SUPPLY_RADIUS = 470;
+const DOCTRINE_INTEL_COST = 140;
+const DOCTRINE_DURATION = 30;
+const PRODUCTION_COOLDOWN = 3;
+const UPKEEP_SOFT_CAP = 10;
+const REPAIR_RATE = 24;
+const REPAIR_ALLOY_PER_HP = 0.12;
 const MAINTENANCE_PATROL_SCAN = 185;
 const SENTRY_RANGE_MULTIPLIER = 1.35;
 const TUTORIALS_KEY = "frontier-command-tutorials-v1";
@@ -501,7 +503,7 @@ function terrainMultiplier(g: Game, attacker: Unit, target: Unit | Building) {
   const controlled = (g.objectives || []).filter((objective) => objective.owner === attacker.team).length;
   const attackerPlateau = attacker.type !== "drone" && plateauAt(attacker);
   const targetPlateau = plateauAt(target);
-  const elevation = attackerPlateau && attackerPlateau.id !== targetPlateau?.id ? balance.terrain.plateauDamageMultiplier : 1;
+  const elevation = attackerPlateau && attackerPlateau.id !== targetPlateau?.id ? 1.1 : 1;
   return (1 + Math.min(2, controlled) * UPLINK_DAMAGE_BONUS) * elevation;
 }
 
@@ -637,6 +639,7 @@ function normalizeUnits(units: Unit[]): Unit[] {
       supply: Math.max(0, Math.min(SUPPLY_CAPACITY, Number(raw.supply) || SUPPLY_CAPACITY)),
       autoRepair: Boolean(raw.autoRepair),
       repairTarget: Number.isInteger(raw.repairTarget) ? raw.repairTarget : undefined,
+      repairRelayTarget: Number.isInteger(raw.repairRelayTarget) ? raw.repairRelayTarget : undefined,
       resourceTarget: Number.isInteger(raw.resourceTarget) ? raw.resourceTarget : undefined,
       workerMode:
         raw.type === "worker" && ["mine", "hold", "construct", "repair"].includes(raw.workerMode || "")
@@ -728,6 +731,7 @@ function queueWorkerConstruction(worker: Unit, buildingId: number) {
   worker.workerMode = "construct";
   worker.resourceTarget = undefined;
   worker.repairTarget = undefined;
+  worker.repairRelayTarget = undefined;
   worker.enemy = undefined;
   worker.target = undefined;
   worker.nav = undefined;
@@ -743,6 +747,7 @@ function assignWorkerToPendingConstruction(worker: Unit, buildingId: number) {
   worker.workerMode = "construct";
   worker.resourceTarget = undefined;
   worker.repairTarget = undefined;
+  worker.repairRelayTarget = undefined;
   worker.enemy = undefined;
   worker.target = undefined;
   worker.nav = undefined;
@@ -753,6 +758,29 @@ function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "h
   worker.buildTarget = undefined;
   worker.workerMode = nextMode;
   worker.resourceTarget = undefined;
+  worker.repairTarget = undefined;
+  worker.repairRelayTarget = undefined;
+}
+
+function assignWorkersToRelayRepair(workers: Unit[], relay: Objective) {
+  workers.forEach((worker) => {
+    clearWorkerConstruction(worker, "repair");
+    worker.repairRelayTarget = relay.id;
+    worker.workerMode = "repair";
+    worker.target = undefined;
+    worker.enemy = undefined;
+    worker.nav = undefined;
+  });
+}
+
+function repairableRelayNear(g: Game, team: Unit["team"], x: number, y: number) {
+  return (g.objectives || [])
+    .filter((relay) =>
+      relay.owner === team &&
+      intelRelayOperational(relay) &&
+      relay.hp < relay.max,
+    )
+    .sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0];
 }
 
 function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number) {
@@ -763,6 +791,7 @@ function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number
     worker.resourceTarget = resourceIndex;
     worker.autoRepair = false;
     worker.repairTarget = undefined;
+    worker.repairRelayTarget = undefined;
     worker.enemy = undefined;
     worker.target = undefined;
     worker.nav = undefined;
@@ -780,7 +809,7 @@ function isIdleWorker(g: Game, unit: Unit) {
       building.id === id && building.team === unit.team && building.hp > 0 && (building.progress ?? 1) < 1,
     ));
   return !hasPendingConstruction &&
-    !unit.target && !unit.enemy && !unit.nav && !unit.repairTarget &&
+    !unit.target && !unit.enemy && !unit.nav && !unit.repairTarget && !unit.repairRelayTarget &&
     !unit.mining && !unit.building && !unit.repairing &&
     (unit.workerMode === "hold" || unit.workerMode === "repair" || Boolean(unit.autoRepair));
 }
@@ -1053,7 +1082,7 @@ function resourceCluster(
   });
 }
 
-function balancedResourceFields(): Crystal[] {
+function balancedResourceFields(objectives: Objective[]): Crystal[] {
   const openingOffset = 390 + Math.random() * 90;
   const openingY = PLAYER_BASE.y - 170 + Math.random() * 340;
   const playerCenter = { x: PLAYER_BASE.x + openingOffset, y: openingY };
@@ -1062,20 +1091,20 @@ function balancedResourceFields(): Crystal[] {
   const contestedOffset = -150 + Math.random() * 300;
   const contestedA = { x: W / 2 + contestedOffset, y: H / 2 - contestedSpread };
   const contestedB = { x: W / 2 - contestedOffset, y: H / 2 + contestedSpread };
-  return [
+  return clearRelayApproaches([
     ...resourceCluster(playerCenter, 4, 1300, ["credits", "alloy"]),
     ...resourceCluster(enemyCenter, 4, 1300, ["credits", "alloy"]),
     ...resourceCluster(contestedA, 3, 1250, ["credits", "credits", "alloy"]),
     ...resourceCluster(contestedB, 3, 1250, ["alloy", "alloy", "credits"]),
-  ];
+  ], objectives);
 }
 
-function randomResourceFields(): Crystal[] {
-  return balancedResourceFields();
+function randomResourceFields(objectives: Objective[]): Crystal[] {
+  return balancedResourceFields(objectives);
 }
 
-function multiplayerResourceFields(): Crystal[] {
-  return balancedResourceFields();
+function multiplayerResourceFields(objectives: Objective[]): Crystal[] {
+  return balancedResourceFields(objectives);
 }
 
 function mapObjectives(): Objective[] {
@@ -1085,6 +1114,26 @@ function mapObjectives(): Objective[] {
     { id: 1, x: W / 2 + horizontalOffset, y: H / 2 - verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
     { id: 2, x: W / 2 - horizontalOffset, y: H / 2 + verticalSpread, owner: "neutral", capture: 0, hp: RELAY_MAX_HP, max: RELAY_MAX_HP },
   ];
+}
+
+/** Keep a full walking/repair lane around every relay, including old saved maps. */
+function clearRelayApproaches(crystals: Crystal[], objectives: Objective[]): Crystal[] {
+  return crystals.map((crystal, index) => {
+    const moved = { ...crystal };
+    for (const objective of objectives) {
+      const dx = moved.x - objective.x;
+      const dy = moved.y - objective.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance >= RELAY_RESOURCE_CLEARANCE) continue;
+      const angle = distance > 1
+        ? Math.atan2(dy, dx) + (index % 2 === 0 ? -.08 : .08)
+        : index * 2.399;
+      const clearance = RELAY_RESOURCE_CLEARANCE + (index % 3) * 16;
+      moved.x = Math.round(Math.max(70, Math.min(W - 70, objective.x + Math.cos(angle) * clearance)));
+      moved.y = Math.round(Math.max(70, Math.min(H - 70, objective.y + Math.sin(angle) * clearance)));
+    }
+    return moved;
+  });
 }
 
 function intelRelayOperational(objective: Objective) {
@@ -1179,6 +1228,7 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
   const adaptive = adaptiveDifficulty();
   const easiest = isEasiest(adaptive);
   const fogEnabled = options.fogEnabled ?? true;
+  const objectives = mapObjectives();
   return {
     credits: 650,
     enemyCredits: 550,
@@ -1220,7 +1270,7 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
     shots: [],
     damageNumbers: [],
     attackAlerts: [],
-    objectives: mapObjectives(),
+    objectives,
     units: [
       {
         id: 1,
@@ -1284,7 +1334,7 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
         progress: 1,
       },
     ],
-    crystals: randomResourceFields(),
+    crystals: randomResourceFields(objectives),
   };
 }
 
@@ -1317,8 +1367,8 @@ function initialMultiplayer(options: { fogEnabled?: boolean } = {}): Game {
     { id: 4, team: "player", type: "hq", x: PLAYER_BASE.x, y: PLAYER_BASE.y, hp: 900, max: 900 },
     { id: 5, team: "enemy", type: "hq", x: ENEMY_BASE.x, y: ENEMY_BASE.y, hp: 900, max: 900 },
   ];
-  g.crystals = multiplayerResourceFields();
   g.objectives = mapObjectives();
+  g.crystals = multiplayerResourceFields(g.objectives);
   g.nextId = 20;
   g.camera = { x: 440, y: PLAYER_BASE.y };
   g.selected = [];
@@ -1553,6 +1603,7 @@ function hydrateGame(parsed: Game, message: string): Game {
       : mapObjectives(),
     message,
   };
+  repaired.crystals = clearRelayApproaches(repaired.crystals, repaired.objectives);
   repairGameIds(repaired);
   return repaired;
 }
@@ -1906,7 +1957,7 @@ export default function Home() {
       selectedUnitType: chosenTypes.length === 1 ? chosenTypes[0] : chosenTypes.length ? "mixed" : null,
       selectedStance: chosenStances.length === 1 ? chosenStances[0] : chosenStances.length ? "mixed" : null,
       autoRepair: chosenUnits.some((unit) => unit.type === "worker") && chosenUnits.filter((unit) => unit.type === "worker").every((unit) => unit.autoRepair),
-      repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && unit.repairTarget).length,
+      repairingWorkers: chosenUnits.filter((unit) => unit.type === "worker" && (unit.repairTarget || unit.repairRelayTarget)).length,
       idleWorkers: g.units.filter((unit) => isIdleWorker(g, unit)).length,
     });
   };
@@ -1953,6 +2004,11 @@ export default function Home() {
     }
     if (mode === "repair") {
       const workers = remoteUnits.filter((unit) => unit.type === "worker");
+      const relay = repairableRelayNear(g, "enemy", wx, wy);
+      if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 76) {
+        assignWorkersToRelayRepair(workers, relay);
+        return;
+      }
       const repairable = [...g.buildings, ...g.units]
         .filter((object) => object.team === "enemy" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
         .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
@@ -2014,6 +2070,16 @@ export default function Home() {
     const relay = (g.objectives || [])
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
+      if (
+        units.length > 0 &&
+        units.every((unit) => unit.type === "worker") &&
+        relay.owner === "enemy" &&
+        intelRelayOperational(relay) &&
+        relay.hp < relay.max
+      ) {
+        assignWorkersToRelayRepair(units, relay);
+        return;
+      }
       if (!intelRelayOperational(relay)) return;
       const hostileOccupants = relayOccupants(g, relay, "player");
       if (hostileOccupants.length) {
@@ -2462,6 +2528,16 @@ export default function Home() {
       return;
     }
     if (g.mode === "repair") {
+      const relay = repairableRelayNear(g, "player", wx, wy);
+      if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 76) {
+        assignWorkersToRelayRepair(selectedWorkers, relay);
+        g.mode = "select";
+        g.matchStats.meaningfulActions++;
+        g.matchStats.orders++;
+        g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} repairing Intel Relay · repairs consume alloy.`;
+        sync();
+        return;
+      }
       const repairable = [...g.buildings, ...g.units]
         .filter((object) => object.team === "player" && object.hp > 0 && object.hp < object.max && (isUnit(object) || buildingOperational(object)))
         .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
@@ -2574,6 +2650,19 @@ export default function Home() {
       .filter((objective) => objectiveIntel(g, objective).visible)
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (relay && Math.hypot(relay.x - wx, relay.y - wy) < 72) {
+      if (
+        selectedWorkers.length === ours.length &&
+        relay.owner === "player" &&
+        intelRelayOperational(relay) &&
+        relay.hp < relay.max
+      ) {
+        assignWorkersToRelayRepair(selectedWorkers, relay);
+        g.matchStats.meaningfulActions++;
+        g.matchStats.orders++;
+        g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} repairing Intel Relay · repairs consume alloy.`;
+        sync();
+        return;
+      }
       if (!intelRelayOperational(relay)) {
         const coolingDown = relay.rebuildAt !== undefined && g.time < relay.rebuildAt;
         g.message = coolingDown
@@ -3713,6 +3802,12 @@ export default function Home() {
         }
       }
       if (u.type === "worker" && u.autoRepair && (!u.target || u.stance === "patrol")) {
+        let repairRelay = (g.objectives || []).find((relay) =>
+          relay.id === u.repairRelayTarget &&
+          relay.owner === u.team &&
+          intelRelayOperational(relay) &&
+          relay.hp < relay.max,
+        );
         let repairable = [...g.buildings, ...g.units].find((object) =>
           object.id === u.repairTarget &&
           object.id !== u.id &&
@@ -3721,10 +3816,11 @@ export default function Home() {
           object.hp < object.max &&
           (isUnit(object) || buildingOperational(object)),
         );
-        if (!repairable) {
+        if (!repairable && !repairRelay) {
           u.repairTarget = undefined;
+          u.repairRelayTarget = undefined;
           const scanRadius = u.stance === "patrol" ? MAINTENANCE_PATROL_SCAN : Infinity;
-          repairable = [...g.buildings, ...g.units]
+          const nearestRepairable = [...g.buildings, ...g.units]
             .filter((object) =>
               object.id !== u.id &&
               object.team === u.team &&
@@ -3734,16 +3830,33 @@ export default function Home() {
               Math.hypot(object.x - u.x, object.y - u.y) <= scanRadius,
             )
             .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
-          if (repairable) u.repairTarget = repairable.id;
+          const nearestRelay = (g.objectives || [])
+            .filter((relay) =>
+              relay.owner === u.team &&
+              intelRelayOperational(relay) &&
+              relay.hp < relay.max &&
+              Math.hypot(relay.x - u.x, relay.y - u.y) <= scanRadius,
+            )
+            .sort((a, b) => Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y))[0];
+          if (
+            nearestRelay &&
+            (!nearestRepairable || Math.hypot(nearestRelay.x - u.x, nearestRelay.y - u.y) < Math.hypot(nearestRepairable.x - u.x, nearestRepairable.y - u.y))
+          ) {
+            repairRelay = nearestRelay;
+            u.repairRelayTarget = nearestRelay.id;
+          } else if (nearestRepairable) {
+            repairable = nearestRepairable;
+            u.repairTarget = nearestRepairable.id;
+          }
         }
-        if (repairable) {
+        if (repairable || repairRelay) {
           u.enemy = undefined;
           u.target = undefined;
           u.nav = undefined;
           target = undefined;
         }
       }
-      if (u.stance === "patrol" && u.patrol && !target && !u.target && !u.repairTarget) {
+      if (u.stance === "patrol" && u.patrol && !target && !u.target && !u.repairTarget && !u.repairRelayTarget) {
         const aDistance = Math.hypot(u.patrol.a.x - u.x, u.patrol.a.y - u.y);
         const bDistance = Math.hypot(u.patrol.b.x - u.x, u.patrol.b.y - u.y);
         const resumeAt = aDistance <= bDistance ? "a" : "b";
@@ -3924,6 +4037,34 @@ export default function Home() {
             u.facing = Math.atan2(construction.y - u.y, construction.x - u.x);
             u.building = true;
             construction.constructionStarted = true;
+          }
+          continue;
+        }
+        const relayRepairTarget = (g.objectives || []).find((relay) =>
+          relay.id === u.repairRelayTarget &&
+          relay.owner === u.team &&
+          intelRelayOperational(relay) &&
+          relay.hp < relay.max,
+        );
+        if (!relayRepairTarget) u.repairRelayTarget = undefined;
+        if (relayRepairTarget) {
+          const repairDistance = Math.hypot(relayRepairTarget.x - u.x, relayRepairTarget.y - u.y);
+          if (repairDistance > 80) {
+            moveUnitToward(g, u, relayRepairTarget, dt);
+          } else {
+            const availableAlloy = u.team === "player" ? g.alloy : g.enemyAlloy;
+            const repair = Math.min(
+              relayRepairTarget.max - relayRepairTarget.hp,
+              REPAIR_RATE * dt,
+              availableAlloy / REPAIR_ALLOY_PER_HP,
+            );
+            if (repair > 0) {
+              relayRepairTarget.hp = Math.min(relayRepairTarget.max, relayRepairTarget.hp + repair);
+              if (u.team === "player") g.alloy = Math.max(0, g.alloy - repair * REPAIR_ALLOY_PER_HP);
+              else g.enemyAlloy = Math.max(0, g.enemyAlloy - repair * REPAIR_ALLOY_PER_HP);
+              u.facing = Math.atan2(relayRepairTarget.y - u.y, relayRepairTarget.x - u.x);
+              u.repairing = true;
+            }
           }
           continue;
         }
