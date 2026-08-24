@@ -493,6 +493,48 @@ const CIPHER_DEPLOY_DURATION = 8;
 const CIPHER_PACK_DURATION = 4;
 const CIPHER_INCOME_RATE = 1;
 const CIPHER_COMBAT_LOCKOUT = 5;
+
+/**
+ * Firing should communicate a weapon discharge without replacing the entire
+ * painted unit with a slightly misaligned frame. The body stays locked while a
+ * short barrel sleeve and muzzle pulse provide the only recoil motion.
+ */
+function drawWeaponFireCue(
+  context: CanvasRenderingContext2D,
+  angle: number,
+  scale = 1,
+  mechanical = true,
+) {
+  context.save();
+  context.rotate(angle);
+  context.lineCap = "round";
+  if (mechanical) {
+    context.strokeStyle = "rgba(8, 16, 18, .92)";
+    context.lineWidth = 5 * scale;
+    context.beginPath();
+    context.moveTo(15 * scale, 0);
+    context.lineTo(24 * scale, 0);
+    context.stroke();
+    context.strokeStyle = "rgba(173, 196, 191, .9)";
+    context.lineWidth = 2 * scale;
+    context.beginPath();
+    context.moveTo(15 * scale, 0);
+    context.lineTo(22 * scale, 0);
+    context.stroke();
+  }
+  const muzzle = (mechanical ? 28 : 22) * scale;
+  context.fillStyle = "rgba(255, 225, 125, .96)";
+  context.shadowColor = "rgba(255, 190, 72, .9)";
+  context.shadowBlur = 7 * scale;
+  context.beginPath();
+  context.moveTo(muzzle + 5 * scale, 0);
+  context.lineTo(muzzle, -3.5 * scale);
+  context.lineTo(muzzle - 2 * scale, 0);
+  context.lineTo(muzzle, 3.5 * scale);
+  context.closePath();
+  context.fill();
+  context.restore();
+}
 const CIPHER_MAX = 4;
 const PRODUCTION_COOLDOWN = 3;
 const UPKEEP_SOFT_CAP = 10;
@@ -1765,11 +1807,8 @@ export default function Home() {
       droneMove?: HTMLImageElement;
       cipherDirections?: HTMLImageElement;
       cipherDeployed?: HTMLImageElement;
-      trooperFire?: HTMLImageElement;
-      tankFire?: HTMLImageElement;
       workerMine?: HTMLImageElement;
       turretDirections?: HTMLImageElement;
-      turretFire?: HTMLImageElement;
       buildings?: HTMLImageElement;
       crystal?: HTMLImageElement;
       alloyCrystal?: HTMLCanvasElement;
@@ -1900,7 +1939,7 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const load = (
-      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "cipherDirections" | "cipherDeployed" | "trooperFire" | "tankFire" | "workerMine" | "turretDirections" | "turretFire" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
+      key: "terrain" | "units" | "workerDirections" | "workerWalk" | "workerWalkC" | "trooperDirections" | "trooperWalk" | "trooperWalkC" | "tankDirections" | "droneDirections" | "droneMove" | "cipherDirections" | "cipherDeployed" | "workerMine" | "turretDirections" | "buildings" | "crystal" | "tacticalPlateau" | "commandCrawler" | "intelRelay",
       src: string,
     ) => {
       const image = new Image();
@@ -1965,11 +2004,8 @@ export default function Home() {
     load("droneMove", "/game-art/frontier-strike-drone-move-b-v2.png");
     load("cipherDirections", "/game-art/frontier-cipher-directions-v1.png");
     load("cipherDeployed", "/game-art/frontier-cipher-deployed-v1.png");
-    load("trooperFire", "/game-art/frontier-trooper-fire-v1.png");
-    load("tankFire", "/game-art/frontier-tank-fire-v1.png");
     load("workerMine", "/game-art/frontier-worker-mine-v1.png");
     load("turretDirections", "/game-art/frontier-turret-directions-v1.png");
-    load("turretFire", "/game-art/frontier-turret-fire-v1.png");
     load("buildings", "/game-art/frontier-buildings-atlas-v1.png");
     load("crystal", "/game-art/frontier-crystal-v1.png");
     load("commandCrawler", "/game-art/frontier-command-crawler-v1.png");
@@ -5099,11 +5135,7 @@ export default function Home() {
       x.lineWidth = sel ? 4 : 2;
       const buildingAtlas = art.current.buildings;
       const crawlerAtlas = b.type === "hq" && b.packed ? art.current.commandCrawler : undefined;
-      const turretAtlas = b.type === "turret"
-        ? ((b.turretFireUntil || 0) > g.time
-            ? art.current.turretFire || art.current.turretDirections
-            : art.current.turretDirections)
-        : undefined;
+      const turretAtlas = b.type === "turret" ? art.current.turretDirections : undefined;
       if (underConstruction) {
         x.globalAlpha = b.constructionStarted ? Math.max(.2, b.progress * .78) : .14;
         x.filter = "grayscale(.55) brightness(1.25)";
@@ -5137,6 +5169,9 @@ export default function Home() {
             size.w,
             size.h,
           );
+          if ((b.turretFireUntil || 0) > g.time && !underConstruction) {
+            drawWeaponFireCue(x, angle, .9, true);
+          }
         } else if (buildingAtlas) {
           const frame = { hq: 0, refinery: 1, barracks: 2, turret: 3 }[b.type];
           const sw = buildingAtlas.naturalWidth / 2;
@@ -5450,25 +5485,16 @@ export default function Home() {
         drone: [restingAtlas, art.current.droneMove],
         cipher: [restingAtlas],
       }[u.type].filter((atlas): atlas is HTMLImageElement => Boolean(atlas));
-      const attackAtlas = {
-        worker: undefined,
-        trooper: art.current.trooperFire,
-        tank: art.current.tankFire,
-        drone: art.current.droneDirections,
-        cipher: undefined,
-      }[u.type];
       const firing = (u.attackUntil || 0) > g.time;
       const miningFrame = Boolean(u.mining) && Math.floor((g.time + u.id * .041) * 8) % 2 === 1;
       const movementFrame = Math.floor((g.time + u.id * .037) * 8) % Math.max(1, movementAtlases.length);
       const directionalAtlas = sentryMode
-        ? (firing ? art.current.turretFire : art.current.turretDirections) || restingAtlas
-        : firing
-          ? attackAtlas || restingAtlas
-          : miningFrame
-            ? art.current.workerMine || restingAtlas
-            : u.moving
-              ? movementAtlases[movementFrame] || restingAtlas
-              : restingAtlas;
+        ? art.current.turretDirections || restingAtlas
+        : miningFrame
+          ? art.current.workerMine || restingAtlas
+          : u.moving
+            ? movementAtlases[movementFrame] || restingAtlas
+            : restingAtlas;
       const unitAtlas = deployedCipher ? art.current.cipherDeployed : directionalAtlas || art.current.units;
       if (unitAtlas) {
         if (sel) {
@@ -5480,16 +5506,16 @@ export default function Home() {
           x.stroke();
         }
         let source: { x: number; y: number; w: number; h: number };
+        const facingAngle = Number.isFinite(u.facing)
+          ? u.facing!
+          : u.team === "player" ? 0 : Math.PI;
         if (deployedCipher) {
           source = { x: 0, y: 0, w: unitAtlas.naturalWidth, h: unitAtlas.naturalHeight };
         } else if (directionalAtlas) {
           const cellWidth = unitAtlas.naturalWidth / 4;
           const cellHeight = unitAtlas.naturalHeight / 2;
-          const angle = Number.isFinite(u.facing)
-            ? u.facing!
-            : u.team === "player" ? 0 : Math.PI;
           // Sheet order: N, NE, E, SE / S, SW, W, NW.
-          const direction = ((Math.round((angle + Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
+          const direction = ((Math.round((facingAngle + Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
           source = {
             x: (direction % 4) * cellWidth,
             y: Math.floor(direction / 4) * cellHeight,
@@ -5583,6 +5609,11 @@ export default function Home() {
           size.w,
           size.h,
         );
+        if (firing) {
+          if (sentryMode) drawWeaponFireCue(x, facingAngle, .68, true);
+          else if (u.type === "tank") drawWeaponFireCue(x, facingAngle, 1.12, true);
+          else if (u.type === "trooper") drawWeaponFireCue(x, facingAngle, .62, false);
+        }
         x.fillStyle = accent;
         x.shadowColor = accent;
         x.shadowBlur = 3;
