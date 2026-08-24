@@ -4660,29 +4660,6 @@ export default function Home() {
       : -1;
     for (const [resourceIndex, q] of g.crystals.entries()) {
       const kind = q.kind || "credits";
-      if (q.amount > 0) {
-        // Give each economy its own unmistakable ground marker. The crystal
-        // artwork remains shared, but the mint diamond / amber hex makes the
-        // resource readable at normal mobile zoom without adding playfield copy.
-        x.save();
-        const resourceColor = kind === "alloy" ? "#f2b95f" : "#59ead0";
-        x.strokeStyle = resourceColor;
-        x.fillStyle = kind === "alloy" ? "rgba(242, 185, 95, .09)" : "rgba(89, 234, 208, .08)";
-        x.lineWidth = 2;
-        x.setLineDash(kind === "alloy" ? [5, 4] : []);
-        x.beginPath();
-        x.arc(q.x, q.y + 2, 31, 0, Math.PI * 2);
-        x.fill();
-        x.stroke();
-        x.setLineDash([]);
-        x.font = "900 11px system-ui";
-        x.textAlign = "center";
-        x.textBaseline = "middle";
-        x.shadowColor = "rgba(0, 0, 0, .9)";
-        x.shadowBlur = 4;
-        x.fillText(kind === "alloy" ? "⬢" : "◆", q.x + 25, q.y - 24);
-        x.restore();
-      }
       const crystalSprite = kind === "alloy" ? art.current.alloyCrystal : art.current.crystal;
       if (q.amount > 0 && crystalSprite) {
         x.save();
@@ -4793,12 +4770,14 @@ export default function Home() {
         x.beginPath(); x.ellipse(0, 6, 44, 32, 0, 0, Math.PI * 2); x.fill(); x.stroke();
       }
       x.globalAlpha = 1;
-      x.strokeStyle = selectedGarrison ? "#ffe17d" : color;
-      x.lineWidth = selectedGarrison ? 3 : 2;
-      x.setLineDash(selectedGarrison ? [7, 5] : []);
-      x.beginPath(); x.ellipse(0, 16, 49, 35, 0, 0, Math.PI * 2); x.stroke();
-      x.setLineDash([]);
-      if (intel.visible && operational) {
+      if (selectedGarrison) {
+        x.strokeStyle = "#ffe17d";
+        x.lineWidth = 3;
+        x.setLineDash([7, 5]);
+        x.beginPath(); x.ellipse(0, 16, 49, 35, 0, 0, Math.PI * 2); x.stroke();
+        x.setLineDash([]);
+      }
+      if (selectedGarrison && intel.visible && operational) {
         x.strokeStyle = color;
         x.lineWidth = 4;
         x.beginPath(); x.arc(0, 10, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); x.stroke();
@@ -4809,7 +4788,7 @@ export default function Home() {
         x.fillStyle = objective.hp / objective.max > .35 ? "#f5b85f" : "#ef526f";
         x.fillRect(-41, -66, 82 * (objective.hp / objective.max), 5);
       }
-      if (intel.visible && !operational) {
+      if (selectedGarrison && intel.visible && !operational) {
         x.strokeStyle = color;
         x.lineWidth = 4;
         x.beginPath();
@@ -4820,12 +4799,14 @@ export default function Home() {
           x.beginPath(); x.moveTo(-13, -3); x.lineTo(13, 23); x.moveTo(13, -3); x.lineTo(-13, 23); x.stroke();
         }
       }
-      for (let slot = 0; slot < RELAY_GARRISON_CAPACITY; slot++) {
-        x.fillStyle = intel.visible && operational && slot < occupants.length ? color : "rgba(4, 14, 17, .86)";
-        x.strokeStyle = color;
-        x.lineWidth = 1.5;
-        x.fillRect(-22 + slot * 12, 54, 8, 8);
-        x.strokeRect(-22 + slot * 12, 54, 8, 8);
+      if (selectedGarrison) {
+        for (let slot = 0; slot < RELAY_GARRISON_CAPACITY; slot++) {
+          x.fillStyle = intel.visible && operational && slot < occupants.length ? color : "rgba(4, 14, 17, .86)";
+          x.strokeStyle = color;
+          x.lineWidth = 1.5;
+          x.fillRect(-22 + slot * 12, 54, 8, 8);
+          x.strokeRect(-22 + slot * 12, 54, 8, 8);
+        }
       }
       x.restore();
     }
