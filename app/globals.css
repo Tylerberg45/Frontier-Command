@@ -905,6 +905,21 @@ canvas {
   background-image: url("/game-art/frontier-buildings-atlas-v1.png");
   background-size: 200% 200%;
 }
+.command-art.building-foundry,
+.command-tab-art.building-foundry,
+.command-art.building-intelligence,
+.command-tab-art.building-intelligence,
+.command-art.building-hangar,
+.command-tab-art.building-hangar {
+  background-size: contain;
+  background-position: center;
+}
+.command-art.building-foundry,
+.command-tab-art.building-foundry { background-image: url("/game-art/frontier-armor-foundry-v1.png"); }
+.command-art.building-intelligence,
+.command-tab-art.building-intelligence { background-image: url("/game-art/frontier-intelligence-center-v1.png"); }
+.command-art.building-hangar,
+.command-tab-art.building-hangar { background-image: url("/game-art/frontier-drone-hangar-v1.png"); }
 .command-art.building-hq,
 .command-tab-art.building-hq { background-position: 0 0; }
 .command-art.building-refinery,
