@@ -69,3 +69,4 @@ These files are retained for comparison or possible future work, but `app/page.t
 - When Blender/Meshi source begins, store the editable source under `art-source/<subject>/`, record tool/version and export settings here, and keep exported runtime files under `public/game-art/`.
 - Add new art one unit/building at a time. Record frame grid, direction order, draw size, animation use, and the replaced/deprecated filename in this file.
 - Do not delete a save-compatible or historical runtime asset until source references and old-save fallbacks have been checked.
+- Read `UNITY_MIGRATION.md` before replacing a 2D runtime sprite with a 3D production source.

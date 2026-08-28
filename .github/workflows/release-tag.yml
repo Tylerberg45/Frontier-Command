@@ -1,0 +1,38 @@
+name: Frontier Command release tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-recorded-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag the recorded stable GitHub commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(sed -n 's/| Current production build | \*\*\(v[0-9][0-9]*\)\*\* |/\1/p' docs/GAME_STATE.md)"
+          stable_commit="$(sed -n 's/| GitHub stable mirror commit | `\([0-9a-f][0-9a-f]*\)` |/\1/p' docs/GAME_STATE.md)"
+          [[ "${release}" =~ ^v[0-9]+$ ]]
+          [[ "${stable_commit}" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "${stable_commit}^{commit}"
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/${release}" >/dev/null; then
+            [[ "$(git rev-list -n 1 "${release}")" == "${stable_commit}" ]] || {
+              echo "${release} already points to a different commit." >&2
+              exit 1
+            }
+            exit 0
+          fi
+          git config user.name "Frontier Command Release"
+          git config user.email "actions@users.noreply.github.com"
+          git tag -a "${release}" "${stable_commit}" -m "Frontier Command ${release}"
+          git push origin "refs/tags/${release}"
+

@@ -1,7 +1,9 @@
 {
   "schemaVersion": 1,
-  "contentVersion": "0.1.0",
+  "contentVersion": "0.2.0",
+  "runtimeIntegration": "reference-only",
   "balance": "balance.json",
   "campaigns": ["campaigns/frontier-dawn.json"],
   "compatibility": { "web": ">=0.1.0", "unity": "planned" }
 }
+

@@ -1,27 +1,27 @@
 # Frontier Command — Game State
 
-> Read this file first in every new work session. Last updated: 2026-08-28.
+> Read this file first in every new work session. Last updated: 2026-08-28 after the v103 production verification.
 
 ## Current release
 
 | Field | Value |
 | --- | --- |
-| Current production build | **v102** |
+| Current production build | **v103** |
 | Production status | Live and verified |
 | Live URL | https://frontier-command.tylerberg45.chatgpt.site |
-| Sites production source commit | `340ea6fff0dec39cf34c95d75852ac1fc732d43f` |
-| GitHub stable mirror commit | Historical v102 mirror was not recorded; the first complete synchronization is being prepared as v103 |
+| Sites production source commit | `a9965d127935624baa7818421b370f006f346688` |
+| GitHub stable mirror commit | `38e1441f8d08f7485d4f9700a70c588ee11c8ffb` |
 | GitHub repository | https://github.com/Tylerberg45/Frontier-Command |
 | Runtime | React 19 + TypeScript + Canvas + Vinext/Cloudflare |
-| Last automated verification | 2026-08-28: build, lint, and rendered-HTML test passed for v102 source |
+| Last automated verification | 2026-08-28: build, lint, source invariants, GitHub blob comparison, and production deployment verification passed for v103 |
 
 The Sites repository and GitHub repository have separate histories. Compare trees/content, not commit IDs, when verifying that they match.
 
 ## Current work session
 
-- **Currently working on:** making the repository the permanent source of project continuity and synchronizing GitHub to v102.
-- **Known regression under verification:** the user reported Workers would not mine in the v99-era build. The v102 source contains explicit resource assignment and retreat-duty restoration, but the full mining/retreat loop still needs a fresh device smoke test.
-- **Most recent gameplay milestone:** Satellite Uplink gates both tactical-map access and relay intel income; starting intel is zero.
+- **Currently working on:** live v103 device verification for Worker mining/retreat recovery, the Satellite Uplink loop, and narrow-screen construction UI.
+- **Known regression under verification:** the Worker resource-order repair is deployed in v103. A direct deposit order now clears every stale retreat, combat-travel, garrison, construction, and repair transient; the full live mining/retreat loop still needs a fresh device smoke test before `FC-001` closes.
+- **Most recent gameplay milestone:** v103 Worker mining repair, backed by new source invariants; v102’s Satellite Uplink and intel/map gates remain intact.
 
 ## What exists now
 
@@ -100,7 +100,7 @@ Headquarters
 
 ## Known problems and risks
 
-- Worker mining/retreat behavior is not yet re-verified end to end on the live v102 build. Track it as `FC-001` in `BUGS.md`.
+- Worker mining/retreat behavior is not yet re-verified end to end on the live v103 build. The stale-state repair is deployed; track device confirmation as `FC-001` in `BUGS.md`.
 - The construction tray overflow fix shipped in v102 but needs confirmation on the same iPad/iPhone widths that showed the original clipped text.
 - Automated coverage currently proves buildability and rendered metadata, not the game simulation. The manual release checklist remains mandatory until simulation tests are added.
 - Sites and GitHub are separate repositories. A Sites deployment can succeed while GitHub remains stale unless the release process is followed.

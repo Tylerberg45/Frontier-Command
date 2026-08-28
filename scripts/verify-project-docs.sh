@@ -14,6 +14,12 @@ required_files=(
   docs/TEST_CHECKLIST.md
   docs/ASSETS.md
   docs/RELEASE_PROCESS.md
+  docs/ARCHITECTURE.md
+  docs/CONTENT_ROADMAP.md
+  docs/UNITY_MIGRATION.md
+  game-content/README.md
+  game-content/v1/balance.json
+  game-content/v1/manifest.json
 )
 
 for path in "${required_files[@]}"; do
@@ -34,11 +40,16 @@ grep -q "^## ${current_release}$" docs/RELEASES.md || {
   exit 1
 }
 
-if rg -n 'PENDING_[A-Z0-9_]+' AGENTS.md docs README.md >/dev/null; then
+github_stable_commit="$(sed -n 's/| GitHub stable mirror commit | `\([0-9a-f][0-9a-f]*\)` |/\1/p' docs/GAME_STATE.md)"
+[[ "${github_stable_commit}" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "docs/GAME_STATE.md must record an exact 40-character GitHub stable mirror commit." >&2
+  exit 1
+}
+
+if grep -RInE 'PENDING_[A-Z0-9_]+' AGENTS.md docs README.md >/dev/null; then
   echo "Project documentation still contains a pending release placeholder:" >&2
-  rg -n 'PENDING_[A-Z0-9_]+' AGENTS.md docs README.md >&2
+  grep -RInE 'PENDING_[A-Z0-9_]+' AGENTS.md docs README.md >&2
   exit 1
 fi
 
 echo "Verified Frontier Command project documentation for ${current_release}."
-

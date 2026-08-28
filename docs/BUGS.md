@@ -4,11 +4,11 @@ Only active or unresolved defects belong here. Move fixed items into `RELEASES.m
 
 ## FC-001 — Worker mining and duty-resume regression needs confirmation
 
-- **Status:** Needs reproduction on live v102
+- **Status:** Repair deployed in v103; needs live device confirmation
 - **First reported:** v99-era session, 2026-08-27/28
 - **Reported behavior:** Workers stopped mining and could not be made to mine.
-- **Current source behavior:** Directly assigning a Worker to a resource clears construction, repair, auto-repair, hold, and emergency-retreat state. An attacked Worker saves its duty, retreats to HQ, waits five safe seconds, and restores that duty.
-- **Suspected risk:** The v98 emergency-retreat state may interact with mining/hold state or an older hydrated save. The code path looks repaired, but it has not been verified through the complete live loop.
+- **v103 repair:** Directly assigning a Worker to a resource now clears construction, repair, auto-repair, hold, emergency-retreat, combat-travel, formation-speed, garrison-route, combat-timestamp, and transient activity state. An attacked Worker still saves its duty, retreats to HQ, waits five safe seconds, and restores that duty.
+- **Remaining risk:** A migrated save or pointer/hit-detection path could still reproduce the original symptom. Code invariants pass, but the complete live loop requires device confirmation.
 
 ### Reproduction checklist
 
@@ -24,4 +24,3 @@ Only active or unresolved defects belong here. Move fixed items into `RELEASES.m
 ### Resolution requirement
 
 Do not close this bug based only on code inspection. Record the tested release, device/browser, save type (new or migrated), and observed result.
-

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "campaignId": "frontier-dawn",
   "title": "Frontier Dawn",
-  "status": "planned",
+  "status": "planned-outline",
   "summary": "A commander rebuilds an isolated frontier network while uncovering the force behind coordinated attacks on the outer colonies.",
   "acts": [
     {
@@ -19,8 +19,9 @@
       "title": "The Long March",
       "missions": [
         { "missionId": "moving-command", "title": "Moving Command", "type": "escort", "status": "outline" },
-        { "missionId": "two-ridges", "title": "Two Ridges", "type": "territory-control", "status": "outline" }
+        { "missionId": "relay-line", "title": "The Relay Line", "type": "territory-control", "status": "outline" }
       ]
     }
   ]
 }
+

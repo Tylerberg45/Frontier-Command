@@ -5,9 +5,9 @@ This is the prioritized roadmap. Keep it short enough to guide the next work ses
 ## NOW
 
 - Verify and, if necessary, fix `FC-001`: Worker mining, direct resource assignment, attack retreat, and duty resumption.
-- Smoke-test the complete v102 Satellite Uplink loop for player and AI: zero starting intel, locked map, fair relay discovery, and gated intel income.
+- Smoke-test the complete v103 Satellite Uplink loop for player and AI: zero starting intel, locked map, fair relay discovery, and gated intel income.
 - Confirm the construction tray no longer clips or stacks words vertically on iPad and iPhone portrait widths.
-- Keep Sites and GitHub synchronized using `RELEASE_PROCESS.md` for every release.
+- Verify the new GitHub release-tag automation and keep Sites/GitHub synchronization as a permanent release gate.
 
 ## NEXT
 
@@ -31,4 +31,3 @@ This is the prioritized roadmap. Keep it short enough to guide the next work ses
 - Restoring a mixed-army damage bonus.
 - Moving Tanks or Drones back into Barracks production.
 - Reintroducing separate local commander save slots.
-

@@ -13,6 +13,7 @@ Read these files before proposing or making gameplay changes:
 5. `docs/TEST_CHECKLIST.md`
 6. `docs/ASSETS.md` when art or animation is involved
 7. `docs/RELEASES.md` when preparing or diagnosing a release
+8. `docs/ARCHITECTURE.md` and `game-content/README.md` before extracting systems or changing engine-neutral content
 
 Then inspect the current source. The priority order is:
 
@@ -47,4 +48,3 @@ Do not claim that a release is complete if GitHub is behind, the production depl
 - Multiplayer has no solo-style save/load and opening a menu must not pause the other player.
 - Do not restore elevated terrain, a mixed-army damage bonus, commander save slots, or a visible wave-countdown objective without a new explicit design decision.
 - Do not let the AI use hidden relay coordinates under fog.
-

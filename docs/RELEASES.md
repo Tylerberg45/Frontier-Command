@@ -2,6 +2,15 @@
 
 Record every production release with its exact Sites source commit and exact GitHub mirror commit. The two repositories have separate histories, so their hashes are expected to differ even when their trees match.
 
+## v103
+
+- **Released:** 2026-08-28
+- **Sites source commit:** `a9965d127935624baa7818421b370f006f346688`
+- **GitHub stable mirror commit:** `38e1441f8d08f7485d4f9700a70c588ee11c8ffb`
+- **Changes:** Added the repository-owned continuity system, release process, decisions/bugs/roadmap/test/asset registries, permanent GitHub quality gate, and five game-source invariants. Repaired direct Worker resource orders so all stale retreat/combat/repair/construction transients are cleared before mining resumes. Synchronized the full deployable v103 source and the 2.5D Tank asset to GitHub.
+- **Verification:** Sites checkpoint build and artifact validation passed; lint completed with no errors; five source-invariant tests passed; every deployable local blob matched GitHub; production deployment status succeeded.
+- **Follow-up:** `FC-001` remains open only for a live device mining/retreat smoke test.
+
 ## v102
 
 - **Released:** 2026-08-28

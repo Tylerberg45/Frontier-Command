@@ -16,6 +16,9 @@ Start with [the current game state](docs/GAME_STATE.md). Repository documentatio
 - [Release test checklist](docs/TEST_CHECKLIST.md)
 - [Art and sprite registry](docs/ASSETS.md)
 - [Release process](docs/RELEASE_PROCESS.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Unity migration plan](docs/UNITY_MIGRATION.md)
+- [Engine-neutral content](game-content/README.md)
 
 **Hard rule:** a release is not finished until the exact released source exists in both the Sites repository and [GitHub](https://github.com/Tylerberg45/Frontier-Command).
 
