@@ -19,9 +19,9 @@ The Sites repository and GitHub repository have separate histories. Compare tree
 
 ## Current work session
 
-- **Currently working on:** live v103 device verification for Worker mining/retreat recovery, the Satellite Uplink loop, and narrow-screen construction UI.
-- **Known regression under verification:** the Worker resource-order repair is deployed in v103. A direct deposit order now clears every stale retreat, combat-travel, garrison, construction, and repair transient; the full live mining/retreat loop still needs a fresh device smoke test before `FC-001` closes.
-- **Most recent gameplay milestone:** v103 Worker mining repair, backed by new source invariants; v102’s Satellite Uplink and intel/map gates remain intact.
+- **Currently working on:** the next gameplay release after v103: correct mirrored Worker headings and make the Satellite Uplink itself generate intel.
+- **Live v103 confirmation:** Workers resumed their assigned duty correctly on the user’s iPhone test, closing `FC-001`.
+- **Prepared regressions under verification:** `FC-002` remaps the mirrored Worker direction sheets; `FC-003` moves the non-stacking 0.5 intel/second feed from Relays to the operational Satellite Uplink.
 
 ## What exists now
 
@@ -39,7 +39,8 @@ The Sites repository and GitHub repository have separate histories. Compare tree
 - Credits buy units; alloy builds and repairs structures; intel funds match research; power is tracked as infrastructure capacity.
 - Workers mine depleting credit and alloy deposits and deliver to the closest completed friendly Refinery.
 - Workers can be assigned directly to a specific deposit, queue construction sites, repair, or run maintenance patrols.
-- Two capturable Intel Relays generate intel only while their owner has an operational Satellite Uplink.
+- An operational Satellite Uplink generates a fixed, non-stacking 0.5 intel/second team feed.
+- Two capturable Intel Relays remain optional tactical objectives rather than intel-income requirements.
 - Relays provide +5% team damage each, can hold four Troopers, shield their garrison, can be destroyed, and rebuild after a cooldown.
 - Trade Network unlocks Ciphers and Trade Exchanges for late-game credit income.
 - Army upkeep begins above ten combat units; units outside supply eventually deal 25% less damage.
@@ -57,7 +58,7 @@ Headquarters
 - Headquarters: Workers, Fortify Base, pack/deploy mobile Command Crawler.
 - Barracks: Troopers only.
 - Armor Foundry: Tanks only.
-- Satellite Uplink: tactical map, relay intel, Ciphers, doctrines, and match research. Internal save type remains `intelligence`.
+- Satellite Uplink: tactical map, direct intel feed, Ciphers, doctrines, and match research. Internal save type remains `intelligence`.
 - Drone Hangar: Strike Drones only.
 - Sentry Turret: automatic point defense.
 - Trade Exchange: late-game credit income, boosted by a nearby deployed Cipher.
@@ -92,7 +93,8 @@ Headquarters
 | Structure costs | Refinery 260; Barracks 360; Foundry 500; Satellite Uplink 420; Hangar 480; Turret 240; Exchange 480 alloy |
 | Production queue | Six units maximum per production structure |
 | Relay capture | 10 seconds; four Trooper garrison slots |
-| Relay economy | 0.5 intel/second while owned and Satellite Uplink is operational |
+| Satellite Uplink economy | 0.5 intel/second per team while at least one Uplink is operational; does not stack |
+| Relay economy | No intel income; optional tactical control only |
 | Relay combat bonus | +5% damage each, maximum two relays |
 | Upkeep | None through 10 combat units; nonlinear credit drain above 10 |
 | Easiest AI opening | First major attack no earlier than roughly 240 seconds and only with a real army |
@@ -100,15 +102,16 @@ Headquarters
 
 ## Known problems and risks
 
-- Worker mining/retreat behavior is not yet re-verified end to end on the live v103 build. The stale-state repair is deployed; track device confirmation as `FC-001` in `BUGS.md`.
+- The Worker mining regression was confirmed repaired on live v103. The next candidate still needs live confirmation that all eight Worker sprite headings are correct.
+- The next candidate moves intel production to the Uplink itself; v103 production still requires Relay control until that candidate is deployed.
 - The construction tray overflow fix shipped in v102 but needs confirmation on the same iPad/iPhone widths that showed the original clipped text.
 - Automated coverage currently proves buildability and rendered metadata, not the game simulation. The manual release checklist remains mandatory until simulation tests are added.
 - Sites and GitHub are separate repositories. A Sites deployment can succeed while GitHub remains stale unless the release process is followed.
 
 ## Next priorities
 
-1. Reproduce and verify credit/alloy mining, direct deposit assignment, Worker retreat, and automatic duty resumption.
-2. Verify the Satellite Uplink progression loop: zero starting intel, locked map, relay discovery, and post-build intel income for both player and AI.
+1. Deploy and verify the Worker direction remap, especially southeast/southwest and east/west.
+2. Verify direct Uplink intel generation for player and AI without owning or garrisoning a Relay.
 3. Continue the 2.5D sprite pass beyond the current Tank while preserving eight-direction readability and unit scale.
 4. Add deterministic simulation tests for mining, construction queues, fog-limited AI knowledge, save hydration, and production.
 5. Run a focused private multiplayer regression pass for Tactical Fog, room reconnect/failure behavior, and host/guest perspective swapping.

@@ -30,9 +30,11 @@ This file records deliberate decisions. Do not silently reverse them because an 
 
 **Decision:** The minimap/tactical map is locked until an operational Satellite Uplink exists. Before that, the map panel explains the requirement and cannot move the camera.
 
-### D-007 — Relays do not generate intel without an Uplink
+### D-007 — The Satellite Uplink generates intel directly
 
-**Decision:** Captured Intel Relays grant intel income only while the owning team has an operational Satellite Uplink. Relay combat and garrison rules remain separate.
+**Decision:** An operational Satellite Uplink gives its team a fixed 0.5 intel/second feed. The feed is team-wide and does not stack when multiple Uplinks exist. Intel Relays do not generate intel; they remain optional tactical objectives that grant +5% team damage each and support a protected Trooper garrison.
+
+**Updated 2026-08-28:** Live v103 testing showed that merely gating Relay income behind the Uplink still made bunker control mandatory. This supersedes that implementation so the mid-game building itself is the intel source.
 
 ### D-008 — Intel must be discovered fairly
 
@@ -110,3 +112,6 @@ This file records deliberate decisions. Do not silently reverse them because an 
 
 **Decision:** No release is complete until the exact released tree is present in both the Sites source repository and `Tylerberg45/Frontier-Command` on GitHub. Record both commit identities because the repositories have separate histories.
 
+### D-025 — Source-change tasks include publication
+
+**Decision:** A requested Frontier Command source change includes permission to publish it to the existing public Frontier Command Site and synchronize GitHub unless the user explicitly requests a local, prepared, or unpublished change. Do not interrupt an already-authorized task for a redundant publish confirmation.

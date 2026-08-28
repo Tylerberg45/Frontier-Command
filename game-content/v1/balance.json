@@ -18,7 +18,7 @@
     "refinery": { "radius": 42, "health": 440, "buildSeconds": 6, "alloyCost": 260 },
     "barracks": { "radius": 44, "health": 520, "buildSeconds": 6, "alloyCost": 360 },
     "foundry": { "radius": 50, "health": 680, "buildSeconds": 18, "alloyCost": 500 },
-    "satelliteUplink": { "serializedType": "intelligence", "radius": 42, "health": 460, "buildSeconds": 16, "alloyCost": 420 },
+    "satelliteUplink": { "serializedType": "intelligence", "radius": 42, "health": 460, "buildSeconds": 16, "alloyCost": 420, "intelPerSecond": 0.5, "intelIncomeStacks": false },
     "hangar": { "radius": 50, "health": 560, "buildSeconds": 20, "alloyCost": 480 },
     "turret": { "radius": 24, "health": 360, "buildSeconds": 15, "alloyCost": 240 },
     "exchange": { "radius": 38, "health": 400, "buildSeconds": 28, "alloyCost": 480 }
@@ -35,8 +35,7 @@
   "objectives": {
     "captureSeconds": 10,
     "captureRadius": 105,
-    "intelPerSecond": 0.5,
-    "requiresOperationalSatelliteUplinkForIntel": true,
+    "intelPerSecond": 0,
     "damageBonusEach": 0.05,
     "maxStack": 2,
     "garrisonCapacity": 4,
@@ -84,4 +83,3 @@
     "multiplayerEach": { "credits": 650, "alloy": 520, "intel": 0, "power": 12 }
   }
 }
-

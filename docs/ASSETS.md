@@ -13,9 +13,9 @@ Unless noted otherwise, eight-direction sheets are 2048×1024 with 512×512 sour
 
 | Unit/state | Current runtime asset | Status and notes |
 | --- | --- | --- |
-| Worker idle | `frontier-worker-directions-v2.png` | Current eight-direction base atlas |
-| Worker walk A/B | `frontier-worker-walk-b-v3.png`, `frontier-worker-walk-c-v4.png` | Current alternating movement atlases |
-| Worker mining | `frontier-worker-mine-v1.png` | Current alternating mining pose |
+| Worker idle | `frontier-worker-directions-v2.png` | Current eight-direction base atlas; horizontal headings are mirrored in the source and remapped by the renderer |
+| Worker walk A/B | `frontier-worker-walk-b-v3.png`, `frontier-worker-walk-c-v4.png` | Current alternating movement atlases; use the same Worker-only direction remap |
+| Worker mining | `frontier-worker-mine-v1.png` | Current alternating mining pose; uses the same Worker-only direction remap |
 | Trooper idle | `frontier-trooper-directions-v2.png` | Current eight-direction base atlas |
 | Trooper walk A/B | `frontier-trooper-walk-b-v3.png`, `frontier-trooper-walk-c-v4.png` | Current alternating movement atlases |
 | Tank idle/move | `frontier-tank-2p5d-directions-v1.png` | **Current 2.5D Tank**, eight directions; hull stays rigid and tread movement is rendered procedurally |
@@ -34,6 +34,10 @@ Unless noted otherwise, eight-direction sheets are 2048×1024 with 512×512 sour
 | Tank | 112 × 104 |
 | Strike Drone | 86 × 70 |
 | Cipher | 62 × 62 mobile; 76 × 58 deployed |
+
+### Worker source-frame exception
+
+The four current Worker sheets are stored as `N, NW, W, SW / S, SE, E, NE`, rather than the standard order above. The Canvas renderer maps normal heading indices through `[0, 7, 6, 5, 4, 3, 2, 1]`. Keep that remap Worker-specific; other directional sheets continue using the standard order.
 
 ## Buildings and world art
 

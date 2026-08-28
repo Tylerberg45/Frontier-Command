@@ -41,6 +41,7 @@ Use this checklist for every gameplay release. Automated tests are necessary but
 - [ ] Worker repairs buildings, units, and owned operational Relays while consuming alloy.
 - [ ] Auto-repair defaults off; maintenance patrol behaves as labeled.
 - [ ] An attacked Worker retreats toward HQ, uses only its weak close defense, waits five safe seconds, and resumes its saved duty.
+- [ ] Worker idle, walking, and mining art faces all eight travel directions correctly, especially southeast and southwest.
 
 ## Production and research
 
@@ -56,9 +57,10 @@ Use this checklist for every gameplay release. Automated tests are necessary but
 ## Intel, fog, and map
 
 - [ ] Tactical map shows its locked state before the Satellite Uplink and cannot move the camera.
-- [ ] Completing the Uplink immediately enables the tactical map.
-- [ ] Relays generate no intel before the owning team has an operational Uplink.
-- [ ] Relay intel starts/resumes when the Uplink is operational and stops when it is destroyed/unavailable.
+- [ ] Completing the Uplink immediately enables the tactical map and starts a 0.5 intel/second (30/minute) team feed.
+- [ ] The Uplink feed stops when no Uplink is operational and resumes when one returns.
+- [ ] Additional Uplinks do not stack the intel feed.
+- [ ] Relays generate no intel; they remain optional garrison and +5% damage objectives.
 - [ ] Unscouted Relays and enemies are absent from Tactical Fog information.
 - [ ] AI does not route to a Relay until its own vision has scouted it.
 - [ ] Relay capture, four-Trooper garrison, bunker shielding, destruction, repair, and rebuild cycle work.

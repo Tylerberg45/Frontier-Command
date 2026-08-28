@@ -44,10 +44,13 @@ test("new solo and multiplayer matches start at zero intel", () => {
   assert.match(multiplayer, /g\.enemyIntel\s*=\s*0;/);
 });
 
-test("Satellite Uplink gates relay intel and tactical map interaction", () => {
-  assert.match(source, /objective\.owner === "player" && satelliteUplinkOnline\(g, "player"\)/);
-  assert.match(source, /objective\.owner === "enemy" && satelliteUplinkOnline\(g, "enemy"\)/);
+test("Satellite Uplink directly generates intel and gates tactical map interaction", () => {
   assert.match(source, /TACTICAL MAP LOCKED — complete the Satellite Uplink/);
+  assert.match(source, /const SATELLITE_UPLINK_INTEL_RATE = 0\.5;/);
+  assert.match(source, /if \(satelliteUplinkOnline\(g, "player"\)\) g\.intel \+= SATELLITE_UPLINK_INTEL_RATE \* dt;/);
+  assert.match(source, /if \(satelliteUplinkOnline\(g, "enemy"\)\) g\.enemyIntel \+= SATELLITE_UPLINK_INTEL_RATE \* dt;/);
+  assert.doesNotMatch(source, /objective\.owner === "player"[^\n]*g\.intel \+=/);
+  assert.doesNotMatch(source, /objective\.owner === "enemy"[^\n]*g\.enemyIntel \+=/);
 });
 
 test("AI relay selection is limited by enemy vision", () => {
@@ -61,3 +64,7 @@ test("the active Tank atlas is the eight-direction 2.5D sprite", () => {
   assert.match(source, /load\("tankDirections", "\/game-art\/frontier-tank-2p5d-directions-v1\.png"\)/);
 });
 
+test("Worker directional atlases remap their mirrored horizontal frames", () => {
+  assert.match(source, /const WORKER_ATLAS_DIRECTION_FRAMES = \[0, 7, 6, 5, 4, 3, 2, 1\] as const;/);
+  assert.match(source, /const frame = u\.type === "worker" \? WORKER_ATLAS_DIRECTION_FRAMES\[direction\] : direction;/);
+});

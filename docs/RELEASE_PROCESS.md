@@ -4,6 +4,8 @@
 
 **No release is finished until GitHub is updated.**
 
+A requested Frontier Command source change carries standing approval to publish to the existing public Site and synchronize GitHub unless the user explicitly limits that task to local, prepared, or unpublished work. Do not ask for a second publish confirmation.
+
 Frontier Command currently has two repositories with separate histories:
 
 - The Sites-managed source repository used to create production versions.
@@ -43,4 +45,3 @@ If any item is incomplete, report the release as prepared, saved, or awaiting ve
 ## Documentation-only commits
 
 Documentation-only cleanup may put GitHub/Sites source ahead of the currently deployed gameplay commit without creating a new production version. `GAME_STATE.md` must continue to identify the exact deployed gameplay commit. A future gameplay release includes the accumulated documentation in both repositories.
-

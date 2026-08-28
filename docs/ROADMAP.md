@@ -4,10 +4,10 @@ This is the prioritized roadmap. Keep it short enough to guide the next work ses
 
 ## NOW
 
-- Verify and, if necessary, fix `FC-001`: Worker mining, direct resource assignment, attack retreat, and duty resumption.
-- Smoke-test the complete v103 Satellite Uplink loop for player and AI: zero starting intel, locked map, fair relay discovery, and gated intel income.
+- Ship and verify `FC-002`: Worker idle/walk/mining headings, especially southeast and southwest.
+- Ship and verify `FC-003`: direct non-stacking Satellite Uplink intel for player and AI without Relay ownership.
 - Confirm the construction tray no longer clips or stacks words vertically on iPad and iPhone portrait widths.
-- Verify the new GitHub release-tag automation and keep Sites/GitHub synchronization as a permanent release gate.
+- Keep Sites/GitHub synchronization and the verified release tag as permanent release gates.
 
 ## NEXT
 

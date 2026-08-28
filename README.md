@@ -35,8 +35,9 @@ Headquarters
 - Headquarters produces Workers and owns Fortify Base.
 - Barracks produces Troopers.
 - Armor Foundry produces Tanks and future ground vehicles.
-- Satellite Uplink unlocks the tactical map and relay intel, produces Ciphers,
-  and owns match research. Its internal serialized type remains `intelligence`
+- Satellite Uplink unlocks the tactical map, generates 0.5 intel/second for its
+  team, produces Ciphers, and owns match research. The feed does not stack when
+  multiple Uplinks exist. Its internal serialized type remains `intelligence`
   for save compatibility.
 - Drone Hangar produces Drones and future air units.
 

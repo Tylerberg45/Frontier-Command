@@ -539,13 +539,16 @@ function buildingDisplayName(type: BuildingType) {
 const FORTIFY_INTEL_COST = 180;
 const OBJECTIVE_CAPTURE_TIME = 10;
 const OBJECTIVE_CAPTURE_RADIUS = 105;
-const OBJECTIVE_INTEL_RATE = 0.5;
+const SATELLITE_UPLINK_INTEL_RATE = 0.5;
 const RELAY_GARRISON_CAPACITY = 4;
 const RELAY_RANGE_MULTIPLIER = 1.25;
 const RELAY_MAX_HP = 700;
 const RELAY_REBUILD_COOLDOWN = 12;
 const RELAY_REBUILD_DURATION = 18;
 const RELAY_RESOURCE_CLEARANCE = 190;
+// The Worker source sheets are horizontally mirrored: N, NW, W, SW / S, SE, E, NE.
+// Remap the renderer's normal N, NE, E, SE / S, SW, W, NW heading order.
+const WORKER_ATLAS_DIRECTION_FRAMES = [0, 7, 6, 5, 4, 3, 2, 1] as const;
 const SUPPLY_CAPACITY = 12;
 const SUPPLY_RADIUS = 470;
 const DOCTRINE_INTEL_COST = 140;
@@ -2115,7 +2118,7 @@ export default function Home() {
   const [ui, setUi] = useState({
     credits: 650,
     alloy: 520,
-    intel: 40,
+    intel: 0,
     objectives: 0,
     army: 2,
     upkeep: 0,
@@ -2367,7 +2370,7 @@ export default function Home() {
               : `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${Math.round(stats[one.type].damage * (1 + ((one.level || 1) - 1) * 0.18))} DMG · ${unitDuty(one)} · ${(one.supply ?? SUPPLY_CAPACITY) > 0 ? `SUPPLY ${Math.ceil(one.supply ?? SUPPLY_CAPACITY)}s` : "OUT OF SUPPLY −25%"}${(one.level || 1) > 1 ? ` · REGEN ${(veteranRegenRate(one) * 100).toFixed(0)}% HP/s` : ""}${one.retreating ? " · RETREATING" : ""}${rank}`
             : (one.progress ?? 1) < 1
               ? `${buildingDisplayName(one.type)} WIREFRAME · ${one.constructionStarted ? `${Math.round((one.progress || 0) * 100)}% BUILT` : "WAITING FOR WORKER"}`
-              : `${one.type === "turret" ? "SENTRY TURRET · 210 RANGE · 12 DMG" : one.type === "exchange" ? `TRADE EXCHANGE · +${Math.round(exchangeIncome(g, one) * 60)} CREDITS/MIN` : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : buildingDisplayName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` · ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " · MOBILE · SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " · FORTIFIED" : ""}`
+              : `${one.type === "turret" ? "SENTRY TURRET · 210 RANGE · 12 DMG" : one.type === "exchange" ? `TRADE EXCHANGE · +${Math.round(exchangeIncome(g, one) * 60)} CREDITS/MIN` : one.type === "intelligence" ? `SATELLITE UPLINK · +${Math.round(SATELLITE_UPLINK_INTEL_RATE * 60)} INTEL/MIN` : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : buildingDisplayName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` · ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " · MOBILE · SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " · FORTIFIED" : ""}`
           : `${chosen.length} UNITS SELECTED`
         : "No selection",
       message: g.message,
@@ -4228,6 +4231,10 @@ export default function Home() {
     g.damageNumbers = (g.damageNumbers || [])
       .map((n) => ({ ...n, life: n.life - dt, y: n.y - 18 * dt }))
       .filter((n) => n.life > 0);
+    // Intel comes from the mid-game Satellite Uplink itself. Additional
+    // Uplinks do not stack the feed; Relays remain optional tactical bonuses.
+    if (satelliteUplinkOnline(g, "player")) g.intel += SATELLITE_UPLINK_INTEL_RATE * dt;
+    if (satelliteUplinkOnline(g, "enemy")) g.enemyIntel += SATELLITE_UPLINK_INTEL_RATE * dt;
     for (const objective of g.objectives || []) {
       if (!intelRelayOperational(objective)) {
         objective.owner = "neutral";
@@ -4270,13 +4277,11 @@ export default function Home() {
       if (objective.capture >= OBJECTIVE_CAPTURE_TIME) objective.owner = "player";
       else if (objective.capture <= -OBJECTIVE_CAPTURE_TIME) objective.owner = "enemy";
       else if ((objective.owner === "player" && objective.capture <= 0) || (objective.owner === "enemy" && objective.capture >= 0)) objective.owner = "neutral";
-      if (objective.owner === "player" && satelliteUplinkOnline(g, "player")) g.intel += OBJECTIVE_INTEL_RATE * dt;
-      if (objective.owner === "enemy" && satelliteUplinkOnline(g, "enemy")) g.enemyIntel += OBJECTIVE_INTEL_RATE * dt;
       if (objective.owner !== oldOwner) {
         if (objective.owner !== "enemy" || isVisible(g, objective, HIGH_GROUND_RADIUS)) {
           g.message = objective.owner === "neutral"
-            ? "INTEL RELAY CONTESTED — feed interrupted."
-            : `${objective.owner === "player" ? "INTEL RELAY SECURED" : "ENEMY RELAY SECURED"} — intel income active.`;
+            ? "INTEL RELAY CONTESTED — combat link interrupted."
+            : `${objective.owner === "player" ? "INTEL RELAY SECURED" : "ENEMY RELAY SECURED"} — +5% team damage active.`;
           sync();
         }
       }
@@ -4424,7 +4429,9 @@ export default function Home() {
         else g.enemyPower = (g.enemyPower ?? 12) + (b.type === "refinery" ? 4 : 2);
       }
       if (b.team === "player" || isVisible(g, b, buildingStats[b.type].r)) {
-          g.message = `${b.team === "enemy" ? "Enemy " : ""}${buildingDisplayName(b.type)} operational.`;
+        g.message = b.team === "player" && b.type === "intelligence"
+          ? `SATELLITE UPLINK operational — tactical map unlocked · +${Math.round(SATELLITE_UPLINK_INTEL_RATE * 60)} intel/min.`
+          : `${b.team === "enemy" ? "Enemy " : ""}${buildingDisplayName(b.type)} operational.`;
         sync();
       }
     }
@@ -6105,9 +6112,10 @@ export default function Home() {
           const cellHeight = unitAtlas.naturalHeight / 2;
           // Sheet order: N, NE, E, SE / S, SW, W, NW.
           const direction = ((Math.round((facingAngle + Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
+          const frame = u.type === "worker" ? WORKER_ATLAS_DIRECTION_FRAMES[direction] : direction;
           source = {
-            x: (direction % 4) * cellWidth,
-            y: Math.floor(direction / 4) * cellHeight,
+            x: (frame % 4) * cellWidth,
+            y: Math.floor(frame / 4) * cellHeight,
             w: cellWidth,
             h: cellHeight,
           };
@@ -7348,7 +7356,7 @@ export default function Home() {
               <div className="selection-command-header">
                 <span className={`command-tab-art building-${ui.selectedBuilding}`} aria-hidden="true" />
                 <b>{ui.selectedBuilding === "hq" && ui.hqPacked ? "COMMAND CRAWLER" : buildingDisplayName(ui.selectedBuilding)}</b>
-                <small>{ui.selectedConstruction ? "CONSTRUCTION WIREFRAME" : ui.selectedBuilding === "hq" && ui.hqRelocation ? `${ui.hqRelocation.mode === "pack" ? "PACKING" : "DEPLOYING"} · ${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s` : ui.selectedBuilding === "hq" && ui.hqPacked ? "MOBILE · COMMAND SYSTEMS OFFLINE" : ui.selectedBuilding === "hq" ? "COMMAND & WORKERS" : ui.selectedBuilding === "intelligence" ? "CIPHERS & RESEARCH" : ["barracks", "foundry", "hangar"].includes(ui.selectedBuilding) ? "UNIT PRODUCTION" : ui.selectedBuilding === "exchange" ? `+${Math.round(ui.exchangeIncome * 60)} CREDITS/MIN NETWORK` : "STRUCTURE ORDERS"}</small>
+                <small>{ui.selectedConstruction ? "CONSTRUCTION WIREFRAME" : ui.selectedBuilding === "hq" && ui.hqRelocation ? `${ui.hqRelocation.mode === "pack" ? "PACKING" : "DEPLOYING"} · ${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s` : ui.selectedBuilding === "hq" && ui.hqPacked ? "MOBILE · COMMAND SYSTEMS OFFLINE" : ui.selectedBuilding === "hq" ? "COMMAND & WORKERS" : ui.selectedBuilding === "intelligence" ? `INTEL +${Math.round(SATELLITE_UPLINK_INTEL_RATE * 60)}/MIN · RESEARCH` : ["barracks", "foundry", "hangar"].includes(ui.selectedBuilding) ? "UNIT PRODUCTION" : ui.selectedBuilding === "exchange" ? `+${Math.round(ui.exchangeIncome * 60)} CREDITS/MIN NETWORK` : "STRUCTURE ORDERS"}</small>
               </div>
             ) : (
               <div className="selection-command-header no-command">

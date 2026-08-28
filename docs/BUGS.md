@@ -2,25 +2,20 @@
 
 Only active or unresolved defects belong here. Move fixed items into `RELEASES.md` and remove them from this file.
 
-## FC-001 — Worker mining and duty-resume regression needs confirmation
+## FC-002 — Worker southeast sprite faces southwest
 
-- **Status:** Repair deployed in v103; needs live device confirmation
-- **First reported:** v99-era session, 2026-08-27/28
-- **Reported behavior:** Workers stopped mining and could not be made to mine.
-- **v103 repair:** Directly assigning a Worker to a resource now clears construction, repair, auto-repair, hold, emergency-retreat, combat-travel, formation-speed, garrison-route, combat-timestamp, and transient activity state. An attacked Worker still saves its duty, retreats to HQ, waits five safe seconds, and restores that duty.
-- **Remaining risk:** A migrated save or pointer/hit-detection path could still reproduce the original symptom. Code invariants pass, but the complete live loop requires device confirmation.
+- **Status:** Fix implemented for the next gameplay release; awaiting live-device confirmation
+- **First reported:** Live v103 test, 2026-08-28
+- **Reported behavior:** A Worker traveling southeast displayed a frame facing the opposite horizontal direction.
+- **Cause:** The four Worker sheets are stored as `N, NW, W, SW / S, SE, E, NE`, while the shared renderer expects `N, NE, E, SE / S, SW, W, NW`.
+- **Prepared repair:** Worker frames now use the remap `[0, 7, 6, 5, 4, 3, 2, 1]` across idle, walking, and mining sheets. Other unit atlases are unchanged.
+- **Resolution requirement:** On the live candidate, move a Worker through all eight headings and confirm southeast/southwest and east/west are no longer reversed.
 
-### Reproduction checklist
+## FC-003 — Satellite Uplink does not independently generate intel
 
-1. Start a new solo Tactical Fog match.
-2. Build and complete a Refinery.
-3. Confirm the starting Worker automatically mines and deposits credits.
-4. Select the Worker and tap an alloy deposit; confirm it changes target, unloads mismatched cargo, mines alloy, and deposits it.
-5. Give the Worker a ground move/hold order, then tap a deposit; confirm the deposit order restarts mining.
-6. Let an enemy damage the Worker; confirm it retreats toward HQ and only fires at a close threat.
-7. After five safe seconds near HQ, confirm it returns to the same deposit/duty.
-8. Save during or after the sequence, reload, and confirm the duty remains valid.
-
-### Resolution requirement
-
-Do not close this bug based only on code inspection. Record the tested release, device/browser, save type (new or migrated), and observed result.
+- **Status:** Fix implemented for the next gameplay release; awaiting live-device confirmation
+- **First reported:** Live v103 test, 2026-08-28
+- **Reported behavior:** Completing a Satellite Uplink unlocked the map but did not increase intel. The player still had to secure/garrison an Intel Relay to gain intel.
+- **Cause:** v102/v103 gated Relay income behind the Uplink instead of making the Uplink the requested intel source.
+- **Prepared repair:** One or more operational Uplinks now provide a non-stacking team feed of 0.5 intel/second. Relays generate zero intel and remain optional +5% damage/garrison objectives. Player and AI use the same rule.
+- **Resolution requirement:** Confirm the counter gains one intel every two seconds with an operational Uplink and no owned Relay; confirm another Uplink does not double it and loss of all Uplinks stops the feed.

@@ -28,6 +28,8 @@ If code and documentation disagree, treat the code as current behavior and repai
 
 No Frontier Command release is finished until both the Sites source repository and `Tylerberg45/Frontier-Command` on GitHub contain the exact released source snapshot.
 
+A requested Frontier Command source change includes standing permission to publish it to the existing public Frontier Command Site and synchronize GitHub unless the user explicitly says to keep that change local, prepared, or unpublished. Do not ask for a redundant publish confirmation.
+
 Follow `docs/RELEASE_PROCESS.md`. In short:
 
 1. Make the change.
