@@ -13,6 +13,22 @@ type P = { x: number; y: number };
 type Doctrine = "air" | "armor";
 type UpgradeKind = "fireControl" | "reinforcedFrames" | "tacticalIntelligence";
 type UpgradeLevels = Record<UpgradeKind, number>;
+type WorkerDutySnapshot = {
+  workerMode?: "mine" | "hold" | "construct" | "repair";
+  autoRepair?: boolean;
+  target?: P;
+  resourceTarget?: number;
+  repairTarget?: number;
+  repairRelayTarget?: number;
+  buildTarget?: number;
+  buildQueue?: number[];
+  stance?: "pursue" | "hold" | "patrol";
+  patrol?: { a: P; b: P; next: "a" | "b" };
+};
+type WorkerEscape = {
+  startedAt: number;
+  resume: WorkerDutySnapshot;
+};
 type Unit = {
   id: number;
   team: "player" | "enemy";
@@ -74,6 +90,8 @@ type Unit = {
   repairRelayTarget?: number;
   /** Persistent worker duty. Move orders become hold duty instead of resuming mining. */
   workerMode?: "mine" | "hold" | "construct" | "repair";
+  /** Saved duty while a threatened Worker automatically retreats to its HQ. */
+  workerEscape?: WorkerEscape;
   buildTarget?: number;
   /** Ordered construction sites assigned to this Worker. */
   buildQueue?: number[];
@@ -509,6 +527,15 @@ function buildTypeFromMode(mode: Game["mode"]): Exclude<BuildingType, "hq"> | nu
 function productionSource(type: Unit["type"]): ProductionBuilding {
   return type === "worker" ? "hq" : type === "trooper" ? "barracks" : type === "tank" ? "foundry" : type === "drone" ? "hangar" : "intelligence";
 }
+function buildingDisplayName(type: BuildingType) {
+  return type === "hq" ? "HEADQUARTERS"
+    : type === "foundry" ? "ARMOR FOUNDRY"
+      : type === "intelligence" ? "SATELLITE UPLINK"
+        : type === "hangar" ? "DRONE HANGAR"
+          : type === "turret" ? "SENTRY TURRET"
+            : type === "exchange" ? "TRADE EXCHANGE"
+              : type.toUpperCase();
+}
 const FORTIFY_INTEL_COST = 180;
 const OBJECTIVE_CAPTURE_TIME = 10;
 const OBJECTIVE_CAPTURE_RADIUS = 105;
@@ -590,6 +617,8 @@ const UPKEEP_SOFT_CAP = 10;
 const REPAIR_RATE = 24;
 const REPAIR_ALLOY_PER_HP = 0.12;
 const MAINTENANCE_PATROL_SCAN = 185;
+const WORKER_ESCAPE_SAFE_TIME = 5;
+const WORKER_ESCAPE_HQ_RADIUS = 118;
 const SENTRY_RANGE_MULTIPLIER = 1.35;
 const TUTORIALS_KEY = "frontier-command-tutorials-v1";
 const DISMISSED_TIPS_KEY = "frontier-command-dismissed-tips-v1";
@@ -820,6 +849,7 @@ const unitDuty = (unit: Unit) => {
     return "ECONOMIC SPECIALIST · MOBILE";
   }
   if (isCombatUnit(unit)) return `${unitRole(unit.type)}${unit.type === "trooper" && unit.stance === "hold" ? ` · SENTRY ${Math.round(unitCombatRange(unit))} RANGE` : ""}`;
+  if (unit.workerEscape) return "EVADING · RETURNING TO HQ";
   if (unit.autoRepair) return `MAINTENANCE${unit.stance === "patrol" ? " PATROL" : ""}${unit.repairing ? " · REPAIRING" : ""}`;
   if (unit.workerMode === "construct") {
     const queued = unit.buildQueue?.length || (unit.buildTarget ? 1 : 0);
@@ -864,6 +894,21 @@ function normalizeUnits(units: Unit[]): Unit[] {
         raw.type === "worker" && ["mine", "hold", "construct", "repair"].includes(raw.workerMode || "")
           ? raw.workerMode
           : raw.type === "worker" ? "mine" : undefined,
+      workerEscape:
+        raw.type === "worker" && raw.workerEscape?.resume
+          ? {
+              startedAt: Number(raw.workerEscape.startedAt) || 0,
+              resume: {
+                ...raw.workerEscape.resume,
+                target: raw.workerEscape.resume.target
+                  ? { x: Number(raw.workerEscape.resume.target.x) || 0, y: Number(raw.workerEscape.resume.target.y) || 0 }
+                  : undefined,
+                buildQueue: Array.isArray(raw.workerEscape.resume.buildQueue)
+                  ? raw.workerEscape.resume.buildQueue.filter((id) => Number.isInteger(id))
+                  : [],
+              },
+            }
+          : undefined,
       buildTarget: Number.isInteger(raw.buildTarget) ? raw.buildTarget : undefined,
       buildQueue: Array.isArray(raw.buildQueue)
         ? raw.buildQueue.filter((id) => Number.isInteger(id))
@@ -951,6 +996,7 @@ function movePackedHq(g: Game, hq: Building, dt: number) {
 }
 
 function queueWorkerConstruction(worker: Unit, buildingId: number) {
+  cancelWorkerEscape(worker);
   const queue = Array.isArray(worker.buildQueue) ? worker.buildQueue : [];
   if (!queue.includes(buildingId)) queue.push(buildingId);
   worker.buildQueue = queue;
@@ -966,6 +1012,7 @@ function queueWorkerConstruction(worker: Unit, buildingId: number) {
 
 /** Put a selected Worker on an existing wireframe immediately, preserving later jobs. */
 function assignWorkerToPendingConstruction(worker: Unit, buildingId: number) {
+  cancelWorkerEscape(worker);
   const queue = Array.isArray(worker.buildQueue)
     ? worker.buildQueue
     : worker.buildTarget ? [worker.buildTarget] : [];
@@ -991,6 +1038,7 @@ function clearWorkerConstruction(worker: Unit, nextMode: Unit["workerMode"] = "h
 
 function assignWorkersToRelayRepair(workers: Unit[], relay: Objective) {
   workers.forEach((worker) => {
+    cancelWorkerEscape(worker);
     clearWorkerConstruction(worker, "repair");
     worker.repairRelayTarget = relay.id;
     worker.workerMode = "repair";
@@ -1014,6 +1062,7 @@ function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number
   const resource = g.crystals[resourceIndex];
   if (!resource || resource.amount <= 0) return false;
   workers.forEach((worker) => {
+    cancelWorkerEscape(worker);
     clearWorkerConstruction(worker, "mine");
     worker.resourceTarget = resourceIndex;
     worker.autoRepair = false;
@@ -1023,10 +1072,85 @@ function assignWorkersToResource(g: Game, workers: Unit[], resourceIndex: number
     worker.target = undefined;
     worker.nav = undefined;
     worker.patrol = undefined;
+    // A direct resource order is authoritative. Clear every stale transient
+    // left by combat travel, garrison routing, repair, construction, or the
+    // emergency-retreat loop so the Worker can enter the mining branch on the
+    // very next simulation tick.
     worker.retreating = false;
+    worker.moveEngage = false;
+    worker.formationSpeed = undefined;
+    worker.garrisonTarget = undefined;
+    worker.lastCombatAt = undefined;
+    worker.mining = false;
+    worker.building = false;
+    worker.repairing = false;
     if (worker.stance === "patrol") worker.stance = "pursue";
   });
   return true;
+}
+
+function cancelWorkerEscape(worker: Unit) {
+  if (worker.type !== "worker") return;
+  worker.workerEscape = undefined;
+  worker.retreating = false;
+}
+
+function beginWorkerEscape(g: Game, worker: Unit) {
+  if (worker.type !== "worker" || worker.hp <= 0) return;
+  if (!worker.workerEscape) {
+    worker.workerEscape = {
+      startedAt: g.time,
+      resume: {
+        workerMode: worker.workerMode,
+        autoRepair: worker.autoRepair,
+        target: worker.target ? { ...worker.target } : undefined,
+        resourceTarget: worker.resourceTarget,
+        repairTarget: worker.repairTarget,
+        repairRelayTarget: worker.repairRelayTarget,
+        buildTarget: worker.buildTarget,
+        buildQueue: [...(worker.buildQueue || [])],
+        stance: worker.stance,
+        patrol: worker.patrol
+          ? { a: { ...worker.patrol.a }, b: { ...worker.patrol.b }, next: worker.patrol.next }
+          : undefined,
+      },
+    };
+  }
+  worker.retreating = true;
+  worker.workerMode = "hold";
+  worker.autoRepair = false;
+  worker.resourceTarget = undefined;
+  worker.repairTarget = undefined;
+  worker.repairRelayTarget = undefined;
+  worker.buildTarget = undefined;
+  worker.buildQueue = [];
+  worker.patrol = undefined;
+  worker.moveEngage = false;
+  worker.formationSpeed = undefined;
+  worker.enemy = undefined;
+  worker.target = undefined;
+  worker.nav = undefined;
+}
+
+function resumeWorkerDuty(worker: Unit) {
+  const saved = worker.workerEscape?.resume;
+  if (!saved) return;
+  worker.workerMode = saved.workerMode || "mine";
+  worker.autoRepair = Boolean(saved.autoRepair);
+  worker.target = saved.target ? { ...saved.target } : undefined;
+  worker.resourceTarget = saved.resourceTarget;
+  worker.repairTarget = saved.repairTarget;
+  worker.repairRelayTarget = saved.repairRelayTarget;
+  worker.buildTarget = saved.buildTarget;
+  worker.buildQueue = [...(saved.buildQueue || [])];
+  worker.stance = saved.stance || "pursue";
+  worker.patrol = saved.patrol
+    ? { a: { ...saved.patrol.a }, b: { ...saved.patrol.b }, next: saved.patrol.next }
+    : undefined;
+  worker.workerEscape = undefined;
+  worker.retreating = false;
+  worker.enemy = undefined;
+  worker.nav = undefined;
 }
 
 function isIdleWorker(g: Game, unit: Unit) {
@@ -1369,6 +1493,13 @@ function intelRelayOperational(objective: Objective) {
   return objective.hp > 0 && objective.rebuildAt === undefined;
 }
 
+/** The Satellite Uplink is the player's mid-game gateway to strategic intel. */
+function satelliteUplinkOnline(g: Game, team: Unit["team"]) {
+  return g.buildings.some((building) =>
+    building.team === team && building.type === "intelligence" && buildingOperational(building),
+  );
+}
+
 function recordRelayAttackAlert(g: Game, objective: Objective, defendingTeam: Unit["team"]) {
   const alerts = g.attackAlerts || (g.attackAlerts = []);
   const targetId = -(10000 + objective.id);
@@ -1463,8 +1594,8 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
     enemyCredits: 550,
     alloy: 520,
     enemyAlloy: 520,
-    intel: 40,
-    enemyIntel: 40,
+    intel: 0,
+    enemyIntel: 0,
     power: 12,
     enemyPower: 12,
     wave: 0,
@@ -1483,7 +1614,7 @@ function initial(options: { fogEnabled?: boolean } = {}): Game {
     zoom: 1,
     mode: "select",
     message:
-      `PREPARATION PHASE — mine credits for units, alloy for structures, and secure Intel Relays. AI level ${adaptive < .95 ? "easing" : adaptive > 1.05 ? "rising" : "steady"}.`,
+      `PREPARATION PHASE — mine credits and alloy, then build the Satellite Uplink for the tactical map and intel. AI level ${adaptive < .95 ? "easing" : adaptive > 1.05 ? "rising" : "steady"}.`,
     over: "",
     fortified: false,
     fortifyProduction: undefined,
@@ -1584,8 +1715,8 @@ function initialMultiplayer(options: { fogEnabled?: boolean } = {}): Game {
   g.enemyCredits = 650;
   g.alloy = 520;
   g.enemyAlloy = 520;
-  g.intel = 40;
-  g.enemyIntel = 40;
+    g.intel = 0;
+    g.enemyIntel = 0;
   g.power = 12;
   g.enemyPower = 12;
   g.wave = 0;
@@ -2137,7 +2268,7 @@ export default function Home() {
     load("trooperDirections", "/game-art/frontier-trooper-directions-v2.png");
     load("trooperWalk", "/game-art/frontier-trooper-walk-b-v3.png");
     load("trooperWalkC", "/game-art/frontier-trooper-walk-c-v4.png");
-    load("tankDirections", "/game-art/frontier-tank-directions-v2.png");
+    load("tankDirections", "/game-art/frontier-tank-2p5d-directions-v1.png");
     load("droneDirections", "/game-art/frontier-strike-drone-directions-v1.png");
     load("droneMove", "/game-art/frontier-strike-drone-move-b-v2.png");
     load("cipherDirections", "/game-art/frontier-cipher-directions-v1.png");
@@ -2235,8 +2366,8 @@ export default function Home() {
               ? `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${unitDuty(one)}`
               : `${unitName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP · ${Math.round(stats[one.type].damage * (1 + ((one.level || 1) - 1) * 0.18))} DMG · ${unitDuty(one)} · ${(one.supply ?? SUPPLY_CAPACITY) > 0 ? `SUPPLY ${Math.ceil(one.supply ?? SUPPLY_CAPACITY)}s` : "OUT OF SUPPLY −25%"}${(one.level || 1) > 1 ? ` · REGEN ${(veteranRegenRate(one) * 100).toFixed(0)}% HP/s` : ""}${one.retreating ? " · RETREATING" : ""}${rank}`
             : (one.progress ?? 1) < 1
-              ? `${one.type.toUpperCase()} WIREFRAME · ${one.constructionStarted ? `${Math.round((one.progress || 0) * 100)}% BUILT` : "WAITING FOR WORKER"}`
-              : `${one.type === "turret" ? "SENTRY TURRET · 210 RANGE · 12 DMG" : one.type === "exchange" ? `TRADE EXCHANGE · +${Math.round(exchangeIncome(g, one) * 60)} CREDITS/MIN` : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : one.type.toUpperCase()} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` · ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " · MOBILE · SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " · FORTIFIED" : ""}`
+              ? `${buildingDisplayName(one.type)} WIREFRAME · ${one.constructionStarted ? `${Math.round((one.progress || 0) * 100)}% BUILT` : "WAITING FOR WORKER"}`
+              : `${one.type === "turret" ? "SENTRY TURRET · 210 RANGE · 12 DMG" : one.type === "exchange" ? `TRADE EXCHANGE · +${Math.round(exchangeIncome(g, one) * 60)} CREDITS/MIN` : one.type === "hq" && one.packed ? "COMMAND CRAWLER" : buildingDisplayName(one.type)} · ${Math.ceil(one.hp)}/${Math.ceil(one.max)} HP${one.type === "hq" && one.relocation ? ` · ${one.relocation.mode === "pack" ? "PACKING" : "DEPLOYING"} ${Math.round(one.relocation.elapsed / one.relocation.duration * 100)}%` : one.type === "hq" && one.packed ? " · MOBILE · SYSTEMS OFFLINE" : one.type === "hq" && g.fortified ? " · FORTIFIED" : ""}`
           : `${chosen.length} UNITS SELECTED`
         : "No selection",
       message: g.message,
@@ -2372,6 +2503,7 @@ export default function Home() {
         .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
       if (repairable && Math.hypot(repairable.x - wx, repairable.y - wy) < 70) {
         workers.filter((worker) => worker.id !== repairable.id).forEach((worker) => {
+          cancelWorkerEscape(worker);
           clearWorkerConstruction(worker, "repair");
           worker.repairTarget = repairable.id;
           worker.workerMode = "repair";
@@ -2388,6 +2520,7 @@ export default function Home() {
         patrollers.forEach((unit) => { unit.patrol = { a: { x: wx, y: wy }, b: { x: wx, y: wy }, next: "a" }; });
       } else {
         patrollers.forEach((unit, index) => {
+          if (unit.type === "worker") cancelWorkerEscape(unit);
           const a = unit.patrol?.a || { x: unit.x, y: unit.y };
           unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
           unit.stance = "patrol";
@@ -2484,6 +2617,7 @@ export default function Home() {
       .sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy))[0];
     if (remoteWorkers.length === units.length && friendlyRepairable && Math.hypot(friendlyRepairable.x - wx, friendlyRepairable.y - wy) < 65) {
       remoteWorkers.filter((worker) => worker.id !== friendlyRepairable.id).forEach((worker) => {
+        cancelWorkerEscape(worker);
         clearWorkerConstruction(worker, "repair");
         worker.repairTarget = friendlyRepairable.id;
         worker.workerMode = "repair";
@@ -2501,6 +2635,7 @@ export default function Home() {
     const formation = formationDestinations(units, { x: wx, y: wy });
     const formationSpeed = formationTravelSpeed(g, units);
     for (const [index, unit] of units.entries()) {
+      if (unit.type === "worker") cancelWorkerEscape(unit);
       if (unit.garrisonedAt) ejectFromIntelRelay(g, unit);
       unit.garrisonTarget = undefined;
       if (attacking && isCombatUnit(unit)) {
@@ -2635,6 +2770,7 @@ export default function Home() {
       const workers = selectedUnits.filter((unit) => unit.type === "worker");
       const enable = workers.some((worker) => !worker.autoRepair);
       workers.forEach((worker) => {
+        cancelWorkerEscape(worker);
         worker.autoRepair = enable;
         clearWorkerConstruction(worker, enable ? "hold" : "mine");
         worker.repairTarget = undefined;
@@ -2900,7 +3036,7 @@ export default function Home() {
       g.mode = "select";
       g.matchStats.meaningfulActions++;
       g.matchStats.orders++;
-      g.message = `${b.type.toUpperCase()} rally point set.`;
+      g.message = `${buildingDisplayName(b.type)} rally point set.`;
       sync();
       return;
     }
@@ -2950,6 +3086,7 @@ export default function Home() {
       }
       const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== repairable.id);
       assignedWorkers.forEach((worker) => {
+        cancelWorkerEscape(worker);
         clearWorkerConstruction(worker, "repair");
         worker.repairTarget = repairable.id;
         worker.workerMode = "repair";
@@ -2977,6 +3114,7 @@ export default function Home() {
     }
     if (g.mode === "set-patrol-b") {
       selectedPatrollers.forEach((unit, index) => {
+        if (unit.type === "worker") cancelWorkerEscape(unit);
         const a = unit.patrol?.a || { x: unit.x, y: unit.y };
         unit.patrol = { a, b: { x: wx, y: wy }, next: "b" };
         unit.stance = "patrol";
@@ -3002,12 +3140,12 @@ export default function Home() {
       if (!type) return;
       const hasOperational = (required: BuildingType) => g.buildings.some((building) => building.team === "player" && building.type === required && buildingOperational(building));
       if ((type === "foundry" || type === "intelligence") && !hasOperational("barracks")) {
-        g.message = `${type === "foundry" ? "Armor Foundry" : "Intelligence Center"} requires a completed Barracks.`;
+        g.message = `${type === "foundry" ? "Armor Foundry" : "Satellite Uplink"} requires a completed Barracks.`;
         sync();
         return;
       }
       if (type === "hangar" && !hasOperational("intelligence")) {
-        g.message = "Drone Hangar requires a completed Intelligence Center.";
+        g.message = "Drone Hangar requires a completed Satellite Uplink.";
         sync();
         return;
       }
@@ -3060,7 +3198,7 @@ export default function Home() {
       selectedWorkers.forEach((worker) => {
         queueWorkerConstruction(worker, buildingId);
       });
-      g.message = `${type.toUpperCase()} queued — assigned Worker${selectedWorkers.length === 1 ? "" : "s"} will build it in order. Tap another site or press Cancel.`;
+      g.message = `${buildingDisplayName(type)} queued — assigned Worker${selectedWorkers.length === 1 ? "" : "s"} will build it in order. Tap another site or press Cancel.`;
       sync();
       return;
     }
@@ -3138,6 +3276,7 @@ export default function Home() {
     ) {
       const assignedWorkers = selectedWorkers.filter((worker) => worker.id !== friendlyRepairable.id);
       assignedWorkers.forEach((worker) => {
+        cancelWorkerEscape(worker);
         clearWorkerConstruction(worker, "repair");
         worker.repairTarget = friendlyRepairable.id;
         worker.workerMode = "repair";
@@ -3164,6 +3303,7 @@ export default function Home() {
     if (attacking)
       ours.forEach((u, index) => {
         if (!isCombatUnit(u)) {
+          if (u.type === "worker") cancelWorkerEscape(u);
           u.enemy = undefined;
           u.target = { x: wx + (index % 3) * 26, y: wy + Math.floor(index / 3) * 26 };
           u.moveEngage = false;
@@ -3186,6 +3326,7 @@ export default function Home() {
       });
     else
       ours.forEach((u, i) => {
+        if (u.type === "worker") cancelWorkerEscape(u);
         if (u.garrisonedAt) ejectFromIntelRelay(g, u);
         u.retreating = false;
         u.enemy = undefined;
@@ -3352,7 +3493,7 @@ export default function Home() {
             : name === "build-foundry"
               ? "ARMOR FOUNDRY PLACEMENT: tap a clear location near your production line."
               : name === "build-intelligence"
-                ? "INTELLIGENCE CENTER PLACEMENT: tap a protected location."
+                ? "SATELLITE UPLINK PLACEMENT: tap a protected location."
                 : name === "build-hangar"
                   ? "DRONE HANGAR PLACEMENT: tap a clear location with room for launch operations."
             : name === "build-exchange"
@@ -3424,7 +3565,7 @@ export default function Home() {
       g.matchStats.meaningfulActions++;
       if (b.progress === 1 && b.type !== "turret")
         g.power = Math.max(0, g.power - (b.type === "refinery" ? 4 : 2));
-      g.message = `${b.type} sold for ${refund} alloy.`;
+      g.message = `${buildingDisplayName(b.type)} sold for ${refund} alloy.`;
       sync();
       return;
     }
@@ -3448,7 +3589,7 @@ export default function Home() {
       g.mode = "select";
       g.alloy += refund;
       g.matchStats.meaningfulActions++;
-      g.message = `${b.type.toUpperCase()} construction cancelled · ${refund} alloy refunded. Remaining sites renumbered.`;
+      g.message = `${buildingDisplayName(b.type)} construction cancelled · ${refund} alloy refunded. Remaining sites renumbered.`;
       sync();
       return;
     }
@@ -3475,13 +3616,13 @@ export default function Home() {
     if (name === "doctrine-air" || name === "doctrine-armor") {
       const doctrine: Doctrine = name === "doctrine-air" ? "air" : "armor";
       if (!b || b.type !== "intelligence" || !buildingOperational(b)) {
-        g.message = "Select your Intelligence Center first to commit to a doctrine.";
+        g.message = "Select your Satellite Uplink first to commit to a doctrine.";
       } else if (g.doctrine) {
         g.message = `${g.doctrine === "air" ? "Air Superiority" : "Armored Command"} is locked in for this match.`;
       } else if (g.doctrineProduction) {
         g.message = "Doctrine research is already in progress.";
       } else if (g.tradeNetworkProduction || g.upgradeProduction || b.production) {
-        g.message = "Intelligence Center is busy — finish its current operation first.";
+        g.message = "Satellite Uplink is busy — finish its current operation first.";
       } else if (g.intel < DOCTRINE_INTEL_COST) {
         g.message = `${doctrine === "air" ? "Air Superiority" : "Armored Command"} requires ${DOCTRINE_INTEL_COST} intel.`;
       } else {
@@ -3494,13 +3635,13 @@ export default function Home() {
     }
     if (name === "trade-network") {
       if (!b || b.type !== "intelligence" || !buildingOperational(b)) {
-        g.message = "Select your Intelligence Center first to research Trade Network.";
+        g.message = "Select your Satellite Uplink first to research Trade Network.";
       } else if (g.tradeNetwork) {
         g.message = "Trade Network is already online.";
       } else if (g.tradeNetworkProduction) {
         g.message = `Trade Network research is already in progress — ${Math.max(0, Math.ceil(g.tradeNetworkProduction.duration - g.tradeNetworkProduction.elapsed))} seconds remaining.`;
       } else if (g.doctrineProduction || g.upgradeProduction || b.production) {
-        g.message = "Intelligence Center is busy — finish its current operation first.";
+        g.message = "Satellite Uplink is busy — finish its current operation first.";
       } else if (g.intel < TRADE_NETWORK_INTEL_COST) {
         g.message = `Trade Network requires ${TRADE_NETWORK_INTEL_COST} intel.`;
       } else {
@@ -3518,11 +3659,11 @@ export default function Home() {
       const upgrades = g.upgrades ||= emptyUpgrades();
       const level = upgrades[type] + 1;
       if (!b || b.type !== "intelligence" || !buildingOperational(b)) {
-        g.message = "Select your Intelligence Center first to research an army upgrade.";
+        g.message = "Select your Satellite Uplink first to research an army upgrade.";
       } else if (level > MAX_UPGRADE_LEVEL) {
         g.message = `${upgradeName(type)} is already at maximum level.`;
       } else if (g.upgradeProduction || g.doctrineProduction || g.tradeNetworkProduction || b.production) {
-        g.message = "Intelligence Center is busy — finish its current operation first.";
+        g.message = "Satellite Uplink is busy — finish its current operation first.";
       } else if (g.intel < UPGRADE_COSTS[level as 1 | 2 | 3]) {
         g.message = `${upgradeName(type)} level ${level} requires ${UPGRADE_COSTS[level as 1 | 2 | 3]} intel.`;
       } else {
@@ -3590,6 +3731,7 @@ export default function Home() {
       else {
         const enable = selectedWorkers.some((worker) => !worker.autoRepair);
         selectedWorkers.forEach((worker) => {
+          cancelWorkerEscape(worker);
           worker.autoRepair = enable;
           clearWorkerConstruction(worker, enable ? "hold" : "mine");
           worker.repairTarget = undefined;
@@ -3680,7 +3822,7 @@ export default function Home() {
     );
     if (!selectedProduction) {
       g.message =
-        `Select a completed ${wanted === "hq" ? "HQ" : wanted === "barracks" ? "Barracks" : wanted === "foundry" ? "Armor Foundry" : wanted === "hangar" ? "Drone Hangar" : "Intelligence Center"} first.`;
+        `Select a completed ${buildingDisplayName(wanted)} first.`;
       sync();
       return;
     }
@@ -3690,12 +3832,12 @@ export default function Home() {
       return;
     }
     if (type === "cipher" && (g.doctrineProduction || g.tradeNetworkProduction || g.upgradeProduction)) {
-      g.message = `Intelligence Center is busy with research — ${unitName(type)} production is paused.`;
+      g.message = `Satellite Uplink is busy with research — ${unitName(type)} production is paused.`;
       sync();
       return;
     }
     if (type === "cipher" && !g.tradeNetwork) {
-      g.message = "Research Trade Network at the Intelligence Center before training a Cipher.";
+      g.message = "Research Trade Network at the Satellite Uplink before training a Cipher.";
       sync();
       return;
     }
@@ -3706,13 +3848,13 @@ export default function Home() {
     }
     b = selectedProduction;
     if (!b.production && (b.cooldown || 0) > 0) {
-      g.message = `${b.type.toUpperCase()} recovering — ${Math.ceil(b.cooldown || 0)} seconds until the next production burst.`;
+      g.message = `${buildingDisplayName(b.type)} recovering — ${Math.ceil(b.cooldown || 0)} seconds until the next production burst.`;
       sync();
       return;
     }
     const pending = (b.production?.queue?.length || 0) + (b.production ? 1 : 0);
     if (pending >= MAX_QUEUE) {
-      g.message = `${b.type.toUpperCase()} queue is full (${MAX_QUEUE} units).`;
+      g.message = `${buildingDisplayName(b.type)} queue is full (${MAX_QUEUE} units).`;
       sync();
       return;
     }
@@ -3734,7 +3876,7 @@ export default function Home() {
         duration: productionDurationFor(g, "player", type),
         queue: [],
       };
-      g.message = `${unitName(type)} production started at ${b.type.toUpperCase()}.`;
+      g.message = `${unitName(type)} production started at ${buildingDisplayName(b.type)}.`;
     } else {
       b.production.queue = [...(b.production.queue || []), type];
       g.message = `${unitName(type)} added to queue · ${pending + 1}/${MAX_QUEUE} units queued.`;
@@ -4055,13 +4197,13 @@ export default function Home() {
       const homeHq = g.buildings.find((building) => building.team === unit.team && building.type === "hq" && buildingOperational(building));
       if (homeHq && Math.hypot(homeHq.x - unit.x, homeHq.y - unit.y) <= 155) {
         unit.hp = Math.min(unit.max, unit.hp + (unit.retreating ? 12 : 4) * dt);
-        if (unit.retreating && Math.hypot(homeHq.x - unit.x, homeHq.y - unit.y) <= 120) {
+        if (unit.retreating && !unit.workerEscape && Math.hypot(homeHq.x - unit.x, homeHq.y - unit.y) <= 120) {
           unit.retreating = false;
           unit.target = undefined;
           unit.nav = undefined;
         }
       }
-      if (unit.retreating) unit.enemy = undefined;
+      if (unit.retreating && !unit.workerEscape) unit.enemy = undefined;
       const regenRate = veteranRegenRate(unit);
       if (regenRate > 0) {
         unit.hp = Math.min(unit.max, unit.hp + unit.max * regenRate * dt);
@@ -4128,8 +4270,8 @@ export default function Home() {
       if (objective.capture >= OBJECTIVE_CAPTURE_TIME) objective.owner = "player";
       else if (objective.capture <= -OBJECTIVE_CAPTURE_TIME) objective.owner = "enemy";
       else if ((objective.owner === "player" && objective.capture <= 0) || (objective.owner === "enemy" && objective.capture >= 0)) objective.owner = "neutral";
-      if (objective.owner === "player") g.intel += OBJECTIVE_INTEL_RATE * dt;
-      if (objective.owner === "enemy") g.enemyIntel += OBJECTIVE_INTEL_RATE * dt;
+      if (objective.owner === "player" && satelliteUplinkOnline(g, "player")) g.intel += OBJECTIVE_INTEL_RATE * dt;
+      if (objective.owner === "enemy" && satelliteUplinkOnline(g, "enemy")) g.enemyIntel += OBJECTIVE_INTEL_RATE * dt;
       if (objective.owner !== oldOwner) {
         if (objective.owner !== "enemy" || isVisible(g, objective, HIGH_GROUND_RADIUS)) {
           g.message = objective.owner === "neutral"
@@ -4214,7 +4356,7 @@ export default function Home() {
         if (team === "player") {
           g.tradeNetwork = true;
           g.tradeNetworkProduction = undefined;
-          g.message = "TRADE NETWORK online — Cipher production unlocked at the Intelligence Center.";
+          g.message = "TRADE NETWORK online — Cipher production unlocked at the Satellite Uplink.";
         } else {
           g.enemyTradeNetwork = true;
           g.enemyTradeNetworkProduction = undefined;
@@ -4282,7 +4424,7 @@ export default function Home() {
         else g.enemyPower = (g.enemyPower ?? 12) + (b.type === "refinery" ? 4 : 2);
       }
       if (b.team === "player" || isVisible(g, b, buildingStats[b.type].r)) {
-        g.message = `${b.team === "enemy" ? "Enemy " : ""}${b.type} operational.`;
+          g.message = `${b.team === "enemy" ? "Enemy " : ""}${buildingDisplayName(b.type)} operational.`;
         sync();
       }
     }
@@ -4405,6 +4547,37 @@ export default function Home() {
           u.nav = undefined;
           u.plateauRoute = undefined;
           u.moving = false;
+        }
+      }
+      if (u.type === "worker" && u.workerEscape) {
+        const hq = g.buildings.find((building) =>
+          building.team === u.team && building.type === "hq" && building.hp > 0,
+        );
+        const hqDistance = hq ? Math.hypot(hq.x - u.x, hq.y - u.y) : Infinity;
+        const safeLongEnough = g.time - (u.lastCombatAt ?? u.workerEscape.startedAt) >= WORKER_ESCAPE_SAFE_TIME;
+        if ((!hq || hqDistance <= WORKER_ESCAPE_HQ_RADIUS) && safeLongEnough) {
+          resumeWorkerDuty(u);
+        } else {
+          if (hq && hqDistance > WORKER_ESCAPE_HQ_RADIUS) {
+            const angle = (u.id * 2.399) % (Math.PI * 2);
+            u.target = {
+              x: hq.x + Math.cos(angle) * (WORKER_ESCAPE_HQ_RADIUS - 18),
+              y: hq.y + Math.sin(angle) * (WORKER_ESCAPE_HQ_RADIUS - 18),
+            };
+          } else {
+            u.target = undefined;
+            u.nav = undefined;
+          }
+          const closeThreat = g.units
+            .filter((candidate) =>
+              candidate.team !== u.team &&
+              candidate.hp > 0 &&
+              Math.hypot(candidate.x - u.x, candidate.y - u.y) <= stats.worker.range,
+            )
+            .sort((a, b) =>
+              Math.hypot(a.x - u.x, a.y - u.y) - Math.hypot(b.x - u.x, b.y - u.y),
+            )[0];
+          u.enemy = closeThreat?.id;
         }
       }
       let target = objs().find(
@@ -4592,7 +4765,10 @@ export default function Home() {
               recordAttackAlert(g, combatTarget);
             }
             u.lastCombatAt = g.time;
-            if (!relayShield && !isBuilding && isUnit(combatTarget)) combatTarget.lastCombatAt = g.time;
+            if (!relayShield && !isBuilding && isUnit(combatTarget)) {
+              combatTarget.lastCombatAt = g.time;
+              if (combatTarget.type === "worker") beginWorkerEscape(g, combatTarget);
+            }
             if (isBuilding && combatTarget.team === "player") {
               g.matchStats.baseDamage += actualDamage;
             }
@@ -4857,6 +5033,7 @@ export default function Home() {
           target.hp = Math.max(0, target.hp - damage);
           recordAttackAlert(g, target);
           target.lastCombatAt = g.time;
+          if (target.type === "worker") beginWorkerEscape(g, target);
         }
         g.damageNumbers.push({ x: hitX, y: hitY - 18, amount: Math.round(damage), life: 0.9, team: turret.team });
         g.shots.push({ x: turret.x, y: turret.y, tx: hitX, ty: hitY, team: turret.team, kind: "bullet", life: 0.12, maxLife: 0.12 });
@@ -5176,7 +5353,15 @@ export default function Home() {
       return;
     }
     const objectiveTarget = (g.objectives || [])
-      .filter((objective) => objective.owner !== "enemy" && intelRelayOperational(objective))
+      // Relays are strategic points, not global knowledge. Under fog the AI
+      // may only commit to one after its own units have actually scouted it.
+      // The previous version searched the full objective list directly, so it
+      // could receive hidden coordinates and dispatch a squad at 30 seconds.
+      .filter((objective) =>
+        objective.owner !== "enemy" &&
+        intelRelayOperational(objective) &&
+        isVisibleFor(g, "enemy", objective, HIGH_GROUND_RADIUS),
+      )
       .sort((a, b) => Math.hypot(a.x - hq.x, a.y - hq.y) - Math.hypot(b.x - hq.x, b.y - hq.y))[0];
     const objectiveSquad = army.filter((unit) => !unit.garrisonedAt && !unit.enemy && !unit.target).slice(0, 2);
     if (g.time >= 30 && objectiveTarget && objectiveSquad.length >= 2) {
@@ -6196,58 +6381,74 @@ export default function Home() {
       mh = 82,
       mx = w - mw - 12,
       my = 12;
+    const satelliteOnline = satelliteUplinkOnline(g, "player");
     x.fillStyle = "rgba(2,6,8,.98)";
     x.fillRect(mx, my, mw, mh);
     x.strokeStyle = "#335a59";
     x.strokeRect(mx, my, mw, mh);
-    for (let row = 0; row < FOG_ROWS; row++)
-      for (let col = 0; col < FOG_COLS; col++) {
-        if (!g.fogSeen[row * FOG_COLS + col]) continue;
-        x.fillStyle = "rgba(58, 112, 106, .38)";
-        x.fillRect(mx + (col / FOG_COLS) * mw, my + (row / FOG_ROWS) * mh, mw / FOG_COLS + 1, mh / FOG_ROWS + 1);
+    if (!satelliteOnline) {
+      x.fillStyle = "rgba(9, 26, 28, .98)";
+      x.fillRect(mx + 1, my + 1, mw - 2, mh - 2);
+      x.textAlign = "center";
+      x.fillStyle = "#f6d366";
+      x.font = "800 9px system-ui";
+      x.fillText("TACTICAL MAP", mx + mw / 2, my + 31);
+      x.fillStyle = "#8fb4ae";
+      x.font = "800 7px system-ui";
+      x.fillText("SATELLITE UPLINK REQUIRED", mx + mw / 2, my + 46);
+      x.fillStyle = "#52726f";
+      x.font = "700 7px system-ui";
+      x.fillText("BUILD + COMPLETE TO SCAN", mx + mw / 2, my + 61);
+    } else {
+      for (let row = 0; row < FOG_ROWS; row++)
+        for (let col = 0; col < FOG_COLS; col++) {
+          if (!g.fogSeen[row * FOG_COLS + col]) continue;
+          x.fillStyle = "rgba(58, 112, 106, .38)";
+          x.fillRect(mx + (col / FOG_COLS) * mw, my + (row / FOG_ROWS) * mh, mw / FOG_COLS + 1, mh / FOG_ROWS + 1);
+        }
+      x.fillStyle = "rgba(118, 126, 120, .72)";
+      for (const ridge of TACTICAL_PLATEAUS) {
+        x.beginPath();
+        x.ellipse(mx + (ridge.x / W) * mw, my + (ridge.y / H) * mh, (ridge.rx / W) * mw, (ridge.ry / H) * mh, ridge.rotation, 0, Math.PI * 2);
+        x.fill();
       }
-    x.fillStyle = "rgba(118, 126, 120, .72)";
-    for (const ridge of TACTICAL_PLATEAUS) {
-      x.beginPath();
-      x.ellipse(mx + (ridge.x / W) * mw, my + (ridge.y / H) * mh, (ridge.rx / W) * mw, (ridge.ry / H) * mh, ridge.rotation, 0, Math.PI * 2);
-      x.fill();
+      for (const o of [...g.buildings, ...g.units]) {
+        if (isUnit(o) && o.garrisonedAt) continue;
+        if (o.team === "enemy" && !isVisible(g, o, 0)) continue;
+        x.fillStyle = o.team === "player" ? "#55d6b5" : "#ed526d";
+        x.fillRect(mx + (o.x / W) * mw - 2, my + (o.y / H) * mh - 2, 4, 4);
+      }
+      for (const objective of g.objectives || []) {
+        const intel = objectiveIntel(g, objective);
+        if (!intel.discovered) continue;
+        x.fillStyle = !intel.visible ? "#78918c" : !intelRelayOperational(objective) ? "#f08a5d" : objective.owner === "player" ? "#55d6b5" : objective.owner === "enemy" ? "#ed526d" : "#f6d366";
+        x.beginPath();
+        x.arc(mx + (objective.x / W) * mw, my + (objective.y / H) * mh, 3, 0, Math.PI * 2);
+        x.fill();
+      }
+      const activeAlerts = (g.attackAlerts || []).filter((alert) => alert.team === "player" && alert.expiresAt > g.time);
+      for (const alert of activeAlerts) {
+        const object = [...g.units, ...g.buildings].find((candidate) => candidate.id === alert.targetId && candidate.team === "player");
+        const ax = mx + (((object?.x ?? alert.x) / W) * mw);
+        const ay = my + (((object?.y ?? alert.y) / H) * mh);
+        const pulse = 7 + (Math.sin((g.time - alert.startedAt) * 10) + 1) * 2.5;
+        x.save();
+        x.strokeStyle = "#ff3657";
+        x.lineWidth = 2;
+        x.shadowColor = "#ff183f";
+        x.shadowBlur = 8;
+        x.globalAlpha = .7 + Math.sin((g.time - alert.startedAt) * 12) * .25;
+        x.strokeRect(ax - pulse / 2, ay - pulse / 2, pulse, pulse);
+        x.restore();
+      }
+      x.strokeStyle = "#f6d366";
+      x.strokeRect(
+        mx + ((g.camera.x - w / (2 * g.zoom)) / W) * mw,
+        my + ((g.camera.y - h / (2 * g.zoom)) / H) * mh,
+        (w / g.zoom / W) * mw,
+        (h / g.zoom / H) * mh,
+      );
     }
-    for (const o of [...g.buildings, ...g.units]) {
-      if (isUnit(o) && o.garrisonedAt) continue;
-      if (o.team === "enemy" && !isVisible(g, o, 0)) continue;
-      x.fillStyle = o.team === "player" ? "#55d6b5" : "#ed526d";
-      x.fillRect(mx + (o.x / W) * mw - 2, my + (o.y / H) * mh - 2, 4, 4);
-    }
-    for (const objective of g.objectives || []) {
-      const intel = objectiveIntel(g, objective);
-      if (!intel.discovered) continue;
-      x.fillStyle = !intel.visible ? "#78918c" : !intelRelayOperational(objective) ? "#f08a5d" : objective.owner === "player" ? "#55d6b5" : objective.owner === "enemy" ? "#ed526d" : "#f6d366";
-      x.beginPath();
-      x.arc(mx + (objective.x / W) * mw, my + (objective.y / H) * mh, 3, 0, Math.PI * 2);
-      x.fill();
-    }
-    const activeAlerts = (g.attackAlerts || []).filter((alert) => alert.team === "player" && alert.expiresAt > g.time);
-    for (const alert of activeAlerts) {
-      const object = [...g.units, ...g.buildings].find((candidate) => candidate.id === alert.targetId && candidate.team === "player");
-      const ax = mx + (((object?.x ?? alert.x) / W) * mw);
-      const ay = my + (((object?.y ?? alert.y) / H) * mh);
-      const pulse = 7 + (Math.sin((g.time - alert.startedAt) * 10) + 1) * 2.5;
-      x.save();
-      x.strokeStyle = "#ff3657";
-      x.lineWidth = 2;
-      x.shadowColor = "#ff183f";
-      x.shadowBlur = 8;
-      x.globalAlpha = .7 + Math.sin((g.time - alert.startedAt) * 12) * .25;
-      x.strokeRect(ax - pulse / 2, ay - pulse / 2, pulse, pulse);
-      x.restore();
-    }
-    x.strokeStyle = "#f6d366";
-    x.strokeRect(
-      mx + ((g.camera.x - w / (2 * g.zoom)) / W) * mw,
-      my + ((g.camera.y - h / (2 * g.zoom)) / H) * mh,
-      (w / g.zoom / W) * mw,
-      (h / g.zoom / H) * mh,
-    );
   }
   function bar(
     x: CanvasRenderingContext2D,
@@ -6423,6 +6624,12 @@ export default function Home() {
     // The minimap is an interactive navigation control, not part of the world.
     const mw = 132, mh = 82, mx = canvas.current!.clientWidth - mw - 12, my = 12;
     if (!p.drag && sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh) {
+      if (!satelliteUplinkOnline(g, "player")) {
+        g.message = "TACTICAL MAP LOCKED — complete the Satellite Uplink to scan the battlefield.";
+        pointer.current = null;
+        sync();
+        return;
+      }
       const alerts = (g.attackAlerts || [])
         .filter((alert) => alert.team === "player" && alert.expiresAt > g.time)
         .sort((a, b) => b.startedAt - a.startedAt);
@@ -6562,7 +6769,7 @@ export default function Home() {
         const selectedWorkers = selectedUnits.filter((unit) => unit.type === "worker");
         if (g.mode === "select" && selectedWorkers.length) {
           selectedWorkers.forEach((worker) => assignWorkerToPendingConstruction(worker, hitWireframe.id));
-          g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to the ${hitWireframe.type} wireframe.`;
+          g.message = `${selectedWorkers.length} Worker${selectedWorkers.length === 1 ? "" : "s"} assigned to the ${buildingDisplayName(hitWireframe.type)} wireframe.`;
           lastTap.current = null;
           pointer.current = null;
           sync();
@@ -6570,7 +6777,7 @@ export default function Home() {
         }
         g.selected = [hitWireframe.id];
         g.mode = "select";
-        g.message = `${hitWireframe.type.toUpperCase()} wireframe selected · cancel it below or leave it in the Worker queue.`;
+        g.message = `${buildingDisplayName(hitWireframe.type)} wireframe selected · cancel it below or leave it in the Worker queue.`;
         lastTap.current = { id: hitWireframe.id, time: performance.now() };
         pointer.current = null;
         sync();
@@ -6581,7 +6788,7 @@ export default function Home() {
       // commands instead of silently ordering the units toward it.
       if (g.mode === "select" && buildingTap && selectedUnits.length) {
         g.selected = [buildingTap.id];
-        g.message = `${buildingTap.type === "turret" ? "SENTRY TURRET" : buildingTap.type.toUpperCase()} selected.`;
+        g.message = `${buildingDisplayName(buildingTap.type)} selected.`;
         lastTap.current = { id: buildingTap.id, time: performance.now() };
         pointer.current = null;
         sync();
@@ -6636,7 +6843,7 @@ export default function Home() {
           }
           g.message =
             building && ["hq", "barracks", "foundry", "intelligence", "hangar"].includes(building.type)
-              ? `${building.type.toUpperCase()} selected · choose Set Waypoint in the command bar.`
+              ? `${buildingDisplayName(building.type)} selected · choose Set Waypoint in the command bar.`
               : "";
           lastTap.current = { id: hit.id, time: now };
         }
@@ -6729,7 +6936,7 @@ export default function Home() {
         ? "RESEARCH TRADE NETWORK"
         : type === "cipher" && ui.cipherCount >= CIPHER_MAX
           ? `LIMIT ${CIPHER_MAX} REACHED`
-      : `${source === "hq" ? "HQ" : source === "barracks" ? "BARRACKS" : source === "foundry" ? "FOUNDRY" : source === "hangar" ? "HANGAR" : "INTEL CENTER"} BUSY`;
+      : `${source === "hq" ? "HQ" : source === "barracks" ? "BARRACKS" : source === "foundry" ? "FOUNDRY" : source === "hangar" ? "HANGAR" : "SATELLITE UPLINK"} BUSY`;
     return (
       <button
         key={type}
@@ -6762,7 +6969,7 @@ export default function Home() {
             <span className="home-sigil">FC</span>
             <small>TACTICAL NETWORK // ALPHA</small>
             <h1>FRONTIER<br />COMMAND</h1>
-            <p>Balance credits, alloy, and intel. Control the map. Destroy the enemy command core.</p>
+            <p>Build your economy, bring the Satellite Uplink online, then turn intel into battlefield control.</p>
             <section className="command-profile" aria-label={`Command level ${commandProgress.level}`}>
               <div className="command-profile-heading">
                 <span><small>COMMAND DEVELOPMENT</small><b>LEVEL {commandProgress.level}</b></span>
@@ -7000,7 +7207,7 @@ export default function Home() {
               <div className="pause-objectives">
                 <small>PRIMARY OBJECTIVES</small>
                 <b>DESTROY THE ENEMY COMMAND CORE</b>
-                <span>SECURE INTEL RELAYS · 4 TROOPER SLOTS · +5% DAMAGE EACH</span>
+                <span>BUILD THE SATELLITE UPLINK · SECURE RELAYS · +5% DAMAGE EACH</span>
                 <span>ARMY {ui.army} · UPKEEP {Math.ceil(ui.upkeep)} CREDITS/MIN AFTER {UPKEEP_SOFT_CAP}</span>
               </div>
               {network.role === "solo" && <div className="difficulty-readout">
@@ -7140,7 +7347,7 @@ export default function Home() {
             ) : ui.selectedBuilding ? (
               <div className="selection-command-header">
                 <span className={`command-tab-art building-${ui.selectedBuilding}`} aria-hidden="true" />
-                <b>{ui.selectedBuilding === "hq" && ui.hqPacked ? "COMMAND CRAWLER" : ui.selectedBuilding === "hq" ? "HEADQUARTERS" : ui.selectedBuilding === "turret" ? "SENTRY TURRET" : ui.selectedBuilding === "exchange" ? "TRADE EXCHANGE" : ui.selectedBuilding === "foundry" ? "ARMOR FOUNDRY" : ui.selectedBuilding === "intelligence" ? "INTELLIGENCE CENTER" : ui.selectedBuilding === "hangar" ? "DRONE HANGAR" : ui.selectedBuilding.toUpperCase()}</b>
+                <b>{ui.selectedBuilding === "hq" && ui.hqPacked ? "COMMAND CRAWLER" : buildingDisplayName(ui.selectedBuilding)}</b>
                 <small>{ui.selectedConstruction ? "CONSTRUCTION WIREFRAME" : ui.selectedBuilding === "hq" && ui.hqRelocation ? `${ui.hqRelocation.mode === "pack" ? "PACKING" : "DEPLOYING"} · ${Math.ceil(ui.hqRelocation.duration - ui.hqRelocation.elapsed)}s` : ui.selectedBuilding === "hq" && ui.hqPacked ? "MOBILE · COMMAND SYSTEMS OFFLINE" : ui.selectedBuilding === "hq" ? "COMMAND & WORKERS" : ui.selectedBuilding === "intelligence" ? "CIPHERS & RESEARCH" : ["barracks", "foundry", "hangar"].includes(ui.selectedBuilding) ? "UNIT PRODUCTION" : ui.selectedBuilding === "exchange" ? `+${Math.round(ui.exchangeIncome * 60)} CREDITS/MIN NETWORK` : "STRUCTURE ORDERS"}</small>
               </div>
             ) : (
@@ -7164,10 +7371,10 @@ export default function Home() {
                   <i>⬢</i><span className="command-art building-foundry" aria-hidden="true" /><span>ARMOR FOUNDRY<small>{!ui.hasBarracks ? "REQUIRES BARRACKS" : ui.alloy < BUILD_COST.foundry ? `NEED ${BUILD_COST.foundry - ui.alloy} MORE ALLOY` : `${BUILD_COST.foundry} ALLOY · TANK PRODUCTION`}</small></span>
                 </button>
                 <button disabled={!ui.hasBarracks || ui.alloy < BUILD_COST.intelligence} className={`${ui.buildMode === "build-intelligence" ? "placing " : ""}${!ui.hasBarracks ? "locked" : ui.alloy < BUILD_COST.intelligence ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-intelligence"} onClick={() => action("build-intelligence")}>
-                  <i>⌬</i><span className="command-art building-intelligence" aria-hidden="true" /><span>INTELLIGENCE CENTER<small>{!ui.hasBarracks ? "REQUIRES BARRACKS" : ui.alloy < BUILD_COST.intelligence ? `NEED ${BUILD_COST.intelligence - ui.alloy} MORE ALLOY` : `${BUILD_COST.intelligence} ALLOY · RESEARCH`}</small></span>
+                  <i>⌬</i><span className="command-art building-intelligence" aria-hidden="true" /><span>SATELLITE UPLINK<small>{!ui.hasBarracks ? "REQUIRES BARRACKS" : ui.alloy < BUILD_COST.intelligence ? `NEED ${BUILD_COST.intelligence - ui.alloy} MORE ALLOY` : `${BUILD_COST.intelligence} ALLOY · MAP + INTEL`}</small></span>
                 </button>
                 <button disabled={!ui.hasIntelligence || ui.alloy < BUILD_COST.hangar} className={`${ui.buildMode === "build-hangar" ? "placing " : ""}${!ui.hasIntelligence ? "locked" : ui.alloy < BUILD_COST.hangar ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-hangar"} onClick={() => action("build-hangar")}>
-                  <i>✦</i><span className="command-art building-hangar" aria-hidden="true" /><span>DRONE HANGAR<small>{!ui.hasIntelligence ? "REQUIRES INTEL CENTER" : ui.alloy < BUILD_COST.hangar ? `NEED ${BUILD_COST.hangar - ui.alloy} MORE ALLOY` : `${BUILD_COST.hangar} ALLOY · AIR PRODUCTION`}</small></span>
+                  <i>✦</i><span className="command-art building-hangar" aria-hidden="true" /><span>DRONE HANGAR<small>{!ui.hasIntelligence ? "REQUIRES SATELLITE UPLINK" : ui.alloy < BUILD_COST.hangar ? `NEED ${BUILD_COST.hangar - ui.alloy} MORE ALLOY` : `${BUILD_COST.hangar} ALLOY · AIR PRODUCTION`}</small></span>
                 </button>
                 <button disabled={ui.alloy < BUILD_COST.turret} className={`${ui.buildMode === "build-turret" ? "placing " : ""}${ui.alloy < BUILD_COST.turret ? "unaffordable" : ""}`} aria-pressed={ui.buildMode === "build-turret"} onClick={() => action("build-turret")} title={ui.alloy < BUILD_COST.turret ? `${BUILD_COST.turret - ui.alloy} more alloy required` : undefined}>
                   <kbd>T</kbd><span className="command-art building-turret" aria-hidden="true" /><span>SENTRY TURRET<small>{ui.alloy < BUILD_COST.turret ? `NEED ${BUILD_COST.turret - ui.alloy} MORE ALLOY` : `${BUILD_COST.turret} ALLOY · QUEUE · 15s DEPLOY`}</small></span>
@@ -7269,7 +7476,7 @@ export default function Home() {
                     ? ui.enemyDoctrine === "air" ? "AIR SUPERIORITY DETECTED"
                       : ui.enemyDoctrine === "armor" ? "ARMORED COMMAND DETECTED"
                         : "NO COMPLETED DOCTRINE DETECTED"
-                    : "UNKNOWN · SCOUT THE ENEMY INTEL CENTER"}</small>
+                    : "UNKNOWN · SCOUT THE ENEMY SATELLITE UPLINK"}</small>
                 </div>
               </>
             ) : ui.selectedBuilding === "hq" ? (
@@ -7295,7 +7502,7 @@ export default function Home() {
             ) : ui.selectedBuilding === "hangar" ? (
               ui.productionBuilding === "hangar" ? <>{productionButton("drone")}<button onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>DRONE DEPLOYMENT</small></span></button><button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL HANGAR<small>50% · {Math.floor(BUILD_COST.hangar / 2)} ALLOY</small></span></button></> : null
             ) : ui.selectedBuilding === "intelligence" ? (
-              ui.productionBuilding === "intelligence" ? <>{productionButton("cipher")}<button onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>CIPHER DEPLOYMENT</small></span></button><button onClick={() => setCommandTab("tech")}><kbd>Q</kbd><i>⌬</i><span>RESEARCH<small>SPEND INTEL ON UPGRADES</small></span></button><button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL INTEL CENTER<small>50% · {Math.floor(BUILD_COST.intelligence / 2)} ALLOY</small></span></button></> : null
+              ui.productionBuilding === "intelligence" ? <>{productionButton("cipher")}<button onClick={() => action("rally")}><kbd>G</kbd><i>⌖</i><span>SET WAYPOINT<small>CIPHER DEPLOYMENT</small></span></button><button onClick={() => setCommandTab("tech")}><kbd>Q</kbd><i>⌬</i><span>RESEARCH<small>SPEND INTEL ON UPGRADES</small></span></button><button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL SATELLITE UPLINK<small>50% · {Math.floor(BUILD_COST.intelligence / 2)} ALLOY</small></span></button></> : null
             ) : ui.selectedBuilding ? (
               <button className="sell" onClick={() => action("sell")}><i>✕</i><span>SELL {ui.selectedBuilding === "turret" ? "SENTRY" : ui.selectedBuilding.toUpperCase()}<small>50% REFUND</small></span></button>
             ) : (

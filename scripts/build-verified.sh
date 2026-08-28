@@ -4,7 +4,11 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${SITES_ENV_READY:-}" != "1" ]]; then
-  exec "${script_dir}/sites-env.sh" -- "$0" "$@"
+  # Railway and other container builders can mount the checkout with script
+  # execution disabled even when Git preserves the executable bit. Invoke the
+  # environment wrapper through Bash so the build does not depend on a direct
+  # exec of a repository file.
+  exec bash "${script_dir}/sites-env.sh" -- "$0" "$@"
 fi
 
 command -v timeout >/dev/null || {
@@ -25,4 +29,4 @@ timeout \
   "${SITES_BUILD_TIMEOUT:-3m}" \
   "${vinext}" build
 
-"${script_dir}/validate-artifact.sh"
+bash "${script_dir}/validate-artifact.sh"

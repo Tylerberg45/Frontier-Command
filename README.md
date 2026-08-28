@@ -5,28 +5,45 @@ Canvas, and Vinext. The simulation uses serializable data so its balance,
 production, progression, and mission rules can later move into a Unity client
 without tying them to the current renderer.
 
+## Continue the project
+
+Start with [the current game state](docs/GAME_STATE.md). Repository documentation and source—not conversation memory—own the exact project state.
+
+- [Design decisions](docs/DECISIONS.md)
+- [Active bugs](docs/BUGS.md)
+- [Current roadmap](docs/ROADMAP.md)
+- [Release history](docs/RELEASES.md)
+- [Release test checklist](docs/TEST_CHECKLIST.md)
+- [Art and sprite registry](docs/ASSETS.md)
+- [Release process](docs/RELEASE_PROCESS.md)
+
+**Hard rule:** a release is not finished until the exact released source exists in both the Sites repository and [GitHub](https://github.com/Tylerberg45/Frontier-Command).
+
 ## Production Tree
 
 ```text
 Headquarters
 └── Barracks
     ├── Armor Foundry
-    └── Intelligence Center
+    └── Satellite Uplink
         └── Drone Hangar
 ```
 
 - Headquarters produces Workers and owns Fortify Base.
 - Barracks produces Troopers.
 - Armor Foundry produces Tanks and future ground vehicles.
-- Intelligence Center produces Ciphers and owns match research.
+- Satellite Uplink unlocks the tactical map and relay intel, produces Ciphers,
+  and owns match research. Its internal serialized type remains `intelligence`
+  for save compatibility.
 - Drone Hangar produces Drones and future air units.
 
-Completed research persists if the Intelligence Center is destroyed; active
+Completed research persists if the Satellite Uplink is destroyed; active
 research pauses until one is operational again. Legacy Barracks queues remain
 valid so older saves do not lose Tanks or Drones already in production.
 
 ## Product Roadmaps
 
+- [Current roadmap](docs/ROADMAP.md)
 - [Progression roadmap](docs/PROGRESSION_ROADMAP.md)
 
 ## Prerequisites

@@ -1012,12 +1012,26 @@ canvas {
   letter-spacing: 0.08em;
   overflow-wrap: anywhere;
 }
+.actions button > span:last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .actions small {
   display: block;
   color: var(--gold);
   margin-top: 5px;
   line-height: 1.2;
   white-space: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 footer {
   display: flex;
