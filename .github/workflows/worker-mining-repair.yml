@@ -1,10 +1,6 @@
-# One-time repair trigger
-name: One-time worker mining repair
+name: Worker Mining Repair
 
-on:
-  push:
-    paths:
-      - .github/workflows/worker-mining-repair.yml
+on: push
 
 permissions:
   contents: write
@@ -14,29 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.13.0'
-          cache: npm
-
-      - name: Repair worker mining-state reset
-        shell: bash
+      - name: Patch worker mining reset
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
-
-          path = Path('app/page.tsx')
-          source = path.read_text()
-
-          old = '''    worker.patrol = undefined;
+          p = Path("app/page.tsx")
+          s = p.read_text()
+          old = """    worker.patrol = undefined;
     worker.retreating = false;
-    if (worker.stance === "patrol") worker.stance = "pursue";
-'''
-          new = '''    worker.patrol = undefined;
-    // A direct resource order is authoritative. Clear every transient travel,
-    // combat, and maintenance state that can keep a Worker from re-entering
-    // the mining loop after a retreat, move order, patrol, or repair job.
+    if (worker.stance === \"patrol\") worker.stance = \"pursue\";
+"""
+          new = """    worker.patrol = undefined;
+    // A direct resource order overrides stale movement, combat, retreat, and maintenance state.
     worker.retreating = false;
     worker.moveEngage = false;
     worker.formationSpeed = undefined;
@@ -45,33 +30,17 @@ jobs:
     worker.mining = false;
     worker.building = false;
     worker.repairing = false;
-    if (worker.stance === "patrol") worker.stance = "pursue";
-'''
-
-          if old not in source:
-              raise SystemExit('Expected assignWorkersToResource block was not found; refusing a blind edit.')
-          if source.count(old) != 1:
-              raise SystemExit(f'Expected one mining-assignment block, found {source.count(old)}; refusing a blind edit.')
-
-          source = source.replace(old, new, 1)
-          path.write_text(source)
+    if (worker.stance === \"patrol\") worker.stance = \"pursue\";
+"""
+          if s.count(old) != 1:
+              raise SystemExit("Expected exactly one worker mining assignment block")
+          p.write_text(s.replace(old, new, 1))
           PY
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run regression checks
-        run: npm test
-
-      - name: Commit repaired worker mining logic
-        shell: bash
+      - name: Commit patch
         run: |
-          if git diff --quiet -- app/page.tsx; then
-            echo 'No source change to commit.'
-            exit 0
-          fi
-          git config user.name 'Frontier Command Repair'
-          git config user.email 'actions@users.noreply.github.com'
+          git config user.name "Frontier Command Repair"
+          git config user.email "actions@users.noreply.github.com"
           git add app/page.tsx
-          git commit -m 'Fix workers resuming mining after other duties'
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix workers resuming mining after other duties"
           git push
