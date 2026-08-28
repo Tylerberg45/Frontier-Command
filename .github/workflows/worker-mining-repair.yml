@@ -1,0 +1,76 @@
+name: One-time worker mining repair
+
+on:
+  push:
+    paths:
+      - .github/workflows/worker-mining-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+
+      - name: Repair worker mining-state reset
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/page.tsx')
+          source = path.read_text()
+
+          old = '''    worker.patrol = undefined;
+    worker.retreating = false;
+    if (worker.stance === "patrol") worker.stance = "pursue";
+'''
+          new = '''    worker.patrol = undefined;
+    // A direct resource order is authoritative. Clear every transient travel,
+    // combat, and maintenance state that can keep a Worker from re-entering
+    // the mining loop after a retreat, move order, patrol, or repair job.
+    worker.retreating = false;
+    worker.moveEngage = false;
+    worker.formationSpeed = undefined;
+    worker.garrisonTarget = undefined;
+    worker.lastCombatAt = undefined;
+    worker.mining = false;
+    worker.building = false;
+    worker.repairing = false;
+    if (worker.stance === "patrol") worker.stance = "pursue";
+'''
+
+          if old not in source:
+              raise SystemExit('Expected assignWorkersToResource block was not found; refusing a blind edit.')
+          if source.count(old) != 1:
+              raise SystemExit(f'Expected one mining-assignment block, found {source.count(old)}; refusing a blind edit.')
+
+          source = source.replace(old, new, 1)
+          path.write_text(source)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run regression checks
+        run: npm test
+
+      - name: Commit repaired worker mining logic
+        shell: bash
+        run: |
+          if git diff --quiet -- app/page.tsx; then
+            echo 'No source change to commit.'
+            exit 0
+          fi
+          git config user.name 'Frontier Command Repair'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/page.tsx
+          git commit -m 'Fix workers resuming mining after other duties'
+          git push
