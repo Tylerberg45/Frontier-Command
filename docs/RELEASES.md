@@ -2,6 +2,15 @@
 
 Record every production release with its exact Sites source commit and exact GitHub mirror commit. The two repositories have separate histories, so their hashes are expected to differ even when their trees match.
 
+## v105
+
+- **Released:** 2026-08-28
+- **Sites source commit:** `7b992d88321c6e2217ca2034c2273fa159616b6f`
+- **GitHub stable mirror commit:** `0ad283b1f4cc8831124163d77086078788695e19`
+- **Changes:** Corrected all mirrored horizontal Worker headings by remapping the active idle, walking, and mining sheets. Made one or more operational Satellite Uplinks provide a fixed, non-stacking 0.5 intel/second team feed for both player and AI. Removed intel income from Intel Relays while retaining their optional +5% damage, garrison, and shield roles. Recorded standing permission to publish requested source changes and synchronize GitHub unless explicitly limited.
+- **Verification:** Sites production build and artifact validation passed; lint completed with no errors; seven automated tests and project-document validation passed; all 105 release blobs and modes matched the GitHub tree exactly; both GitHub Actions workflows passed; production deployment status succeeded.
+- **Live follow-up needed:** Confirm all eight Worker headings on device and confirm Uplink income starts without Relay control, does not stack, and stops when no operational Uplink remains.
+
 ## v103
 
 - **Released:** 2026-08-28

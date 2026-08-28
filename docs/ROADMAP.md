@@ -4,8 +4,8 @@ This is the prioritized roadmap. Keep it short enough to guide the next work ses
 
 ## NOW
 
-- Ship and verify `FC-002`: Worker idle/walk/mining headings, especially southeast and southwest.
-- Ship and verify `FC-003`: direct non-stacking Satellite Uplink intel for player and AI without Relay ownership.
+- Verify the live v105 repair for `FC-002`: Worker idle/walk/mining headings, especially southeast and southwest.
+- Verify the live v105 repair for `FC-003`: direct non-stacking Satellite Uplink intel without Relay ownership.
 - Confirm the construction tray no longer clips or stacks words vertically on iPad and iPhone portrait widths.
 - Keep Sites/GitHub synchronization and the verified release tag as permanent release gates.
 

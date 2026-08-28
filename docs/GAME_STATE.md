@@ -1,27 +1,27 @@
 # Frontier Command — Game State
 
-> Read this file first in every new work session. Last updated: 2026-08-28 after the v103 production verification.
+> Read this file first in every new work session. Last updated: 2026-08-28 after the v105 production verification.
 
 ## Current release
 
 | Field | Value |
 | --- | --- |
-| Current production build | **v103** |
+| Current production build | **v105** |
 | Production status | Live and verified |
 | Live URL | https://frontier-command.tylerberg45.chatgpt.site |
-| Sites production source commit | `a9965d127935624baa7818421b370f006f346688` |
-| GitHub stable mirror commit | `38e1441f8d08f7485d4f9700a70c588ee11c8ffb` |
+| Sites production source commit | `7b992d88321c6e2217ca2034c2273fa159616b6f` |
+| GitHub stable mirror commit | `0ad283b1f4cc8831124163d77086078788695e19` |
 | GitHub repository | https://github.com/Tylerberg45/Frontier-Command |
 | Runtime | React 19 + TypeScript + Canvas + Vinext/Cloudflare |
-| Last automated verification | 2026-08-28: build, lint, source invariants, GitHub blob comparison, and production deployment verification passed for v103 |
+| Last automated verification | 2026-08-28: build/artifact validation, lint, seven tests, documentation validation, exact GitHub tree comparison, GitHub Actions, and production deployment verification passed for v105 |
 
 The Sites repository and GitHub repository have separate histories. Compare trees/content, not commit IDs, when verifying that they match.
 
 ## Current work session
 
-- **Currently working on:** the next gameplay release after v103: correct mirrored Worker headings and make the Satellite Uplink itself generate intel.
-- **Live v103 confirmation:** Workers resumed their assigned duty correctly on the user’s iPhone test, closing `FC-001`.
-- **Prepared regressions under verification:** `FC-002` remaps the mirrored Worker direction sheets; `FC-003` moves the non-stacking 0.5 intel/second feed from Relays to the operational Satellite Uplink.
+- **Currently working on:** live-device confirmation of the v105 Worker direction remap and direct Satellite Uplink intel feed.
+- **Shipped in v105:** `FC-002` remaps the mirrored Worker direction sheets; `FC-003` moves the non-stacking 0.5 intel/second feed from Relays to the operational Satellite Uplink.
+- **Release workflow:** requested source changes carry standing permission to publish the existing public Site and synchronize GitHub unless the user explicitly asks to keep a change unpublished.
 
 ## What exists now
 
@@ -102,16 +102,16 @@ Headquarters
 
 ## Known problems and risks
 
-- The Worker mining regression was confirmed repaired on live v103. The next candidate still needs live confirmation that all eight Worker sprite headings are correct.
-- The next candidate moves intel production to the Uplink itself; v103 production still requires Relay control until that candidate is deployed.
+- The Worker mining regression was confirmed repaired on live v103. v105 still needs live confirmation that all eight Worker sprite headings are correct.
+- Direct Uplink intel production is live in v105 but still needs a device smoke test with no owned or garrisoned Relay.
 - The construction tray overflow fix shipped in v102 but needs confirmation on the same iPad/iPhone widths that showed the original clipped text.
 - Automated coverage currently proves buildability and rendered metadata, not the game simulation. The manual release checklist remains mandatory until simulation tests are added.
 - Sites and GitHub are separate repositories. A Sites deployment can succeed while GitHub remains stale unless the release process is followed.
 
 ## Next priorities
 
-1. Deploy and verify the Worker direction remap, especially southeast/southwest and east/west.
-2. Verify direct Uplink intel generation for player and AI without owning or garrisoning a Relay.
+1. Verify the live Worker direction remap, especially southeast/southwest and east/west.
+2. Verify live direct Uplink intel generation without owning or garrisoning a Relay, plus non-stacking and shutoff behavior.
 3. Continue the 2.5D sprite pass beyond the current Tank while preserving eight-direction readability and unit scale.
 4. Add deterministic simulation tests for mining, construction queues, fog-limited AI knowledge, save hydration, and production.
 5. Run a focused private multiplayer regression pass for Tactical Fog, room reconnect/failure behavior, and host/guest perspective swapping.
